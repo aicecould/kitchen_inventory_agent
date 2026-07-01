@@ -23,7 +23,7 @@ class KitchenPipeline:
     settings: Settings
     profile: UserProfile
     inventory: InventoryRepository
-    agent: KitchenAgent
+    agent: KitchenAgent | None
     vision: VisionApiClient | None
 
     def process_request(
@@ -43,6 +43,9 @@ class KitchenPipeline:
                 blocked=not audit.passed,
                 audit_reason=audit.reason,
             )
+
+        if self.agent is None:
+            raise ValueError("Missing configuration in .env: deepseek_api_key")
 
         ingredients: list[Ingredient] = []
         if image_bytes is not None:
@@ -92,7 +95,11 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
         timeout=settings.http_timeout_seconds,
     )
     recipes = RecipeRouter(spoonacular, themealdb, translator)
-    agent = build_agent(settings, inventory, recipes)
+    agent = (
+        build_agent(settings, inventory, recipes)
+        if settings.deepseek_api_key
+        else None
+    )
 
     vision: VisionApiClient | None = None
     if settings.baidu_image_api_key and settings.baidu_image_secret_key:

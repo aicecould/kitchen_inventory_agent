@@ -44,6 +44,14 @@ python main.py --text "识别图片中的食材并推荐菜谱" --image .\sample
 python main.py --text "推荐一道菜" --language zh
 ```
 
+启动展示页面：
+
+```powershell
+uvicorn app.web:app --reload
+```
+
+然后访问 `http://127.0.0.1:8000`。页面支持文字输入、图片上传、语言选择、库存查看、Agent 回答与工具调用轨迹展示。
+
 所有密钥统一保存在 `.env`。该文件已由 `.gitignore` 排除；`.env.example` 只保存字段名和非敏感默认值。
 
 需要配置的服务凭据：
