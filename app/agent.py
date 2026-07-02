@@ -11,6 +11,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
+from app.actions import InventoryActionService
 from app.audit import regex_audit
 from app.config import Settings
 from app.context import AgentContext, AgentResult
@@ -24,6 +25,7 @@ class KitchenAgent:
     model: ChatOpenAI
     inventory: InventoryRepository
     recipes: RecipeRouter
+    actions: InventoryActionService
     recursion_limit: int = 10
 
     def run(self, context: AgentContext, target_language: str = "zh") -> AgentResult:
@@ -53,6 +55,7 @@ class KitchenAgent:
     def _create_tools(self, context: AgentContext, target_language: str) -> list[Any]:
         repository = self.inventory
         recipe_router = self.recipes
+        action_service = self.actions
 
         @tool
         def list_inventory() -> list[dict[str, object]]:
@@ -65,21 +68,37 @@ class KitchenAgent:
             return repository.get_item(name)
 
         @tool
-        def add_inventory_item(name: str, quantity: float, unit: str) -> dict[str, object]:
-            """Add a positive quantity of an ingredient to inventory."""
-            return repository.add_item(name, quantity, unit)
+        def propose_add_inventory_item(
+            name: str, quantity: float, unit: str
+        ) -> dict[str, object]:
+            """Propose adding an ingredient. This never writes until the user confirms."""
+            return action_service.propose(
+                context.user_id,
+                "inventory.add",
+                {"name": name, "quantity": quantity, "unit": unit},
+            ).model_dump(mode="json")
 
         @tool
-        def update_inventory_item(name: str, quantity: float, unit: str) -> dict[str, object]:
-            """Set the exact quantity and unit of an existing inventory item."""
-            return repository.update_item(name, quantity, unit)
+        def propose_update_inventory_item(
+            name: str, quantity: float, unit: str
+        ) -> dict[str, object]:
+            """Propose setting inventory quantity. This never writes until confirmation."""
+            return action_service.propose(
+                context.user_id,
+                "inventory.update",
+                {"name": name, "quantity": quantity, "unit": unit},
+            ).model_dump(mode="json")
 
         @tool
-        def remove_inventory_item(
+        def propose_remove_inventory_item(
             name: str, quantity: float | None = None
         ) -> dict[str, object]:
-            """Remove a quantity of an ingredient, or remove it entirely when quantity is omitted."""
-            return repository.remove_item(name, quantity)
+            """Propose reducing or deleting inventory. Confirmation is always required."""
+            return action_service.propose(
+                context.user_id,
+                "inventory.remove",
+                {"name": name, "quantity": quantity},
+            ).model_dump(mode="json")
 
         @tool
         def search_recipes(ingredients: list[str]) -> list[dict[str, object]]:
@@ -94,9 +113,9 @@ class KitchenAgent:
         return [
             list_inventory,
             get_inventory_item,
-            add_inventory_item,
-            update_inventory_item,
-            remove_inventory_item,
+            propose_add_inventory_item,
+            propose_update_inventory_item,
+            propose_remove_inventory_item,
             search_recipes,
         ]
 
@@ -170,6 +189,7 @@ def build_agent(
     settings: Settings,
     inventory: InventoryRepository,
     recipes: RecipeRouter,
+    actions: InventoryActionService,
 ) -> KitchenAgent:
     settings.require("deepseek_api_key", "deepseek_model", "deepseek_base_url")
     model = ChatOpenAI(
@@ -184,6 +204,7 @@ def build_agent(
         model=model,
         inventory=inventory,
         recipes=recipes,
+        actions=actions,
         recursion_limit=settings.agent_recursion_limit,
     )
 

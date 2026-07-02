@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.actions import InventoryActionService, PendingActionRepository
 from app.adapters.recipe_api import SpoonacularClient, TheMealDbClient
 from app.adapters.translation_api import TranslationApiClient
 from app.adapters.vision_api import VisionApiClient
@@ -11,7 +12,7 @@ from app.agent import KitchenAgent, build_agent
 from app.audit import regex_audit
 from app.config import Settings, get_settings
 from app.context import AgentContext, AgentResult, Ingredient
-from app.intent import match_intent
+from app.intent import match_intent, match_simple_inventory_operation
 from app.memory import UserProfile, read_user_profile
 from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
@@ -23,6 +24,7 @@ class KitchenPipeline:
     settings: Settings
     profile: UserProfile
     inventory: InventoryRepository
+    actions: InventoryActionService
     agent: KitchenAgent | None
     vision: VisionApiClient | None
 
@@ -42,6 +44,21 @@ class KitchenPipeline:
                 content=content if audit.passed else "输出未通过安全检查。",
                 blocked=not audit.passed,
                 audit_reason=audit.reason,
+            )
+
+        simple_operation = match_simple_inventory_operation(text)
+        if simple_operation is not None:
+            action = self.actions.propose(
+                user_id, simple_operation.operation, simple_operation.arguments
+            )
+            return AgentResult(
+                content=f"已生成待确认操作：{action.summary}。确认前库存不会改变。",
+                tool_history=[
+                    {
+                        "tool": f"propose_{simple_operation.operation.replace('.', '_')}",
+                        "result": action.model_dump(mode="json"),
+                    }
+                ],
             )
 
         if self.agent is None:
@@ -71,6 +88,13 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
 
     inventory = InventoryRepository(settings.inventory_db_path)
     inventory.initialize()
+    action_repository = PendingActionRepository(settings.inventory_db_path)
+    action_repository.initialize()
+    actions = InventoryActionService(
+        action_repository,
+        inventory,
+        ttl_minutes=settings.pending_action_ttl_minutes,
+    )
 
     translator: TranslationApiClient | None = None
     if settings.baidu_translate_app_id and settings.baidu_translate_secret_key:
@@ -96,7 +120,7 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
     )
     recipes = RecipeRouter(spoonacular, themealdb, translator)
     agent = (
-        build_agent(settings, inventory, recipes)
+        build_agent(settings, inventory, recipes, actions)
         if settings.deepseek_api_key
         else None
     )
@@ -110,4 +134,4 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
             timeout=settings.http_timeout_seconds,
         )
 
-    return KitchenPipeline(settings, profile, inventory, agent, vision)
+    return KitchenPipeline(settings, profile, inventory, actions, agent, vision)

@@ -13,6 +13,8 @@ const toolTrace = document.querySelector("#tool-trace");
 const inventoryList = document.querySelector("#inventory-list");
 const globalStatus = document.querySelector("#global-status");
 const serviceGrid = document.querySelector("#service-grid");
+const confirmationSection = document.querySelector("#confirmation-section");
+const confirmationList = document.querySelector("#confirmation-list");
 
 const serviceNames = {
   deepseek: ["DeepSeek", "Agent / Tool Calling"],
@@ -106,6 +108,56 @@ async function loadInventory() {
   }
 }
 
+async function loadPendingActions() {
+  try {
+    const response = await fetch("/api/actions");
+    const data = await response.json();
+    const actions = data.actions || [];
+    confirmationSection.hidden = actions.length === 0;
+    confirmationList.innerHTML = actions.map((action) => `
+      <article class="confirmation-card" data-action-id="${escapeHtml(action.action_id)}">
+        <div class="confirmation-seal">待<br>确认</div>
+        <div class="confirmation-copy">
+          <span>${escapeHtml(operationLabel(action.operation))}</span>
+          <h3>${escapeHtml(action.summary)}</h3>
+          <small>${escapeHtml(action.action_id)} · 过期时间 ${formatTime(action.expires_at)}</small>
+        </div>
+        <div class="confirmation-actions">
+          <button type="button" class="cancel-action" data-action="cancel">取消</button>
+          <button type="button" class="confirm-action" data-action="confirm">确认执行</button>
+        </div>
+      </article>
+    `).join("");
+  } catch {
+    confirmationSection.hidden = true;
+  }
+}
+
+confirmationList.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  const card = button.closest("[data-action-id]");
+  const actionId = card.dataset.actionId;
+  const action = button.dataset.action;
+  card.classList.add("working");
+  card.querySelectorAll("button").forEach((item) => { item.disabled = true; });
+  try {
+    const response = await fetch(`/api/actions/${encodeURIComponent(actionId)}/${action}`, {
+      method: "POST",
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "操作失败");
+    card.classList.add(action === "confirm" ? "confirmed" : "cancelled");
+    card.querySelector("h3").textContent = action === "confirm" ? "操作已执行" : "操作已取消";
+    await loadInventory();
+    window.setTimeout(loadPendingActions, 550);
+  } catch (error) {
+    card.classList.remove("working");
+    card.querySelector("small").textContent = error.message;
+    card.querySelectorAll("button").forEach((item) => { item.disabled = false; });
+  }
+});
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   submitButton.disabled = true;
@@ -128,6 +180,7 @@ form.addEventListener("submit", async (event) => {
     resultState.classList.toggle("blocked", data.blocked);
     renderToolTrace(data.tool_history || []);
     await loadInventory();
+    await loadPendingActions();
   } catch (error) {
     answerContent.textContent = error.message;
     resultState.textContent = "出错";
@@ -146,7 +199,7 @@ function renderToolTrace(history) {
   toolTrace.innerHTML = history.map((entry, index) => `
     <div class="trace-entry">
       <strong>${String(index + 1).padStart(2, "0")} · ${escapeHtml(entry.tool)}</strong>
-      <small>${escapeHtml(shorten(String(entry.result), 180))}</small>
+      <small>${escapeHtml(shorten(displayResult(entry.result), 180))}</small>
     </div>
   `).join("");
 }
@@ -155,12 +208,34 @@ function shorten(value, limit) {
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
 }
 
+function displayResult(value) {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function escapeHtml(value) {
   return value.replace(/[&<>'"]/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
   })[character]);
 }
 
+function operationLabel(operation) {
+  return ({
+    "inventory.add": "库存新增",
+    "inventory.update": "库存修改",
+    "inventory.remove": "库存删除",
+  })[operation] || operation;
+}
+
+function formatTime(value) {
+  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
 document.querySelector("#refresh-inventory").addEventListener("click", loadInventory);
 loadStatus();
 loadInventory();
+loadPendingActions();

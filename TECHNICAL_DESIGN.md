@@ -14,8 +14,9 @@
 2. Agent 能在当前实现的库存管理和食谱搜索工具中自主选择；订单管理仅保留为完整方案中的扩展类别。
 3. Agent 可以根据工具执行结果继续调用工具或生成最终回答。
 4. Agent 不能绕过工具直接修改库存数据，也不能声称完成尚未实现的订单操作。
-5. 对食谱相关结果执行基础过敏原检查。
-6. 从日志中可以观察 Agent 选择了什么工具、传入什么参数以及工具返回什么结果。
+5. 库存新增、修改和删除必须生成待确认操作，只有白名单执行器能在用户确认后写入数据库。
+6. 对食谱相关结果执行基础过敏原检查。
+7. 从日志中可以观察 Agent 选择了什么工具、传入什么参数以及工具返回什么结果。
 
 ## 3. 原型范围
 
@@ -162,11 +163,11 @@ System Prompt 至少定义以下规则：
 
 - `list_inventory()`：查询全部库存；
 - `get_inventory_item(name)`：查询指定食材；
-- `add_inventory_item(name, quantity, unit)`：新增或增加食材；
-- `update_inventory_item(name, quantity, unit)`：修改库存；
-- `remove_inventory_item(name, quantity)`：减少或删除库存。
+- `propose_add_inventory_item(name, quantity, unit)`：提出新增操作；
+- `propose_update_inventory_item(name, quantity, unit)`：提出修改操作；
+- `propose_remove_inventory_item(name, quantity)`：提出减少或删除操作。
 
-库存通过简单数据库保存。删除和修改操作应由工具层校验库存是否存在、数量是否合法，Agent 不能直接操作数据库。
+三个写工具只创建 `pending_actions` 记录，不直接修改库存。确认接口使用 `inventory.add`、`inventory.update`、`inventory.remove` 白名单重新校验参数，并在确认后调用库存仓库；取消、过期、跨用户和重复确认均受到状态检查。
 
 ### 7.2 订单管理工具
 

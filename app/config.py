@@ -30,6 +30,7 @@ class Settings:
     user_profile_path: Path
     http_timeout_seconds: float
     agent_recursion_limit: int
+    pending_action_ttl_minutes: int
 
     def require(self, *names: str) -> None:
         missing = [name for name in names if not str(getattr(self, name, "")).strip()]
@@ -69,4 +70,7 @@ def get_settings() -> Settings:
         ),
         http_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS", "20")),
         agent_recursion_limit=int(os.getenv("AGENT_RECURSION_LIMIT", "10")),
+        pending_action_ttl_minutes=int(
+            os.getenv("PENDING_ACTION_TTL_MINUTES", "15")
+        ),
     )
