@@ -16,6 +16,11 @@ const serviceGrid = document.querySelector("#service-grid");
 const confirmationSection = document.querySelector("#confirmation-section");
 const confirmationList = document.querySelector("#confirmation-list");
 
+const requestLimits = {
+  maxTextChars: 2000,
+  maxImageBytes: 8 * 1024 * 1024,
+};
+
 const serviceNames = {
   deepseek: ["DeepSeek", "Agent / Tool Calling"],
   baidu_vision: ["百度识图", "物体与场景识别"],
@@ -25,6 +30,11 @@ const serviceNames = {
 
 promptInput.addEventListener("input", () => {
   charCount.textContent = promptInput.value.length;
+  promptInput.setCustomValidity(
+    promptInput.value.length > requestLimits.maxTextChars
+      ? `文字输入不能超过 ${requestLimits.maxTextChars} 个字符。`
+      : "",
+  );
 });
 
 document.querySelectorAll("[data-prompt]").forEach((button) => {
@@ -42,9 +52,22 @@ function updateFile(file) {
     fileMeta.textContent = "PNG / JPG / WEBP · 不超过 8 MiB";
     return;
   }
+  if (file.size > requestLimits.maxImageBytes) {
+    imageInput.value = "";
+    imageInput.setCustomValidity(
+      `图片不能超过 ${(requestLimits.maxImageBytes / 1024 / 1024).toFixed(0)} MiB。`,
+    );
+    dropzone.classList.remove("has-file");
+    fileTitle.textContent = "图片太大，请重新选择";
+    fileMeta.textContent = imageInput.validationMessage;
+    imageInput.reportValidity();
+    return false;
+  }
+  imageInput.setCustomValidity("");
   dropzone.classList.add("has-file");
   fileTitle.textContent = file.name;
   fileMeta.textContent = `${(file.size / 1024 / 1024).toFixed(2)} MiB · 点击可更换`;
+  return true;
 }
 
 imageInput.addEventListener("change", () => updateFile(imageInput.files[0]));
@@ -73,6 +96,16 @@ async function loadStatus() {
   try {
     const response = await fetch("/api/status");
     const data = await response.json();
+    if (data.limits) {
+      requestLimits.maxTextChars = data.limits.max_text_chars;
+      requestLimits.maxImageBytes = data.limits.max_image_bytes;
+      promptInput.maxLength = requestLimits.maxTextChars;
+      document.querySelector("#text-limit").textContent = requestLimits.maxTextChars;
+      document.querySelector("#file-limit").textContent =
+        `${(requestLimits.maxImageBytes / 1024 / 1024).toFixed(0)} MiB`;
+      promptInput.dispatchEvent(new Event("input"));
+      if (imageInput.files[0]) updateFile(imageInput.files[0]);
+    }
     globalStatus.classList.toggle("ready", data.ready);
     globalStatus.querySelector("span:last-child").textContent = data.ready ? "Agent 已就绪" : "等待 API 配置";
     serviceGrid.innerHTML = Object.entries(serviceNames).map(([key, labels], index) => `
@@ -159,6 +192,17 @@ confirmationList.addEventListener("click", async (event) => {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const file = imageInput.files[0];
+  if (
+    !promptInput.value.length
+    || promptInput.value.length > requestLimits.maxTextChars
+    || (file && file.size > requestLimits.maxImageBytes)
+  ) {
+    if (file) updateFile(file);
+    promptInput.dispatchEvent(new Event("input"));
+    form.reportValidity();
+    return;
+  }
   submitButton.disabled = true;
   resultSection.hidden = false;
   resultState.textContent = "处理中";

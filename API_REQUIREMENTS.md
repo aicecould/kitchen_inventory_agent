@@ -29,6 +29,8 @@
 DEEPSEEK_API_KEY=
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MAX_OUTPUT_TOKENS=800
+DEEPSEEK_MAX_INPUT_CHARS=12000
 ```
 
 ### 调用要求
@@ -41,6 +43,9 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 - 模型产生工具调用后，由本地 Python 函数执行；模型本身不得直接修改库存。
 - 工具执行结果必须作为 Tool Message 返回模型，模型再生成最终回答。
 - 使用 `AGENT_RECURSION_LIMIT` 限制 Agent 循环次数，防止无限工具调用。
+- 单次模型调用最多生成 `DEEPSEEK_MAX_OUTPUT_TOKENS` 个 token。
+- 发送给 Agent 的结构化输入不得超过 `DEEPSEEK_MAX_INPUT_CHARS` 个字符；超限会在调用 API 前拒绝。
+- API 失败最多重试一次，避免故障期间重复消耗额度。
 
 ### 项目内位置
 

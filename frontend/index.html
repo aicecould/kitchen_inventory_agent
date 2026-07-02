@@ -73,7 +73,7 @@
                 placeholder="例如：看看这些食材能做什么，避开花生。"
                 required
               ></textarea>
-              <small><span id="char-count">0</span> / 2000</small>
+              <small><span id="char-count">0</span> / <span id="text-limit">2000</span></small>
             </label>
 
             <div class="quick-prompts" aria-label="快捷提示">
@@ -87,7 +87,7 @@
                 <input id="image-input" type="file" name="image" accept="image/png,image/jpeg,image/webp" />
                 <span class="drop-icon">＋</span>
                 <strong id="file-title">放一张食材照片</strong>
-                <small id="file-meta">PNG / JPG / WEBP · 不超过 8 MiB</small>
+                <small id="file-meta">PNG / JPG / WEBP · 不超过 <span id="file-limit">8 MiB</span></small>
               </label>
 
               <div class="control-stack">

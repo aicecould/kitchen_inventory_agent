@@ -62,6 +62,10 @@ uvicorn app.web:app --reload
 
 所有密钥统一保存在 `.env`。该文件已由 `.gitignore` 排除；`.env.example` 只保存字段名和非敏感默认值。
 
+DeepSeek 原型默认限制单轮模型输出最多 `800` token，送入 Agent 的结构化文本最多
+`12000` 字符，并通过 `AGENT_RECURSION_LIMIT` 限制一次请求内的 Agent 循环次数。
+这些限制可在 `.env` 中调整。
+
 需要配置的服务凭据：
 
 - `DEEPSEEK_API_KEY`：Agent 模型；

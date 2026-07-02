@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
+from app.limits import MAX_IMAGE_BYTES, MAX_TEXT_CHARS
 from app.pipeline import KitchenPipeline, build_pipeline
 from app.actions import InventoryActionService, PendingActionRepository
 from app.tools.inventory import InventoryRepository
@@ -46,6 +47,10 @@ def service_status() -> dict[str, object]:
     return {
         "ready": services["deepseek"],
         "services": services,
+        "limits": {
+            "max_text_chars": MAX_TEXT_CHARS,
+            "max_image_bytes": MAX_IMAGE_BYTES,
+        },
         "note": "订单、向量意图识别与完整三级审核暂未实现。",
     }
 
@@ -106,11 +111,24 @@ def cancel_action(action_id: str) -> dict[str, object]:
 
 @app.post("/api/process")
 async def process_request(
-    text: str = Form(..., min_length=1, max_length=2_000),
+    text: str = Form(..., min_length=1),
     language: str = Form("zh", min_length=2, max_length=10),
     image: UploadFile | None = File(default=None),
 ) -> dict[str, object]:
-    image_bytes = await image.read() if image is not None else None
+    if len(text) > MAX_TEXT_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"文字输入不能超过 {MAX_TEXT_CHARS} 个字符。",
+        )
+
+    image_bytes: bytes | None = None
+    if image is not None:
+        image_bytes = await image.read(MAX_IMAGE_BYTES + 1)
+        if len(image_bytes) > MAX_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"图片不能超过 {MAX_IMAGE_BYTES // 1024 // 1024} MiB。",
+            )
     try:
         result = get_pipeline().process_request(
             user_id=SHOWCASE_USER_ID,

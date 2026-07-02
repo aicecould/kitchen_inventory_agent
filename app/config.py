@@ -27,6 +27,8 @@ class Settings:
     user_profile_path: Path
     http_timeout_seconds: float
     agent_recursion_limit: int
+    deepseek_max_output_tokens: int
+    deepseek_max_input_chars: int
     pending_action_ttl_minutes: int
 
     def require(self, *names: str) -> None:
@@ -61,6 +63,10 @@ def get_settings() -> Settings:
         ),
         http_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS", "20")),
         agent_recursion_limit=int(os.getenv("AGENT_RECURSION_LIMIT", "10")),
+        deepseek_max_output_tokens=int(
+            os.getenv("DEEPSEEK_MAX_OUTPUT_TOKENS", "800")
+        ),
+        deepseek_max_input_chars=int(os.getenv("DEEPSEEK_MAX_INPUT_CHARS", "12000")),
         pending_action_ttl_minutes=int(
             os.getenv("PENDING_ACTION_TTL_MINUTES", "15")
         ),

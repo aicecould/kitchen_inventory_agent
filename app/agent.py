@@ -27,8 +27,15 @@ class KitchenAgent:
     recipes: RecipeRouter
     actions: InventoryActionService
     recursion_limit: int = 10
+    max_input_chars: int = 12000
 
     def run(self, context: AgentContext, target_language: str = "zh") -> AgentResult:
+        user_message = self._user_message(context, target_language)
+        if len(user_message) > self.max_input_chars:
+            raise ValueError(
+                f"Agent input is too long: {len(user_message)} characters; "
+                f"limit is {self.max_input_chars}"
+            )
         tools = self._create_tools(context)
         agent = create_agent(
             model=self.model,
@@ -36,7 +43,7 @@ class KitchenAgent:
             system_prompt=SYSTEM_PROMPT,
         )
         response = agent.invoke(
-            {"messages": [{"role": "user", "content": self._user_message(context, target_language)}]},
+            {"messages": [{"role": "user", "content": user_message}]},
             config={"recursion_limit": self.recursion_limit},
         )
         messages = response.get("messages", [])
@@ -236,7 +243,8 @@ def build_agent(
         model=settings.deepseek_model,
         temperature=0,
         timeout=settings.http_timeout_seconds,
-        max_retries=2,
+        max_retries=1,
+        max_tokens=settings.deepseek_max_output_tokens,
     )
     return KitchenAgent(
         model=model,
@@ -244,6 +252,7 @@ def build_agent(
         recipes=recipes,
         actions=actions,
         recursion_limit=settings.agent_recursion_limit,
+        max_input_chars=settings.deepseek_max_input_chars,
     )
 
 
