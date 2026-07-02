@@ -177,9 +177,9 @@ System Prompt 至少定义以下规则：
 
 原型提供统一工具：
 
-- `search_recipes(ingredients, preferences, allergens)`。
+- `search_recipes(ingredients, intolerances, exclude_ingredients, diet, cuisine, meal_type, max_ready_time, ranking)`。
 
-该工具调用已有食谱 API 返回候选结果，并执行基础过敏原过滤。
+该工具以 Spoonacular `complexSearch` 为主源：`intolerances`只接受官方过敏原大类，`exclude_ingredients`传递具体单品；主源失败、无结果或安全过滤后为空时才降级调用TheMealDB。两个来源返回后均执行基础过敏原复核。
 
 完整方案中的三级搜索策略保留如下：
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from langchain.agents import create_agent
 from langchain_core.messages import ToolMessage
@@ -102,13 +102,50 @@ class KitchenAgent:
 
         @tool
         def search_recipes(
-            ingredients: list[str], allergen_terms: list[str]
+            ingredients: list[str],
+            intolerances: list[
+                Literal[
+                    "Dairy",
+                    "Egg",
+                    "Gluten",
+                    "Grain",
+                    "Peanut",
+                    "Seafood",
+                    "Sesame",
+                    "Shellfish",
+                    "Soy",
+                    "Sulfite",
+                    "Tree Nut",
+                    "Wheat",
+                ]
+            ],
+            exclude_ingredients: list[str],
+            diet: str | None = None,
+            cuisine: str | None = None,
+            meal_type: str | None = None,
+            max_ready_time: int | None = None,
+            ranking: Literal[
+                "max-used-ingredients", "min-missing-ingredients"
+            ] = "max-used-ingredients",
         ) -> list[dict[str, object]]:
-            """Search recipes. Pass English API query ingredients and English allergen terms derived from context."""
+            """Search safe recipes. Use official intolerance categories plus concrete excluded ingredients."""
+            if not ingredients:
+                raise ValueError("At least one ingredient is required")
+            if context.allergens and not intolerances and not exclude_ingredients:
+                raise ValueError(
+                    "User allergens exist; intolerances or exclude_ingredients must be provided"
+                )
+            if max_ready_time is not None and max_ready_time <= 0:
+                raise ValueError("max_ready_time must be positive")
             return recipe_router.search(
                 ingredients=ingredients,
-                preferences=self._profile_values(context, "preferences"),
-                allergens=allergen_terms,
+                intolerances=intolerances,
+                exclude_ingredients=exclude_ingredients,
+                diet=diet,
+                cuisine=cuisine,
+                meal_type=meal_type,
+                max_ready_time=max_ready_time,
+                ranking=ranking,
             )
 
         return [

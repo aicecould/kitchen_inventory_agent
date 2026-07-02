@@ -122,10 +122,10 @@ SPOONACULAR_API_KEY=
 SPOONACULAR_BASE_URL=https://api.spoonacular.com
 ```
 
-### 搜索请求
+### 主搜索请求
 
 ```text
-GET /recipes/findByIngredients
+GET /recipes/complexSearch
 ```
 
 使用参数：
@@ -133,20 +133,20 @@ GET /recipes/findByIngredients
 | 参数 | 说明 |
 |---|---|
 | `apiKey` | Spoonacular API Key |
-| `ingredients` | Agent 按接口要求生成的食材查询词，以逗号分隔 |
-| `number` | 返回数量 |
-| `ranking=1` | 优先减少缺失食材 |
+| `includeIngredients` | Agent生成的食材查询词，以逗号分隔 |
+| `intolerances` | Spoonacular支持的过敏原大类 |
+| `excludeIngredients` | 具体过敏食材或需要排除的单品 |
+| `diet` / `cuisine` / `type` | 可选饮食偏好、菜系和餐型 |
+| `maxReadyTime` | 可选最大烹饪时间 |
+| `sort` | `max-used-ingredients`或`min-missing-ingredients` |
+| `number=3` | 后端固定返回数量 |
+| `instructionsRequired=true` | 只返回有烹饪步骤的菜谱 |
 | `ignorePantry=true` | 忽略常见基础调料 |
+| `addRecipeInformation=true` | 在搜索响应中返回菜谱详情 |
+| `addRecipeInstructions=true` | 在搜索响应中返回结构化步骤 |
+| `addRecipeNutrition=false` | 原型不请求营养数据 |
 
-### 详情请求
-
-对搜索结果中的每个菜谱 ID 请求：
-
-```text
-GET /recipes/{id}/information
-```
-
-项目使用标题、说明、扩展配料、来源 URL 和图片 URL。Spoonacular 具有配额限制，实际可用额度以账户控制台为准。
+项目不再逐条调用详情接口。标题、说明、扩展配料、来源URL和图片URL直接从 `complexSearch` 响应读取。Spoonacular具有配额限制，实际可用额度以账户控制台为准。
 
 ### 项目内位置
 
@@ -203,12 +203,12 @@ GET /{api_key}/lookup.php?i={meal_id}
 ## 6. 双路菜谱路由规则
 
 1. Agent 按菜谱 API 的要求生成食材查询词和过敏原词，并作为工具参数传入。
-2. 优先并独立调用 Spoonacular 与 TheMealDB。
-3. 单一路由失败时保留另一路结果，不使整个工具立即失败。
-4. 按 `source + id` 去重。
-5. 使用 Agent 提供的过敏原词过滤候选菜谱。
-6. 菜谱工具保留 API 原始结果，由 Agent 使用目标语言生成最终回答。
-7. 两路均失败且没有结果时，向 Agent 返回明确错误。
+2. 先调用Spoonacular `complexSearch`，成功且存在安全结果时立即返回。
+3. Spoonacular失败、无结果或过滤后为空时，才调用TheMealDB。
+4. Spoonacular使用官方 `intolerances`大类和`excludeIngredients`单品进行搜索阶段过滤。
+5. 两个来源返回后都使用大类词与单品词执行最终字符串复核。
+6. 菜谱工具保留API原始结果，由Agent使用目标语言生成最终回答。
+7. 两路均失败且没有结果时，向Agent返回明确错误。
 
 ## 7. 配置检查清单
 

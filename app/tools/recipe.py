@@ -1,4 +1,4 @@
-"""Dual-route recipe search and cooking guidance."""
+"""Primary Spoonacular search with TheMealDB fallback."""
 
 from __future__ import annotations
 
@@ -16,38 +16,72 @@ class RecipeRouter:
 
     def search(
         self,
+        *,
         ingredients: list[str],
-        preferences: list[str],
-        allergens: list[str],
-        limit: int = 4,
+        intolerances: list[str],
+        exclude_ingredients: list[str],
+        diet: str | None = None,
+        cuisine: str | None = None,
+        meal_type: str | None = None,
+        max_ready_time: int | None = None,
+        ranking: str = "max-used-ingredients",
+        limit: int = 3,
     ) -> list[dict[str, object]]:
-        del preferences  # Reserved for richer Spoonacular query options.
-        recipes: list[Recipe] = []
-        failures: list[str] = []
+        allergen_terms = [*intolerances, *exclude_ingredients]
+        spoonacular_error: Exception | None = None
 
         if self.spoonacular is not None:
             try:
-                recipes.extend(self.spoonacular.search(ingredients, limit=2))
-            except Exception as exc:  # One route failing must not stop the other.
-                failures.append(f"spoonacular: {exc}")
+                primary = self.spoonacular.search(
+                    ingredients=ingredients,
+                    intolerances=intolerances,
+                    exclude_ingredients=exclude_ingredients,
+                    diet=diet,
+                    cuisine=cuisine,
+                    meal_type=meal_type,
+                    max_ready_time=max_ready_time,
+                    ranking=ranking,
+                    limit=limit,
+                )
+                safe_primary = self._safe_unique(primary, allergen_terms, limit)
+                if safe_primary:
+                    return [recipe.as_dict() for recipe in safe_primary]
+            except Exception as exc:
+                spoonacular_error = exc
 
         try:
-            recipes.extend(self.themealdb.search(ingredients, limit=2))
+            fallback = self.themealdb.search(ingredients, limit=limit)
+            safe_fallback = self._safe_unique(fallback, allergen_terms, limit)
         except Exception as exc:
-            failures.append(f"themealdb: {exc}")
+            if spoonacular_error is not None:
+                raise RuntimeError(
+                    f"Both recipe routes failed: spoonacular: {spoonacular_error} | "
+                    f"themealdb: {exc}"
+                ) from exc
+            raise RuntimeError(f"TheMealDB fallback failed: {exc}") from exc
 
+        if safe_fallback:
+            return [recipe.as_dict() for recipe in safe_fallback]
+        if spoonacular_error is not None:
+            raise RuntimeError(
+                f"Spoonacular failed and TheMealDB returned no safe recipes: "
+                f"{spoonacular_error}"
+            )
+        return []
+
+    @classmethod
+    def _safe_unique(
+        cls, recipes: list[Recipe], allergen_terms: list[str], limit: int
+    ) -> list[Recipe]:
         unique: list[Recipe] = []
         seen: set[tuple[str, str]] = set()
         for recipe in recipes:
             key = (recipe.source, recipe.id)
-            if key not in seen and not self._contains_allergen(recipe, allergens):
-                seen.add(key)
-                unique.append(recipe)
-
-        output = [recipe.as_dict() for recipe in unique[:limit]]
-        if not output and failures:
-            raise RuntimeError("Both recipe routes failed: " + " | ".join(failures))
-        return output
+            if key in seen or cls._contains_allergen(recipe, allergen_terms):
+                continue
+            seen.add(key)
+            unique.append(recipe)
+        return unique[:limit]
 
     @staticmethod
     def _contains_allergen(recipe: Recipe, allergens: list[str]) -> bool:

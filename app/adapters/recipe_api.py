@@ -35,48 +35,84 @@ class SpoonacularClient:
         self.api_key = api_key
         self.timeout = timeout
 
-    def search(self, ingredients: list[str], limit: int = 3) -> list[Recipe]:
+    def search(
+        self,
+        *,
+        ingredients: list[str],
+        intolerances: list[str],
+        exclude_ingredients: list[str],
+        diet: str | None = None,
+        cuisine: str | None = None,
+        meal_type: str | None = None,
+        max_ready_time: int | None = None,
+        ranking: str = "max-used-ingredients",
+        limit: int = 3,
+    ) -> list[Recipe]:
+        if not ingredients:
+            raise ValueError("complexSearch requires at least one ingredient")
+        params: dict[str, object] = {
+            "apiKey": self.api_key,
+            "includeIngredients": ",".join(ingredients),
+            "instructionsRequired": True,
+            "ignorePantry": True,
+            "sort": ranking,
+            "number": limit,
+            "addRecipeInformation": True,
+            "addRecipeInstructions": True,
+            "addRecipeNutrition": False,
+            "fillIngredients": False,
+        }
+        if intolerances:
+            params["intolerances"] = ",".join(intolerances)
+        if exclude_ingredients:
+            params["excludeIngredients"] = ",".join(exclude_ingredients)
+        optional_params = {
+            "diet": diet,
+            "cuisine": cuisine,
+            "type": meal_type,
+            "maxReadyTime": max_ready_time,
+        }
+        params.update(
+            {key: value for key, value in optional_params.items() if value is not None}
+        )
         response = httpx.get(
-            f"{self.base_url}/recipes/findByIngredients",
-            params={
-                "apiKey": self.api_key,
-                "ingredients": ",".join(ingredients),
-                "number": limit,
-                "ranking": 1,
-                "ignorePantry": True,
-            },
+            f"{self.base_url}/recipes/complexSearch",
+            params=params,
             timeout=self.timeout,
         )
         response.raise_for_status()
         recipes: list[Recipe] = []
-        for item in response.json() or []:
-            recipe_id = str(item["id"])
-            detail = httpx.get(
-                f"{self.base_url}/recipes/{recipe_id}/information",
-                params={"apiKey": self.api_key, "includeNutrition": False},
-                timeout=self.timeout,
-            )
-            detail.raise_for_status()
-            payload = detail.json()
+        for payload in (response.json() or {}).get("results", []):
+            recipe_id = str(payload["id"])
             recipes.append(
                 Recipe(
                     id=recipe_id,
-                    title=str(payload.get("title", item.get("title", ""))),
-                    instructions=str(
-                        payload.get("instructions")
-                        or payload.get("summary")
-                        or ""
-                    ),
+                    title=str(payload.get("title", "")),
+                    instructions=self._instructions(payload),
                     ingredients=[
                         str(value.get("original") or value.get("name", ""))
                         for value in payload.get("extendedIngredients", [])
                     ],
                     source="spoonacular",
                     source_url=payload.get("sourceUrl"),
-                    image_url=payload.get("image") or item.get("image"),
+                    image_url=payload.get("image"),
                 )
             )
         return recipes
+
+    @staticmethod
+    def _instructions(payload: dict[str, object]) -> str:
+        plain = str(payload.get("instructions") or "").strip()
+        if plain:
+            return plain
+        steps: list[str] = []
+        for block in payload.get("analyzedInstructions", []) or []:  # type: ignore[union-attr]
+            if not isinstance(block, dict):
+                continue
+            for step in block.get("steps", []) or []:
+                if isinstance(step, dict) and step.get("step"):
+                    steps.append(str(step["step"]))
+        return "\n".join(steps)
 
 
 class TheMealDbClient:
