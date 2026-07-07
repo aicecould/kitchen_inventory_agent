@@ -41,12 +41,13 @@ def test_recipe_tool_requires_all_configured_allergens() -> None:
     recipes = FakeRecipeRouter()
     tool = recipe_tool(context, recipes)
 
-    with pytest.raises(ValueError, match="must include every configured allergen"):
+    with pytest.raises(ValueError, match="MISSING_ALLERGEN_FILTER"):
         tool.invoke(  # type: ignore[attr-defined]
             {
                 "ingredients": ["tomato"],
                 "intolerances": ["Peanut"],
                 "exclude_ingredients": [],
+                "custom_allergen_mapping": [],
             }
         )
 
@@ -66,10 +67,35 @@ def test_recipe_tool_passes_broad_and_custom_allergens_to_router() -> None:
         {
             "ingredients": ["tomato"],
             "intolerances": ["Peanut"],
-            "exclude_ingredients": ["腰果"],
+            "exclude_ingredients": ["onion"],
+            "custom_allergen_mapping": [
+                {"original": "腰果", "api_term": "cashew"}
+            ],
         }
     )
 
     assert recipes.kwargs is not None
     assert recipes.kwargs["intolerances"] == ["Peanut"]
-    assert recipes.kwargs["exclude_ingredients"] == ["腰果"]
+    assert recipes.kwargs["exclude_ingredients"] == ["onion", "cashew"]
+
+
+def test_recipe_tool_rejects_non_english_api_term() -> None:
+    context = AgentContext(
+        user_id="test",
+        request_text="推荐菜谱",
+        allergens=["腰果"],
+        custom_allergens=["腰果"],
+    )
+    tool = recipe_tool(context, FakeRecipeRouter())
+
+    with pytest.raises(ValueError, match="INVALID_ENGLISH_API_TERM"):
+        tool.invoke(  # type: ignore[attr-defined]
+            {
+                "ingredients": ["tomato"],
+                "intolerances": [],
+                "exclude_ingredients": [],
+                "custom_allergen_mapping": [
+                    {"original": "腰果", "api_term": "腰果"}
+                ],
+            }
+        )

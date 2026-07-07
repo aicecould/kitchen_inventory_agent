@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Literal
@@ -11,6 +12,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field, field_validator
 
 from app.actions import InventoryActionService
 from app.allergens import AllergenIntolerance
@@ -21,6 +23,26 @@ from app.prompts import SYSTEM_PROMPT
 from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
 from app.trace import TraceRecorder, elapsed_ms
+
+
+class AllergenTranslation(BaseModel):
+    original: str = Field(min_length=1, max_length=100)
+    api_term: str = Field(min_length=1, max_length=100)
+
+    @field_validator("original", "api_term")
+    @classmethod
+    def strip_value(cls, value: str) -> str:
+        return value.strip()
+
+
+_ENGLISH_API_TERM = re.compile(r"^[A-Za-z][A-Za-z0-9 '&()/.+-]*$")
+_ALLERGEN_TOOL_ERRORS = frozenset(
+    {
+        "MISSING_ALLERGEN_FILTER",
+        "UNEXPECTED_ALLERGEN_MAPPING",
+        "INVALID_ENGLISH_API_TERM",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -72,6 +94,10 @@ class KitchenAgent:
         )
         messages = response.get("messages", [])
         content = self._last_text(messages)
+        if target_language == "zh" and any(
+            code in content for code in _ALLERGEN_TOOL_ERRORS
+        ):
+            content = "菜谱查询缺少或包含无效的过敏原过滤条件，本次没有发送查询请求。"
         history = self._tool_history(messages)
         audit = regex_audit(content)
         trace.record(
@@ -174,6 +200,7 @@ class KitchenAgent:
             ingredients: list[str],
             intolerances: list[AllergenIntolerance],
             exclude_ingredients: list[str],
+            custom_allergen_mapping: list[AllergenTranslation],
             diet: str | None = None,
             cuisine: str | None = None,
             meal_type: str | None = None,
@@ -182,28 +209,42 @@ class KitchenAgent:
                 "max-used-ingredients", "min-missing-ingredients"
             ] = "max-used-ingredients",
         ) -> list[dict[str, object]]:
-            """Search safe recipes. Use official intolerance categories plus concrete excluded ingredients."""
+            """Search safe recipes using English API terms and explicit custom-allergen translations."""
             if not ingredients:
                 raise ValueError("At least one ingredient is required")
-            if context.allergens and not intolerances and not exclude_ingredients:
-                raise ValueError(
-                    "User allergens exist; intolerances or exclude_ingredients must be provided"
-                )
             missing_broad = set(context.allergen_intolerances) - set(intolerances)
-            missing_custom = {
-                value.casefold() for value in context.custom_allergens
-            } - {value.casefold() for value in exclude_ingredients}
+            configured_custom = {
+                value.strip().casefold(): value for value in context.custom_allergens
+            }
+            translated_custom = {
+                item.original.casefold(): item.api_term
+                for item in custom_allergen_mapping
+            }
+            missing_custom = set(configured_custom) - set(translated_custom)
             if missing_broad or missing_custom:
-                raise ValueError(
-                    "Recipe search must include every configured allergen category "
-                    "and custom excluded ingredient"
-                )
+                raise ValueError("MISSING_ALLERGEN_FILTER")
+            if set(translated_custom) - set(configured_custom):
+                raise ValueError("UNEXPECTED_ALLERGEN_MAPPING")
+            english_terms = [
+                *ingredients,
+                *exclude_ingredients,
+                *translated_custom.values(),
+                *(value for value in (diet, cuisine, meal_type) if value is not None),
+            ]
+            if any(
+                _ENGLISH_API_TERM.fullmatch(value) is None
+                for value in english_terms
+            ):
+                raise ValueError("INVALID_ENGLISH_API_TERM")
             if max_ready_time is not None and max_ready_time <= 0:
                 raise ValueError("max_ready_time must be positive")
+            api_exclusions = list(
+                dict.fromkeys([*exclude_ingredients, *translated_custom.values()])
+            )
             return recipe_router.search(
                 ingredients=ingredients,
                 intolerances=intolerances,
-                exclude_ingredients=exclude_ingredients,
+                exclude_ingredients=api_exclusions,
                 diet=diet,
                 cuisine=cuisine,
                 meal_type=meal_type,
