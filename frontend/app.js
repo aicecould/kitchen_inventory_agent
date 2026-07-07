@@ -37,7 +37,7 @@ const allergenLabels = {
 
 const requestLimits = {
   maxTextChars: 2000,
-  maxImageBytes: 8 * 1024 * 1024,
+  maxImageBytes: 3 * 1024 * 1024,
 };
 
 promptInput.addEventListener("input", () => {
@@ -119,7 +119,7 @@ function updateFile(file) {
   if (!file) {
     dropzone.classList.remove("has-file");
     fileTitle.textContent = "放一张食材照片";
-    fileMeta.textContent = "PNG / JPG / WEBP · 不超过 8 MiB";
+    fileMeta.textContent = "PNG / JPG / BMP · 不超过 3 MiB";
     return;
   }
   if (file.size > requestLimits.maxImageBytes) {

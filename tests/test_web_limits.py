@@ -38,7 +38,7 @@ def test_backend_rejects_oversized_image_before_pipeline() -> None:
     )
 
     assert response.status_code == 413
-    assert "8 MiB" in response.json()["detail"]
+    assert "3 MiB" in response.json()["detail"]
 
 
 def test_process_response_includes_backend_execution_trace() -> None:

@@ -47,7 +47,7 @@ def get_settings() -> Settings:
         baidu_image_secret_key=os.getenv("BAIDU_IMAGE_SECRET_KEY", ""),
         baidu_image_endpoint=os.getenv(
             "BAIDU_IMAGE_ENDPOINT",
-            "https://aip.baidubce.com/rest/2.0/image-classify/v2/advanced_general",
+            "https://aip.baidubce.com/rest/2.0/image-classify/v1/classify/ingredient",
         ),
         spoonacular_api_key=os.getenv("SPOONACULAR_API_KEY", ""),
         spoonacular_base_url=os.getenv(

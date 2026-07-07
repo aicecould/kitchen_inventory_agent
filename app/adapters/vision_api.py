@@ -60,7 +60,10 @@ class VisionApiClient:
         response = httpx.post(
             self.endpoint,
             params={"access_token": token},
-            data={"image": base64.b64encode(image_bytes).decode("ascii")},
+            data={
+                "image": base64.b64encode(image_bytes).decode("ascii"),
+                "top_num": 5,
+            },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=self.timeout,
         )
@@ -69,7 +72,7 @@ class VisionApiClient:
         if "error_code" in payload:
             raise RuntimeError(f"Baidu image recognition failed: {payload}")
         return [
-            Detection(name=str(item["keyword"]), confidence=float(item["score"]))
+            Detection(name=str(item["name"]), confidence=float(item["score"]))
             for item in payload.get("result", [])
-            if "keyword" in item and "score" in item
+            if "name" in item and "score" in item
         ]

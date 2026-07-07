@@ -68,7 +68,7 @@ DEEPSEEK_MAX_INPUT_CHARS=12000
 ```dotenv
 BAIDU_IMAGE_API_KEY=
 BAIDU_IMAGE_SECRET_KEY=
-BAIDU_IMAGE_ENDPOINT=https://aip.baidubce.com/rest/2.0/image-classify/v2/advanced_general
+BAIDU_IMAGE_ENDPOINT=https://aip.baidubce.com/rest/2.0/image-classify/v1/classify/ingredient
 ```
 
 ### 鉴权要求
@@ -92,13 +92,14 @@ BAIDU_IMAGE_ENDPOINT=https://aip.baidubce.com/rest/2.0/image-classify/v2/advance
 - Content-Type：`application/x-www-form-urlencoded`。
 - 图片以 Base64 字符串放入 `image` 字段。
 - 调用 API 前先在本地完成非空、大小和可解码性检查。
-- 原型默认图片上限为 8 MiB；如百度账户对应接口限制更低，应以官方控制台限制为准。
+- 原型按果蔬识别接口限制将原始图片上限设为 3 MiB，保证 Base64 编码后不超过 4 MiB。
+- 图片仅支持 JPG、PNG、BMP；边长为 15–4096px，长宽比不超过 3:1。
 
 ### 使用的返回字段
 
 | 字段 | 用途 |
 |---|---|
-| `result[].keyword` | 候选物体或食材名称 |
+| `result[].name` | 候选果蔬名称 |
 | `result[].score` | 0 到 1 的识别置信度 |
 | `result[].root` | 上层分类，当前原型不强制使用 |
 | `error_code` / `error_msg` | API 错误判断 |
