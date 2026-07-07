@@ -29,6 +29,14 @@ _REDUCE_PATTERN = re.compile(
     rf"^(?:减少|移除)\s*(?P<name>.+?)\s*(?P<quantity>\d+(?:\.\d+)?)\s*"
     rf"(?P<unit>{_UNITS})$"
 )
+_LIST_INVENTORY_PATTERN = re.compile(
+    r"^(?:查询|查看|看看|列出)(?:一下)?(?:当前|现有)?库存(?:情况|列表)?[。！？!?]?$"
+)
+
+
+def match_simple_inventory_query(text: str) -> bool:
+    normalized = " ".join(text.strip().split())
+    return _LIST_INVENTORY_PATTERN.fullmatch(normalized) is not None
 
 
 def match_simple_inventory_operation(text: str) -> SimpleInventoryOperation | None:

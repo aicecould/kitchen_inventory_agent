@@ -11,10 +11,15 @@ from app.agent import KitchenAgent, build_agent
 from app.audit import regex_audit
 from app.config import Settings, get_settings
 from app.context import AgentContext, AgentResult, Ingredient
-from app.intent import match_intent, match_simple_inventory_operation
+from app.intent import (
+    match_intent,
+    match_simple_inventory_operation,
+    match_simple_inventory_query,
+)
 from app.memory import UserProfile, read_user_profile
 from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
+from app.trace import TraceRecorder
 from app.vision import recognize_ingredients
 
 
@@ -35,20 +40,62 @@ class KitchenPipeline:
         image_bytes: bytes | None = None,
         target_language: str = "zh",
     ) -> AgentResult:
+        trace = TraceRecorder()
         intent = match_intent(text)
+        trace.record("routing", "intent_match", "success", intent)
         if intent == "order_unsupported":
             content = "当前原型暂不支持订单或购物车管理。"
             audit = regex_audit(content)
+            trace.record(
+                "output", "regex_audit", "passed" if audit.passed else "blocked", audit.reason or "passed"
+            )
             return AgentResult(
                 content=content if audit.passed else "输出未通过安全检查。",
                 blocked=not audit.passed,
                 audit_reason=audit.reason,
+                execution_trace=trace.events,
+            )
+
+        if match_simple_inventory_query(text):
+            trace.record("routing", "inventory_query_regex", "matched", "inventory.list")
+            items = trace.run(
+                "database",
+                "list_inventory",
+                self.inventory.list_items,
+                lambda values: f"{len(values)} item(s)",
+            )
+            if items:
+                lines = [
+                    f"- {item['name']}：{float(item['quantity']):g} {item['unit']}"
+                    for item in items
+                ]
+                content = "当前库存：\n" + "\n".join(lines)
+            else:
+                content = "当前库存为空。"
+            audit = regex_audit(content)
+            trace.record(
+                "output", "regex_audit", "passed" if audit.passed else "blocked", audit.reason or "passed"
+            )
+            return AgentResult(
+                content=content if audit.passed else "输出未通过安全检查。",
+                blocked=not audit.passed,
+                audit_reason=audit.reason,
+                tool_history=[{"tool": "list_inventory", "result": items}],
+                execution_trace=trace.events,
             )
 
         simple_operation = match_simple_inventory_operation(text)
         if simple_operation is not None:
-            action = self.actions.propose(
-                user_id, simple_operation.operation, simple_operation.arguments
+            trace.record(
+                "routing", "inventory_write_regex", "matched", simple_operation.operation
+            )
+            action = trace.run(
+                "database",
+                "create_pending_action",
+                lambda: self.actions.propose(
+                    user_id, simple_operation.operation, simple_operation.arguments
+                ),
+                lambda value: f"{value.operation}; status={value.status}",
             )
             return AgentResult(
                 content=f"已生成待确认操作：{action.summary}。确认前库存不会改变。",
@@ -58,6 +105,7 @@ class KitchenPipeline:
                         "result": action.model_dump(mode="json"),
                     }
                 ],
+                execution_trace=trace.events,
             )
 
         if self.agent is None:
@@ -67,7 +115,12 @@ class KitchenPipeline:
         if image_bytes is not None:
             if self.vision is None:
                 raise ValueError("Baidu image API credentials are missing from .env")
-            ingredients = recognize_ingredients(image_bytes, self.vision)
+            ingredients = trace.run(
+                "external_api",
+                "baidu_vision",
+                lambda: recognize_ingredients(image_bytes, self.vision),
+                lambda values: f"{len(values)} detection(s)",
+            )
 
         context = AgentContext(
             user_id=user_id,
@@ -75,10 +128,14 @@ class KitchenPipeline:
             intent=intent,
             ingredients=ingredients,
             allergens=self.profile.allergens,
+            allergen_intolerances=self.profile.allergen_intolerances,
+            custom_allergens=self.profile.custom_allergens,
             profile_markdown=self.profile.markdown,
             history_summary="；".join(self.profile.history),
         )
-        return self.agent.run(context, target_language=target_language)
+        result = self.agent.run(context, target_language=target_language)
+        result.execution_trace = [*trace.events, *result.execution_trace]
+        return result
 
 
 def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:

@@ -25,9 +25,19 @@ class AgentContext(BaseModel):
     intent: str = "unknown"
     ingredients: list[Ingredient] = Field(default_factory=list)
     allergens: list[str] = Field(default_factory=list)
+    allergen_intolerances: list[str] = Field(default_factory=list)
+    custom_allergens: list[str] = Field(default_factory=list)
     profile_markdown: str = ""
     history_summary: str = ""
     tool_history: list[dict[str, object]] = Field(default_factory=list)
+
+
+class ExecutionTraceEvent(BaseModel):
+    stage: str
+    name: str
+    status: str
+    detail: str
+    duration_ms: int = Field(default=0, ge=0)
 
 
 class AgentResult(BaseModel):
@@ -35,3 +45,4 @@ class AgentResult(BaseModel):
     blocked: bool = False
     audit_reason: str | None = None
     tool_history: list[dict[str, object]] = Field(default_factory=list)
+    execution_trace: list[ExecutionTraceEvent] = Field(default_factory=list)

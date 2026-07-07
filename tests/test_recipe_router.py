@@ -91,3 +91,30 @@ def test_primary_filtered_to_empty_uses_safe_fallback() -> None:
 
     assert results[0]["source"] == "themealdb"
     assert themealdb.calls == 1
+
+
+def test_fallback_trace_uses_safe_error_summary() -> None:
+    fallback = Recipe(
+        id="m3",
+        title="Tomato soup",
+        instructions="Cook tomato.",
+        ingredients=["tomato"],
+        source="themealdb",
+    )
+    events: list[tuple[str, str, str, str, int]] = []
+    router = RecipeRouter(FakeSpoonacular(fail=True), FakeMealDb([fallback]))  # type: ignore[arg-type]
+
+    results = router.search(
+        ingredients=["tomato"],
+        intolerances=["Peanut"],
+        exclude_ingredients=["cashew"],
+        trace=lambda *event: events.append(event),
+    )
+
+    assert results[0]["source"] == "themealdb"
+    assert [event[1:3] for event in events] == [
+        ("spoonacular", "failed"),
+        ("themealdb", "success"),
+    ]
+    assert events[0][3] == "RuntimeError; using fallback"
+    assert "quota exhausted" not in str(events)

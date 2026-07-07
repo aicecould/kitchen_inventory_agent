@@ -14,23 +14,49 @@
         <span class="brand-mark">灶</span>
         <span>
           <strong>灶台边</strong>
-          <small>KITCHEN AGENT / 试作号 01</small>
+          <small>KITCHEN AGENT</small>
         </span>
       </a>
-      <div class="status-pill" id="global-status">
-        <span class="status-dot"></span>
-        <span>正在检查服务</span>
+      <div class="topbar-actions">
+        <button class="allergen-settings-button" id="open-allergen-settings" type="button">过敏原设置</button>
+        <div class="status-pill" id="global-status">
+          <span class="status-dot"></span>
+          <span>正在检查服务</span>
+        </div>
       </div>
     </header>
+
+    <dialog class="allergen-dialog" id="allergen-dialog">
+      <form id="allergen-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">SAFETY PROFILE</p>
+            <h2>设置过敏原</h2>
+          </div>
+          <button class="dialog-close" id="close-allergen-settings" type="button" aria-label="关闭">×</button>
+        </div>
+        <section class="allergen-fieldset">
+          <h3>广义过敏原</h3>
+          <p>与菜谱 API 的 intolerance 参数保持一致。</p>
+          <div class="allergen-options" id="allergen-options"></div>
+        </section>
+        <label class="custom-allergen-field" for="custom-allergens">
+          <span>自定义过敏食材</span>
+          <small>可填写具体食材，使用逗号或换行分隔，最多 30 项。</small>
+          <textarea id="custom-allergens" rows="4" maxlength="3000" placeholder="例如：腰果，香菜，虾皮"></textarea>
+        </label>
+        <div class="dialog-actions">
+          <span id="allergen-save-status" role="status"></span>
+          <button type="submit">保存设置</button>
+        </div>
+      </form>
+    </dialog>
 
     <main id="top">
       <section class="hero">
         <div class="hero-copy reveal">
           <p class="eyebrow">FROM CAMERA TO COOKING</p>
           <h1>让冰箱里的<br /><em>零碎食材</em><br />变成一顿饭。</h1>
-          <p class="hero-note">
-            识别图片、查看库存、寻找菜谱。DeepSeek 负责思考，工具负责行动，过敏原规则守住最后一道门。
-          </p>
         </div>
 
         <div class="process-orbit reveal delay-1" aria-label="处理流程">
@@ -56,10 +82,8 @@
         <div class="workbench">
           <div class="section-heading">
             <div>
-              <span class="step-number">01</span>
               <h2>今天想做什么？</h2>
             </div>
-            <p>文字是必须的，照片可以没有。上传照片后，会先完成校验与食材识别。</p>
           </div>
 
           <form id="agent-form">
@@ -78,6 +102,10 @@
 
             <div class="quick-prompts" aria-label="快捷提示">
               <button type="button" data-prompt="查询一下当前库存">查库存</button>
+              <button type="button" data-prompt="添加 2 个 番茄到库存">新增库存</button>
+              <button type="button" data-prompt="将 番茄 修改为 5 个">修改库存</button>
+              <button type="button" data-prompt="减少 番茄 1 个">减少库存</button>
+              <button type="button" data-prompt="删除 番茄">删除库存</button>
               <button type="button" data-prompt="根据现有库存推荐一道菜，并避开我的过敏原">找菜谱</button>
               <button type="button" data-prompt="识别照片里的食材，并告诉我哪些需要确认">识别食材</button>
             </div>
@@ -91,16 +119,7 @@
               </label>
 
               <div class="control-stack">
-                <label for="language">
-                  <span>回答语言</span>
-                  <select id="language" name="language">
-                    <option value="zh">简体中文</option>
-                    <option value="en">English</option>
-                    <option value="jp">日本語</option>
-                    <option value="kor">한국어</option>
-                    <option value="fra">Français</option>
-                  </select>
-                </label>
+                <input type="hidden" name="language" value="zh" />
                 <button class="submit-button" type="submit" id="submit-button">
                   <span>交给 Agent</span>
                   <span class="arrow">↗</span>
@@ -138,7 +157,6 @@
       <section class="result-section" id="result-section" hidden>
         <div class="section-heading result-heading">
           <div>
-            <span class="step-number">02</span>
             <h2>Agent 的处理结果</h2>
           </div>
           <span class="result-state" id="result-state">完成</span>
@@ -150,21 +168,12 @@
             <div id="answer-content" class="answer-content"></div>
           </article>
           <article class="trace-card">
-            <div class="answer-label">TOOL TRACE</div>
+            <div class="answer-label">EXECUTION TRACE</div>
             <div id="tool-trace" class="tool-trace"></div>
           </article>
         </div>
       </section>
 
-      <section class="service-section reveal">
-        <div class="section-heading compact">
-          <div>
-            <span class="step-number">03</span>
-            <h2>这条链路用了什么？</h2>
-          </div>
-        </div>
-        <div class="service-grid" id="service-grid"></div>
-      </section>
     </main>
 
     <footer>

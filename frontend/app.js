@@ -12,20 +12,32 @@ const answerContent = document.querySelector("#answer-content");
 const toolTrace = document.querySelector("#tool-trace");
 const inventoryList = document.querySelector("#inventory-list");
 const globalStatus = document.querySelector("#global-status");
-const serviceGrid = document.querySelector("#service-grid");
 const confirmationSection = document.querySelector("#confirmation-section");
 const confirmationList = document.querySelector("#confirmation-list");
+const allergenDialog = document.querySelector("#allergen-dialog");
+const allergenForm = document.querySelector("#allergen-form");
+const allergenOptions = document.querySelector("#allergen-options");
+const customAllergens = document.querySelector("#custom-allergens");
+const allergenSaveStatus = document.querySelector("#allergen-save-status");
+
+const allergenLabels = {
+  Dairy: "乳制品",
+  Egg: "蛋类",
+  Gluten: "麸质",
+  Grain: "谷物",
+  Peanut: "花生",
+  Seafood: "海鲜",
+  Sesame: "芝麻",
+  Shellfish: "甲壳类",
+  Soy: "大豆",
+  Sulfite: "亚硫酸盐",
+  "Tree Nut": "坚果",
+  Wheat: "小麦",
+};
 
 const requestLimits = {
   maxTextChars: 2000,
   maxImageBytes: 8 * 1024 * 1024,
-};
-
-const serviceNames = {
-  deepseek: ["DeepSeek", "Agent / Tool Calling"],
-  baidu_vision: ["百度识图", "物体与场景识别"],
-  spoonacular: ["Spoonacular", "菜谱路由 A"],
-  themealdb: ["TheMealDB", "菜谱路由 B"],
 };
 
 promptInput.addEventListener("input", () => {
@@ -43,6 +55,64 @@ document.querySelectorAll("[data-prompt]").forEach((button) => {
     promptInput.dispatchEvent(new Event("input"));
     promptInput.focus();
   });
+});
+
+async function loadAllergens() {
+  allergenSaveStatus.textContent = "正在读取…";
+  const response = await fetch("/api/allergens");
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "过敏原设置读取失败");
+  const selected = new Set(data.broad || []);
+  allergenOptions.innerHTML = (data.options || []).map((value) => `
+    <label class="allergen-option">
+      <input type="checkbox" name="broad-allergen" value="${escapeHtml(value)}" ${selected.has(value) ? "checked" : ""} />
+      <span>${escapeHtml(allergenLabels[value] || value)}</span>
+      <small>${escapeHtml(value)}</small>
+    </label>
+  `).join("");
+  customAllergens.value = (data.custom || []).join("，");
+  allergenSaveStatus.textContent = "";
+}
+
+document.querySelector("#open-allergen-settings").addEventListener("click", async () => {
+  allergenDialog.showModal();
+  try {
+    await loadAllergens();
+  } catch (error) {
+    allergenSaveStatus.textContent = error.message;
+  }
+});
+
+document.querySelector("#close-allergen-settings").addEventListener("click", () => {
+  allergenDialog.close();
+});
+
+allergenForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const broad = Array.from(
+    allergenOptions.querySelectorAll('input[name="broad-allergen"]:checked'),
+    (input) => input.value,
+  );
+  const custom = Array.from(new Set(
+    customAllergens.value.split(/[，,\n]/).map((value) => value.trim()).filter(Boolean),
+  ));
+  if (custom.length > 30) {
+    allergenSaveStatus.textContent = "自定义过敏食材不能超过 30 项。";
+    return;
+  }
+  allergenSaveStatus.textContent = "正在保存…";
+  try {
+    const response = await fetch("/api/allergens", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ broad, custom }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "保存失败");
+    allergenSaveStatus.textContent = `已保存 ${data.broad.length + data.custom.length} 项过敏原。`;
+  } catch (error) {
+    allergenSaveStatus.textContent = error.message;
+  }
 });
 
 function updateFile(file) {
@@ -108,13 +178,6 @@ async function loadStatus() {
     }
     globalStatus.classList.toggle("ready", data.ready);
     globalStatus.querySelector("span:last-child").textContent = data.ready ? "Agent 已就绪" : "等待 API 配置";
-    serviceGrid.innerHTML = Object.entries(serviceNames).map(([key, labels], index) => `
-      <article class="service-card ${data.services[key] ? "configured" : ""}">
-        <span class="service-index">0${index + 1}</span>
-        <h3>${labels[0]}</h3>
-        <p>${labels[1]} · ${data.services[key] ? "已配置" : "待配置"}</p>
-      </article>
-    `).join("");
   } catch {
     globalStatus.querySelector("span:last-child").textContent = "服务不可达";
   }
@@ -208,7 +271,7 @@ form.addEventListener("submit", async (event) => {
   resultState.textContent = "处理中";
   resultState.classList.remove("blocked");
   answerContent.innerHTML = document.querySelector("#loading-template").innerHTML;
-  toolTrace.innerHTML = '<p class="empty-note">等待工具调用…</p>';
+  toolTrace.innerHTML = '<p class="empty-note">等待后端执行轨迹…</p>';
   resultSection.scrollIntoView({ behavior: "smooth", block: "start" });
 
   const payload = new FormData(form);
@@ -221,7 +284,7 @@ form.addEventListener("submit", async (event) => {
     answerContent.textContent = data.content;
     resultState.textContent = data.blocked ? "已拦截" : "完成";
     resultState.classList.toggle("blocked", data.blocked);
-    renderToolTrace(data.tool_history || []);
+    renderExecutionTrace(data.execution_trace || []);
     await loadInventory();
     await loadPendingActions();
   } catch (error) {
@@ -234,15 +297,15 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
-function renderToolTrace(history) {
-  if (!history.length) {
-    toolTrace.innerHTML = '<p class="empty-note">Agent 本次直接作答，没有调用工具。</p>';
+function renderExecutionTrace(trace) {
+  if (!trace.length) {
+    toolTrace.innerHTML = '<p class="empty-note">本次请求没有可展示的执行轨迹。</p>';
     return;
   }
-  toolTrace.innerHTML = history.map((entry, index) => `
-    <div class="trace-entry">
-      <strong>${String(index + 1).padStart(2, "0")} · ${escapeHtml(entry.tool)}</strong>
-      <small>${escapeHtml(shorten(displayResult(entry.result), 180))}</small>
+  toolTrace.innerHTML = trace.map((entry, index) => `
+    <div class="trace-entry trace-${escapeHtml(entry.status)}">
+      <strong>${String(index + 1).padStart(2, "0")} · ${escapeHtml(entry.stage)} / ${escapeHtml(entry.name)}</strong>
+      <small>${escapeHtml(entry.status)} · ${Number(entry.duration_ms || 0)} ms · ${escapeHtml(shorten(entry.detail || "", 180))}</small>
     </div>
   `).join("");
 }
