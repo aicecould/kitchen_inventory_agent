@@ -35,8 +35,6 @@ flowchart TD
     P -->|不能安全回答| R["拒绝、降级或请求澄清"]
 ```
 
-![Prototype Diagram](prototype_diagram.svg)
-
 ## 目录
 
 ```text
