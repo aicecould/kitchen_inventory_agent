@@ -1,20 +1,41 @@
 # Kitchen Inventory Agent
 
-以 Python 和 LangChain 为核心的厨房库存 Agent 后端原型。
+以 Python 和 LangChain 为核心的厨房库存 Agent
 
 当前仓库实现以下链路：
 
-```text
-输入 → 简单意图匹配 → 百度图像识别 API → Markdown 用户画像
-    → DeepSeek LangChain Agent → 库存工具 / 双路食谱工具
-    → 简单正则审核 → 输出
+```mermaid
+flowchart TD
+    A["用户文本 / 图片"] --> B["输入校验、鉴权、意图匹配、图片识别"]
+    B --> C["上下文构建：画像、过敏原、历史、识别置信度"]
+    C --> D["编排 Agent：理解、规划、生成工具参数"]
+
+    D --> E["库存读取工具"]
+    D --> F["库存变更提案"]
+    D --> G["菜谱搜索编排器"]
+    D --> H["信息不足：请求用户澄清"]
+
+    F --> I["用户确认 / 取消"]
+    I -->|确认| J["白名单执行器事务写库"]
+    I -->|取消| K["取消结果"]
+
+    G --> L["API / 离线库 / Web 等多路检索"]
+    L --> M["标准化、去重、过敏原过滤、排序"]
+
+    E --> N["结构化工具结果"]
+    J --> N
+    K --> N
+    M --> N
+    N --> D
+
+    D --> O["生成统一回答"]
+    O --> P["事实一致性、工具调用一致性、过敏原与安全审核"]
+    P -->|通过| Q["最终响应"]
+    P -->|可修正| O
+    P -->|不能安全回答| R["拒绝、降级或请求澄清"]
 ```
 
-当前不实现：前端、订单管理、向量意图识别、离线菜谱库搜索、在线网页搜索、工具调用审查和第二模型复审。
-
-详细设计见 [docs/TECHNICAL_DESIGN.md](docs/TECHNICAL_DESIGN.md)。
-
-外部服务的鉴权、端点与请求要求见 [docs/API_REQUIREMENTS.md](docs/API_REQUIREMENTS.md)。
+![Prototype Diagram](prototype_diagram.svg)
 
 ## 目录
 
@@ -22,12 +43,10 @@
 app/             Python 主包
 app/adapters/    外部 API 适配器
 app/tools/       Agent 可调用工具
-data/            Markdown 用户画像及运行数据
-docs/            技术设计与外部 API 文档
-frontend/        静态展示页面
+data/            SQLite 库存数据库及用户画像
+frontend/        前端
 scripts/         PowerShell 启动与停止脚本
-tests/           原型测试
-main.py          命令行入口
+tests/           测试
 ```
 
 ## 初始化
@@ -39,13 +58,7 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-在 `.env` 中填写密钥后运行：
-
-```powershell
-python main.py --text "查询当前库存"
-python main.py --text "识别图片中的食材并推荐菜谱" --image .\sample.jpg
-python main.py --text "推荐一道菜" --language zh
-```
+在 `.env` 中填写密钥后运行
 
 启动展示页面：
 
@@ -53,32 +66,10 @@ python main.py --text "推荐一道菜" --language zh
 .\scripts\start.ps1
 ```
 
-然后访问 `http://127.0.0.1:8000`。页面支持文字输入、图片上传、库存查看、中文 Agent 回答与后端执行轨迹展示。
-页面还支持设置 Spoonacular 官方过敏原大类和自定义过敏食材；设置会写入 Markdown 用户画像，并注入后续 Agent 与食谱查询。
+然后访问 `http://127.0.0.1:8000`
 
 停止应用：
 
 ```powershell
 .\scripts\stop.ps1
 ```
-
-展示库存确认流程时，可以输入：
-
-```text
-添加 2 个 番茄到库存
-```
-
-系统只会生成待确认卡片；点击“确认执行”后才会写入 SQLite，点击“取消”则不会修改库存。
-
-所有密钥统一保存在 `.env`。该文件已由 `.gitignore` 排除；`.env.example` 只保存字段名和非敏感默认值。
-
-DeepSeek 原型默认限制单轮模型输出最多 `800` token，送入 Agent 的结构化文本最多
-`12000` 字符，并通过 `AGENT_RECURSION_LIMIT` 限制一次请求内的 Agent 循环次数。
-这些限制可在 `.env` 中调整。
-
-需要配置的服务凭据：
-
-- `DEEPSEEK_API_KEY`：Agent 模型；
-- `BAIDU_IMAGE_API_KEY` / `BAIDU_IMAGE_SECRET_KEY`：物体识别；
-- `SPOONACULAR_API_KEY`：第一路菜谱搜索；
-- `THEMEALDB_API_KEY`：第二路菜谱搜索，开发阶段默认使用测试键 `1`。
