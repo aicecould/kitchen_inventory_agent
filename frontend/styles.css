@@ -179,6 +179,23 @@ main { width: min(1240px, calc(100% - 48px)); margin: 0 auto; }
 .inventory-foot { margin-top: 24px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,.18); color: #829b90; font-size: 9px; letter-spacing: .12em; text-transform: uppercase; }
 
 .result-section, .service-section { padding: 86px 0 20px; }
+.vision-checkpoint { margin-top: 54px; padding: 34px; border: 2px dashed var(--mustard); background: rgba(250,242,210,.78); box-shadow: 10px 10px 0 rgba(213,166,41,.13); }
+.vision-candidate-list { display: grid; gap: 10px; }
+.vision-candidate { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 16px; padding: 16px 18px; border: 1px solid var(--line); background: #fffdf6; }
+.vision-candidate-toggle { width: 20px; height: 20px; accent-color: var(--tomato); }
+.vision-candidate-copy { display: grid; grid-template-columns: minmax(140px, .7fr) minmax(180px, 1.3fr); gap: 14px; align-items: center; }
+.vision-candidate-copy span { display: grid; gap: 3px; color: var(--ink-soft); font: 10px/1.35 monospace; }
+.vision-candidate-copy strong { color: var(--ink); font: 500 18px/1.2 "Iowan Old Style", "Songti SC", serif; }
+.vision-candidate-copy label { display: grid; gap: 5px; color: var(--ink-soft); font-size: 9px; font-weight: 800; letter-spacing: .12em; }
+.vision-candidate-copy input { width: 100%; padding: 9px 10px; border: 1px solid var(--line); color: var(--ink); background: var(--paper-light); font: 500 15px/1.2 "Iowan Old Style", "Songti SC", serif; }
+.vision-candidate-copy input:disabled { opacity: .42; text-decoration: line-through; }
+.vision-confidence { min-width: 64px; color: var(--tomato); font: 800 12px/1 monospace; text-align: right; }
+.vision-checkpoint-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.vision-checkpoint-actions button { padding: 11px 15px; border: 1px solid var(--ink); cursor: pointer; font-size: 11px; font-weight: 800; }
+.vision-checkpoint-actions button:first-child { color: var(--ink); background: transparent; }
+.vision-checkpoint-actions button:last-child { color: var(--paper-light); background: var(--ink); }
+.vision-checkpoint-actions button:disabled { opacity: .5; cursor: wait; }
+.vision-checkpoint-status { min-height: 1.3em; margin: 10px 0 0; color: var(--tomato); font-size: 11px; text-align: right; }
 .confirmation-section { margin-top: 54px; padding: 34px; border: 2px solid var(--tomato); background: rgba(248,244,233,.78); box-shadow: 10px 10px 0 rgba(217,75,43,.11); }
 .confirmation-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 30px; margin-bottom: 24px; }
 .confirmation-heading > div { position: relative; padding-left: 28px; }
@@ -277,6 +294,11 @@ footer { width: min(1240px, calc(100% - 48px)); margin: 0 auto; padding: 24px 0 
   .control-stack { grid-template-columns: 1fr 1fr; grid-template-rows: auto; align-items: end; }
   .service-grid { grid-template-columns: 1fr; }
   .confirmation-section { margin-inline: -14px; padding: 26px 20px; border-left: 0; border-right: 0; }
+  .vision-checkpoint { margin-inline: -14px; padding: 26px 20px; border-left: 0; border-right: 0; }
+  .vision-candidate { grid-template-columns: auto 1fr; }
+  .vision-candidate-copy { grid-template-columns: 1fr; }
+  .vision-confidence { grid-column: 2; text-align: left; }
+  .vision-checkpoint-actions { display: grid; grid-template-columns: 1fr; }
   .confirmation-card { grid-template-columns: 48px 1fr; }
   .confirmation-seal { width: 44px; height: 44px; }
   .confirmation-actions { grid-column: 1 / -1; }.confirmation-actions button { flex: 1; }

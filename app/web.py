@@ -55,6 +55,23 @@ class AllergenSettings(BaseModel):
         return cleaned
 
 
+class VisionSelection(BaseModel):
+    candidate_index: int = Field(ge=0)
+    name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if "\n" in cleaned or "\r" in cleaned:
+            raise ValueError("Ingredient name must be a single-line value")
+        return cleaned
+
+
+class VisionResolution(BaseModel):
+    selections: list[VisionSelection] = Field(default_factory=list, max_length=20)
+
+
 def get_pipeline() -> KitchenPipeline:
     global _pipeline
     if _pipeline is None:
@@ -82,7 +99,7 @@ def service_status() -> dict[str, object]:
             "max_text_chars": MAX_TEXT_CHARS,
             "max_image_bytes": MAX_IMAGE_BYTES,
         },
-        "note": "订单、向量意图识别与完整三级审核暂未实现。",
+        "note": "订单、向量意图识别与独立模型二次审核暂未实现。",
     }
 
 
@@ -153,6 +170,7 @@ def confirm_action(action_id: str) -> dict[str, object]:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    get_pipeline().record_inventory_confirmation(action=action, decision="confirm")
     return {"action": action.model_dump(mode="json")}
 
 
@@ -166,7 +184,39 @@ def cancel_action(action_id: str) -> dict[str, object]:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    get_pipeline().record_inventory_confirmation(action=action, decision="cancel")
     return {"action": action.model_dump(mode="json")}
+
+
+@app.post("/api/vision-confirmations/{confirmation_id}/resolve")
+def resolve_vision_confirmation(
+    confirmation_id: str,
+    payload: VisionResolution,
+) -> dict[str, object]:
+    try:
+        result = get_pipeline().resolve_vision_confirmation(
+            user_id=SHOWCASE_USER_ID,
+            confirmation_id=confirmation_id,
+            selections=[
+                selection.model_dump(mode="json")
+                for selection in payload.selections
+            ],
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"继续处理请求失败：{type(exc).__name__}。"
+                "请检查本地 API 配置与服务状态。"
+            ),
+        ) from exc
+    return result.model_dump(mode="json")
 
 
 @app.post("/api/process")

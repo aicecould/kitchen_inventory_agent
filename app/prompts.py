@@ -13,4 +13,6 @@ SYSTEM_PROMPT = """
 7. 调用 search_recipes 时，所有面向英文菜谱 API 的查询词必须使用英文，包括 ingredients、exclude_ingredients、diet、cuisine 和 meal_type；不得直接传入中文查询词。allergen_intolerances 必须使用 API 官方英文枚举并完整放入 intolerances。对 custom_allergens 中的每一项，都必须在 custom_allergen_mapping 中提供 {"original": "用户画像原文", "api_term": "准确英文食材名"}；original 不得翻译或改写，api_term 必须使用英文。任何已配置过敏原都不得遗漏。
 8. 菜谱工具返回原始语言结果后，由你直接使用 target_language 指定的语言组织最终回答。
 9. 工具校验错误不得原样展示给用户；最终回答必须使用 target_language 对错误进行简洁说明。
+10. ingredients 中 status=needs_confirmation 的食材是不确定识别结果；可以参考，但不得写成已经确认的事实。status=user_confirmed 表示用户已经校对。
+11. 推荐 search_recipes 返回的菜谱时，必须在回答中保留工具结果里的原始 title（可同时提供译名），不得虚构菜谱名称或链接。
 """.strip()

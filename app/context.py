@@ -11,12 +11,25 @@ class ConfidenceStatus(StrEnum):
     ACCEPTED = "accepted"
     NEEDS_CONFIRMATION = "needs_confirmation"
     REJECTED = "rejected"
+    USER_CONFIRMED = "user_confirmed"
 
 
 class Ingredient(BaseModel):
     name: str
     confidence: float = Field(ge=0.0, le=1.0)
     status: ConfidenceStatus
+
+
+class HistorySegment(BaseModel):
+    request: str
+    response: str
+    tool_history: list[dict[str, object]] = Field(default_factory=list)
+    confirmation_result: dict[str, object] | None = None
+
+
+class VisionConfirmationPrompt(BaseModel):
+    confirmation_id: str
+    candidates: list[Ingredient]
 
 
 class AgentContext(BaseModel):
@@ -28,8 +41,8 @@ class AgentContext(BaseModel):
     allergen_intolerances: list[str] = Field(default_factory=list)
     custom_allergens: list[str] = Field(default_factory=list)
     profile_markdown: str = ""
-    history_summary: str = ""
-    tool_history: list[dict[str, object]] = Field(default_factory=list)
+    history_segments: list[HistorySegment] = Field(default_factory=list, max_length=5)
+    vision_confirmation_result: dict[str, object] | None = None
 
 
 class ExecutionTraceEvent(BaseModel):
@@ -46,3 +59,5 @@ class AgentResult(BaseModel):
     audit_reason: str | None = None
     tool_history: list[dict[str, object]] = Field(default_factory=list)
     execution_trace: list[ExecutionTraceEvent] = Field(default_factory=list)
+    awaiting_vision_confirmation: bool = False
+    vision_confirmation: VisionConfirmationPrompt | None = None

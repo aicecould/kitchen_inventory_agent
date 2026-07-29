@@ -15,6 +15,11 @@ const inventoryList = document.querySelector("#inventory-list");
 const globalStatus = document.querySelector("#global-status");
 const confirmationSection = document.querySelector("#confirmation-section");
 const confirmationList = document.querySelector("#confirmation-list");
+const visionCheckpoint = document.querySelector("#vision-checkpoint");
+const visionConfirmationForm = document.querySelector("#vision-confirmation-form");
+const visionCandidateList = document.querySelector("#vision-candidate-list");
+const discardVisionCandidates = document.querySelector("#discard-vision-candidates");
+const visionCheckpointStatus = document.querySelector("#vision-checkpoint-status");
 const allergenDialog = document.querySelector("#allergen-dialog");
 const allergenForm = document.querySelector("#allergen-form");
 const allergenOptions = document.querySelector("#allergen-options");
@@ -285,6 +290,100 @@ confirmationList.addEventListener("click", async (event) => {
   }
 });
 
+function showVisionCheckpoint(confirmation) {
+  visionCheckpoint.dataset.confirmationId = confirmation.confirmation_id;
+  visionCandidateList.innerHTML = (confirmation.candidates || []).map((candidate, index) => `
+    <article class="vision-candidate" data-candidate-index="${index}">
+      <input
+        class="vision-candidate-toggle"
+        type="checkbox"
+        aria-label="采用候选 ${escapeHtml(candidate.name)}"
+      />
+      <div class="vision-candidate-copy">
+        <span>识别候选<strong>${escapeHtml(candidate.name)}</strong></span>
+        <label>
+          校对后的名称
+          <input class="vision-candidate-name" type="text" maxlength="100" value="${escapeHtml(candidate.name)}" disabled />
+        </label>
+      </div>
+      <span class="vision-confidence">${(Number(candidate.confidence) * 100).toFixed(1)}%</span>
+    </article>
+  `).join("");
+  visionCheckpointStatus.textContent = "";
+  visionCheckpoint.hidden = false;
+  visionCheckpoint.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+visionCandidateList.addEventListener("change", (event) => {
+  if (!event.target.matches(".vision-candidate-toggle")) return;
+  const card = event.target.closest(".vision-candidate");
+  const nameInput = card.querySelector(".vision-candidate-name");
+  nameInput.disabled = !event.target.checked;
+  if (event.target.checked) {
+    nameInput.focus();
+    nameInput.select();
+  }
+});
+
+async function resolveVisionCheckpoint(selections) {
+  const confirmationId = visionCheckpoint.dataset.confirmationId;
+  const buttons = visionConfirmationForm.querySelectorAll("button");
+  buttons.forEach((button) => { button.disabled = true; });
+  visionCheckpointStatus.textContent = "已记录校对，正在继续原请求…";
+  resultState.textContent = "继续处理";
+  answerContent.innerHTML = document.querySelector("#loading-template").innerHTML;
+  try {
+    const response = await fetch(
+      `/api/vision-confirmations/${encodeURIComponent(confirmationId)}/resolve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ selections }),
+      },
+    );
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "图片校对结果提交失败");
+    visionCheckpoint.hidden = true;
+    renderAgentResult(data);
+    await loadInventory();
+    await loadPendingActions();
+  } catch (error) {
+    visionCheckpointStatus.textContent = error.message;
+    resultState.textContent = "等待校对";
+    answerContent.textContent = "校对结果尚未提交，可以修改后重试。";
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
+visionConfirmationForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const selections = Array.from(
+    visionCandidateList.querySelectorAll(".vision-candidate"),
+  ).filter(
+    (card) => card.querySelector(".vision-candidate-toggle").checked,
+  ).map((card) => ({
+    candidate_index: Number(card.dataset.candidateIndex),
+    name: card.querySelector(".vision-candidate-name").value.trim(),
+  }));
+  if (selections.some((selection) => !selection.name)) {
+    visionCheckpointStatus.textContent = "已选择的候选必须填写食材名称。";
+    return;
+  }
+  await resolveVisionCheckpoint(selections);
+});
+
+discardVisionCandidates.addEventListener("click", async () => {
+  await resolveVisionCheckpoint([]);
+});
+
+function renderAgentResult(data) {
+  answerContent.innerHTML = renderSafeMarkdown(data.content);
+  resultState.textContent = data.blocked ? "已拦截" : "完成";
+  resultState.classList.toggle("blocked", data.blocked);
+  renderExecutionTrace(data.execution_trace || []);
+}
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const file = imageInput.files[0];
@@ -313,10 +412,14 @@ form.addEventListener("submit", async (event) => {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "请求失败");
 
-    answerContent.innerHTML = renderSafeMarkdown(data.content);
-    resultState.textContent = data.blocked ? "已拦截" : "完成";
-    resultState.classList.toggle("blocked", data.blocked);
-    renderExecutionTrace(data.execution_trace || []);
+    renderAgentResult(data);
+    if (data.awaiting_vision_confirmation && data.vision_confirmation) {
+      resultState.textContent = "等待校对";
+      showVisionCheckpoint(data.vision_confirmation);
+      resetImageInput();
+      return;
+    }
+    visionCheckpoint.hidden = true;
     await loadInventory();
     await loadPendingActions();
   } catch (error) {

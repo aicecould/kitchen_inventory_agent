@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.actions import InventoryActionService
 from app.allergens import AllergenIntolerance
-from app.audit import regex_audit
+from app.audit import append_confidence_notice, regex_audit, review_tool_calls
 from app.config import Settings
 from app.context import AgentContext, AgentResult
 from app.prompts import SYSTEM_PROMPT
@@ -99,6 +99,7 @@ class KitchenAgent:
         ):
             content = "菜谱查询缺少或包含无效的过敏原过滤条件，本次没有发送查询请求。"
         history = self._tool_history(messages)
+        content = append_confidence_notice(content, context.ingredients)
         audit = regex_audit(content)
         trace.record(
             "output",
@@ -111,6 +112,26 @@ class KitchenAgent:
                 content="输出未通过安全检查。",
                 blocked=True,
                 audit_reason=audit.reason,
+                tool_history=history,
+                execution_trace=trace.events,
+            )
+        tool_audit = review_tool_calls(
+            content,
+            history,
+            ingredients=context.ingredients,
+            vision_confirmation_result=context.vision_confirmation_result,
+        )
+        trace.record(
+            "output",
+            "tool_call_audit",
+            "passed" if tool_audit.passed else "blocked",
+            tool_audit.reason or "passed",
+        )
+        if not tool_audit.passed:
+            return AgentResult(
+                content="输出与工具执行记录不一致，本次结果已被拦截。",
+                blocked=True,
+                audit_reason=tool_audit.reason,
                 tool_history=history,
                 execution_trace=trace.events,
             )
@@ -289,7 +310,11 @@ class KitchenAgent:
             "allergen_intolerances": context.allergen_intolerances,
             "custom_allergens": context.custom_allergens,
             "user_profile_markdown": context.profile_markdown,
-            "history_summary": context.history_summary,
+            "recent_history": [
+                segment.model_dump(mode="json")
+                for segment in context.history_segments
+            ],
+            "vision_confirmation_result": context.vision_confirmation_result,
             "target_language": target_language,
         }
         return (
@@ -317,13 +342,23 @@ class KitchenAgent:
 
     @staticmethod
     def _tool_history(messages: list[Any]) -> list[dict[str, object]]:
+        arguments_by_id: dict[str, object] = {}
+        for message in messages:
+            for call in getattr(message, "tool_calls", []) or []:
+                if not isinstance(call, dict):
+                    continue
+                call_id = str(call.get("id", ""))
+                if call_id:
+                    arguments_by_id[call_id] = call.get("args", {})
         history: list[dict[str, object]] = []
         for message in messages:
             if isinstance(message, ToolMessage):
+                call_id = message.tool_call_id
                 history.append(
                     {
                         "tool": message.name or "unknown",
-                        "tool_call_id": message.tool_call_id,
+                        "tool_call_id": call_id,
+                        "arguments": arguments_by_id.get(call_id, {}),
                         "result": message.content,
                     }
                 )

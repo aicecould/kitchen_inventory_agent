@@ -148,6 +148,25 @@
         </aside>
       </section>
 
+      <section class="vision-checkpoint" id="vision-checkpoint" hidden>
+        <div class="confirmation-heading">
+          <div>
+            <span class="step-number">?</span>
+            <p class="eyebrow">VISION CHECKPOINT</p>
+            <h2>先校对模糊的食材</h2>
+          </div>
+          <p>这些候选不会直接交给 Agent。勾选可信的结果，也可以修改名称；未勾选的候选会被放弃。</p>
+        </div>
+        <form id="vision-confirmation-form">
+          <div class="vision-candidate-list" id="vision-candidate-list"></div>
+          <div class="vision-checkpoint-actions">
+            <button type="button" id="discard-vision-candidates">全部放弃并继续</button>
+            <button type="submit">按选择继续原请求 <span>↗</span></button>
+          </div>
+          <p class="vision-checkpoint-status" id="vision-checkpoint-status"></p>
+        </form>
+      </section>
+
       <section class="confirmation-section" id="confirmation-section" hidden>
         <div class="confirmation-heading">
           <div>
