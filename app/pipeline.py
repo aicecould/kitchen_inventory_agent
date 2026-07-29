@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from classifier.model import FoodQueryClassifier
 from app.actions import (
     InventoryActionService,
     PendingAction,
@@ -49,6 +50,8 @@ class KitchenPipeline:
     vision_confirmations: VisionConfirmationRepository
     agent: KitchenAgent | None
     vision: VisionApiClient | None
+    food_classifier: FoodQueryClassifier | None
+    food_classifier_load_error: str | None = None
 
     def process_request(
         self,
@@ -59,6 +62,53 @@ class KitchenPipeline:
         target_language: str = "zh",
     ) -> AgentResult:
         trace = TraceRecorder()
+        if image_bytes is not None:
+            trace.record(
+                "routing",
+                "food_query_classifier",
+                "skipped",
+                "image request bypasses text-only classifier",
+            )
+        elif self.food_classifier is None:
+            trace.record(
+                "routing",
+                "food_query_classifier",
+                "unavailable",
+                (
+                    f"fail-open; {self.food_classifier_load_error}"
+                    if self.food_classifier_load_error
+                    else "disabled; fail-open"
+                ),
+            )
+        else:
+            try:
+                classification = trace.run(
+                    "routing",
+                    "food_query_classifier",
+                    lambda: self.food_classifier.classify(text),
+                    lambda value: (
+                        f"related={str(value.is_related).lower()}; "
+                        f"score={value.positive_score:.4f}; "
+                        f"threshold={value.threshold:.4f}"
+                    ),
+                )
+            except Exception:
+                trace.record(
+                    "routing",
+                    "food_query_classifier_fallback",
+                    "fail-open",
+                    "prediction failed; continuing request",
+                )
+                classification = None
+
+            if classification is not None and not classification.is_related:
+                return AgentResult(
+                    content="当前仅支持食谱和食材相关问题。",
+                    blocked=True,
+                    audit_reason="food_query_irrelevant",
+                    execution_trace=trace.events,
+                )
+
         intent = match_intent(text)
         trace.record("routing", "intent_match", "success", intent)
 
@@ -497,6 +547,17 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
             timeout=settings.http_timeout_seconds,
         )
 
+    food_classifier: FoodQueryClassifier | None = None
+    food_classifier_load_error: str | None = None
+    if settings.food_classifier_enabled:
+        try:
+            food_classifier = FoodQueryClassifier.load(
+                settings.food_classifier_model_path,
+                settings.food_classifier_metadata_path,
+            )
+        except (ImportError, KeyError, OSError, TypeError, ValueError) as exc:
+            food_classifier_load_error = type(exc).__name__
+
     return KitchenPipeline(
         settings,
         profile,
@@ -506,4 +567,6 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
         vision_confirmations,
         agent,
         vision,
+        food_classifier,
+        food_classifier_load_error,
     )

@@ -91,6 +91,11 @@ def service_status() -> dict[str, object]:
         ),
         "spoonacular": bool(settings.spoonacular_api_key),
         "themealdb": bool(settings.themealdb_api_key),
+        "food_classifier": (
+            settings.food_classifier_enabled
+            and settings.food_classifier_model_path.is_file()
+            and settings.food_classifier_metadata_path.is_file()
+        ),
     }
     return {
         "ready": services["deepseek"],
@@ -99,7 +104,7 @@ def service_status() -> dict[str, object]:
             "max_text_chars": MAX_TEXT_CHARS,
             "max_image_bytes": MAX_IMAGE_BYTES,
         },
-        "note": "订单、向量意图识别与独立模型二次审核暂未实现。",
+        "note": "订单与独立模型二次审核暂未实现。",
     }
 
 

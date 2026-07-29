@@ -1,0 +1,53 @@
+{
+  "model_type": "fasttext-supervised",
+  "domain": "recipe_and_ingredient_queries",
+  "positive_label": "__label__1",
+  "threshold": 0.3390387296676636,
+  "minimum_validation_recall": 0.98,
+  "preprocessing": "nfkc_lowercase_jieba",
+  "preprocessing_version": 1,
+  "created_at": "2026-07-29T08:02:04.644183+00:00",
+  "dataset": "classifier\\dataset\\semantic_food_query_dataset_300.csv",
+  "dataset_sha256": "46f52a140efc094c2d96a2dea3fbe5dfc12cdeb3ccd9dd8e4487664e57a4245b",
+  "seed": 42,
+  "split_counts": {
+    "train": 210,
+    "validation": 44,
+    "test": 46,
+    "deployment_train": 254
+  },
+  "validation_metrics": {
+    "total": 44,
+    "true_positive": 22,
+    "false_negative": 0,
+    "false_positive": 5,
+    "true_negative": 17,
+    "recall": 1.0,
+    "false_positive_rate": 0.22727272727272727,
+    "precision": 0.8148148148148148,
+    "accuracy": 0.8863636363636364
+  },
+  "test_metrics": {
+    "total": 46,
+    "true_positive": 21,
+    "false_negative": 2,
+    "false_positive": 7,
+    "true_negative": 16,
+    "recall": 0.9130434782608695,
+    "false_positive_rate": 0.30434782608695654,
+    "precision": 0.75,
+    "accuracy": 0.8043478260869565
+  },
+  "training_parameters": {
+    "lr": 0.2,
+    "epoch": 100,
+    "wordNgrams": 2,
+    "dim": 100,
+    "minCount": 1,
+    "minn": 1,
+    "maxn": 4,
+    "bucket": 50000,
+    "loss": "softmax",
+    "thread": 1
+  }
+}

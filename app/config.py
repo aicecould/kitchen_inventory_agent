@@ -30,6 +30,9 @@ class Settings:
     deepseek_max_output_tokens: int
     deepseek_max_input_chars: int
     pending_action_ttl_minutes: int
+    food_classifier_enabled: bool
+    food_classifier_model_path: Path
+    food_classifier_metadata_path: Path
 
     def require(self, *names: str) -> None:
         missing = [name for name in names if not str(getattr(self, name, "")).strip()]
@@ -70,4 +73,29 @@ def get_settings() -> Settings:
         pending_action_ttl_minutes=int(
             os.getenv("PENDING_ACTION_TTL_MINUTES", "15")
         ),
+        food_classifier_enabled=_env_bool("FOOD_CLASSIFIER_ENABLED", True),
+        food_classifier_model_path=Path(
+            os.getenv(
+                "FOOD_CLASSIFIER_MODEL_PATH",
+                "classifier/artifacts/food_query.bin",
+            )
+        ),
+        food_classifier_metadata_path=Path(
+            os.getenv(
+                "FOOD_CLASSIFIER_METADATA_PATH",
+                "classifier/artifacts/metadata.json",
+            )
+        ),
     )
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")

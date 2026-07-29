@@ -47,6 +47,7 @@ flowchart TD
 app/             Python 主包
 app/adapters/    外部 API 适配器
 app/tools/       Agent 可调用工具
+classifier/      食谱/食材相关性 FastText 二分类器
 data/            SQLite 库存数据库及用户画像
 frontend/        前端
 scripts/         PowerShell 启动与停止脚本
@@ -61,6 +62,9 @@ python -m venv .venv
 pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
+
+分类器模型已经位于 `classifier/artifacts/`。重新训练方法见
+`classifier/README.md`。
 
 在 `.env` 中填写密钥后运行
 

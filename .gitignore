@@ -6,3 +6,5 @@ __pycache__/
 .env
 .run/
 data/
+classifier/artifacts/*.vec
+classifier/artifacts/training/
