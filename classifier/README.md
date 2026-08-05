@@ -16,8 +16,7 @@
 pip install -r requirements.txt
 ```
 
-Windows/Python 3.13 没有适用的官方 FastText Python 训练轮子。训练使用官方
-FastText 0.9.2 CLI，应用内推理使用兼容 `.bin` 文件的 `fasttext-predict`：
+训练使用官方 FastText 0.9.2 CLI，应用内推理使用兼容 `.bin` 文件的 `fasttext-predict`：
 
 ```powershell
 .\classifier\build_fasttext.ps1
@@ -37,7 +36,7 @@ python -m classifier.train
 2. 按类别进行 70%/15%/15% 确定性划分；
 3. 使用 NFKC、英文小写和 jieba 分词；
 4. 训练 FastText 监督模型；
-5. 在验证集上选择满足正类召回率至少 98% 的最高阈值；
+5. 在验证集上选择满足正类召回率至少 98% 的阈值；
 6. 使用训练集和验证集重新训练部署模型；
 7. 将完全未参与训练和阈值选择的测试集指标写入
    `classifier/artifacts/evaluation.json`。
