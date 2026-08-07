@@ -4,6 +4,8 @@ from app.limits import MAX_IMAGE_BYTES, MAX_TEXT_CHARS
 from dataclasses import replace
 from io import BytesIO
 
+import pytest
+
 from app.config import get_settings
 from app.web import app
 from PIL import Image
@@ -104,3 +106,47 @@ def test_allergen_api_rejects_unsupported_category() -> None:
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (None, {"message": None}),
+        ("鲜" * 99 + "。", {"message": "鲜" * 99 + "。"}),
+    ],
+)
+def test_proactive_check_serializes_null_and_bounded_messages(
+    monkeypatch: pytest.MonkeyPatch,
+    message: str | None,
+    expected: dict[str, str | None],
+) -> None:
+    import app.web as web
+
+    class Service:
+        def check(self, user_id: str) -> str | None:
+            assert user_id == web.SHOWCASE_USER_ID
+            return message
+
+    monkeypatch.setattr(web, "get_proactive_service", lambda: Service())
+
+    response = client.post("/api/proactive-check")
+
+    assert response.status_code == 200
+    assert response.json() == expected
+
+
+def test_proactive_check_returns_null_when_service_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.web as web
+
+    class FailingService:
+        def check(self, user_id: str) -> str | None:
+            raise RuntimeError("provider secret response")
+
+    monkeypatch.setattr(web, "get_proactive_service", lambda: FailingService())
+
+    response = client.post("/api/proactive-check")
+
+    assert response.status_code == 200
+    assert response.json() == {"message": None}

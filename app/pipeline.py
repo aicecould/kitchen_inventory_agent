@@ -35,6 +35,7 @@ from app.memory import (
     profile_without_legacy_history,
     read_user_profile,
 )
+from app.proactive import ProactiveService, ReminderGenerator, VisitRepository
 from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
 from app.trace import TraceRecorder
@@ -668,4 +669,14 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
         vision,
         food_classifier,
         food_classifier_load_error,
+    )
+
+
+def build_proactive_service(pipeline: KitchenPipeline) -> ProactiveService:
+    visits = VisitRepository(pipeline.settings.inventory_db_path)
+    visits.initialize()
+    return ProactiveService(
+        visits,
+        ReminderGenerator(pipeline.settings),
+        pipeline,
     )

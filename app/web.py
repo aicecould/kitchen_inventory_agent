@@ -16,7 +16,8 @@ from app.config import get_settings
 from app.context import ExecutionTraceEvent
 from app.limits import MAX_IMAGE_BYTES, MAX_TEXT_CHARS
 from app.memory import read_user_profile, write_user_allergens
-from app.pipeline import KitchenPipeline, build_pipeline
+from app.pipeline import KitchenPipeline, build_pipeline, build_proactive_service
+from app.proactive import ProactiveService
 from app.actions import InventoryActionService, PendingActionRepository
 from app.adapters.vision_api import VisionApiError
 from app.tools.inventory import InventoryRepository
@@ -28,6 +29,8 @@ FRONTEND_DIR = ROOT_DIR / "frontend"
 app = FastAPI(title="Kitchen Inventory Agent", version="0.1.0")
 _pipeline: KitchenPipeline | None = None
 _pipeline_lock = Lock()
+_proactive_service: ProactiveService | None = None
+_proactive_lock = Lock()
 SHOWCASE_USER_ID = "showcase-user"
 
 
@@ -81,6 +84,16 @@ def get_pipeline() -> KitchenPipeline:
     return _pipeline
 
 
+def get_proactive_service() -> ProactiveService:
+    global _proactive_service
+    if _proactive_service is None:
+        pipeline = get_pipeline()
+        with _proactive_lock:
+            if _proactive_service is None:
+                _proactive_service = build_proactive_service(pipeline)
+    return _proactive_service
+
+
 @app.get("/api/status")
 def service_status() -> dict[str, object]:
     settings = get_settings()
@@ -114,6 +127,15 @@ def inventory_snapshot() -> dict[str, object]:
     repository = InventoryRepository(settings.inventory_db_path)
     repository.initialize()
     return {"items": repository.list_items()}
+
+
+@app.post("/api/proactive-check")
+def proactive_check() -> dict[str, str | None]:
+    try:
+        message = get_proactive_service().check(SHOWCASE_USER_ID)
+    except Exception:
+        message = None
+    return {"message": message}
 
 
 @app.get("/api/allergens")
