@@ -29,7 +29,7 @@ def test_non_food_query_is_blocked_before_deepseek(
     assert "仅支持食谱和食材" in result.content
 
 
-def test_simple_write_creates_confirmation_without_deepseek(
+def test_simple_write_preserves_quantity_text_without_deepseek(
     tmp_path: Path,
 ) -> None:
     profile_path = tmp_path / "profile.md"
@@ -42,7 +42,7 @@ def test_simple_write_creates_confirmation_without_deepseek(
     )
     pipeline = build_pipeline(settings)
 
-    result = pipeline.process_request(user_id="test", text="添加 2 个 番茄到库存")
+    result = pipeline.process_request(user_id="test", text="添加 02个 番茄到库存")
 
     assert "待确认" in result.content
     assert pipeline.inventory.find_by_name("番茄") == []
@@ -50,7 +50,7 @@ def test_simple_write_creates_confirmation_without_deepseek(
     assert len(pending) == 1
     assert pending[0].arguments == {
         "name": "番茄",
-        "quantity_text": "2 个",
+        "quantity_text": "02个",
         "expires_at": None,
         "expiry_source": "unknown",
     }
@@ -78,7 +78,7 @@ def test_missing_classifier_artifact_fails_open(tmp_path: Path) -> None:
     assert "fail-open" in classifier_event.detail
 
 
-def test_inventory_query_returns_prefilled_database_result_without_deepseek(
+def test_inventory_query_returns_exact_instance_snapshots_without_deepseek(
     tmp_path: Path,
 ) -> None:
     profile_path = tmp_path / "profile.md"
@@ -90,7 +90,7 @@ def test_inventory_query_returns_prefilled_database_result_without_deepseek(
         user_profile_path=profile_path,
     )
     pipeline = build_pipeline(settings)
-    pipeline.inventory.add_instance(
+    item = pipeline.inventory.add_instance(
         "土豆", "2 个", None, "unknown", now=datetime(2026, 8, 7, tzinfo=UTC)
     )
 
@@ -102,7 +102,7 @@ def test_inventory_query_returns_prefilled_database_result_without_deepseek(
         {
             "tool": "list_inventory",
             "arguments": {},
-            "result": [{"name": "土豆", "quantity": 2.0, "unit": "个"}],
+            "result": [item],
         }
     ]
     assert [event.name for event in result.execution_trace] == [

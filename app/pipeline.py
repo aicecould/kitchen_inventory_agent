@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 from classifier.model import FoodQueryClassifier
@@ -40,31 +39,6 @@ from app.tools.recipe import RecipeRouter
 from app.trace import TraceRecorder
 from app.vision import recognize_ingredients
 from app.vision_confirmations import VisionConfirmationRepository
-
-
-_NUMERIC_QUANTITY_TEXT = re.compile(
-    r"^(?P<quantity>\d+(?:\.\d+)?)\s*(?P<unit>\S+)$"
-)
-
-
-def _inventory_tool_result(
-    items: list[dict[str, object]],
-) -> list[dict[str, object]]:
-    result: list[dict[str, object]] = []
-    for item in items:
-        quantity_text = str(item["quantity_text"])
-        match = _NUMERIC_QUANTITY_TEXT.fullmatch(quantity_text)
-        if match is None:
-            result.append(item)
-            continue
-        result.append(
-            {
-                "name": item["name"],
-                "quantity": float(match.group("quantity")),
-                "unit": match.group("unit"),
-            }
-        )
-    return result
 
 
 @dataclass(slots=True)
@@ -380,7 +354,6 @@ class KitchenPipeline:
                 content = "当前库存：\n" + "\n".join(lines)
             else:
                 content = "当前库存为空。"
-            tool_items = _inventory_tool_result(items)
             return self._finish_direct(
                 user_id=user_id,
                 request_text=text,
@@ -390,7 +363,7 @@ class KitchenPipeline:
                     {
                         "tool": "list_inventory",
                         "arguments": {},
-                        "result": tool_items,
+                        "result": items,
                     }
                 ],
                 trace=trace,
@@ -407,17 +380,13 @@ class KitchenPipeline:
                 simple_operation.operation,
             )
             if simple_operation.operation == "inventory.add":
-                quantity = float(simple_operation.arguments["quantity"])
-                quantity_text = (
-                    f"{quantity:g} {simple_operation.arguments['unit']}"
-                )
                 action = trace.run(
                     "database",
                     "create_pending_action",
                     lambda: self.actions.propose_add(
                         user_id,
                         str(simple_operation.arguments["name"]),
-                        quantity_text,
+                        str(simple_operation.arguments["quantity_text"]),
                     ),
                     lambda value: f"{value.operation}; status={value.status}",
                 )

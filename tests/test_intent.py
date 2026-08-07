@@ -17,7 +17,7 @@ def test_simple_inventory_write_is_structured() -> None:
     action = match_simple_inventory_operation("添加 2 个 番茄到库存")
     assert action is not None
     assert action.operation == "inventory.add"
-    assert action.arguments == {"name": "番茄", "quantity": 2.0, "unit": "个"}
+    assert action.arguments == {"name": "番茄", "quantity_text": "2 个"}
 
 
 def test_simple_inventory_query_matches_allowlisted_phrasing() -> None:

@@ -24,7 +24,7 @@ _EXECUTED_INVENTORY_PATTERNS = (
 _MARKDOWN_URL = re.compile(r"\[[^\]]+\]\((https?://[^)\s]+)\)")
 _INVENTORY_LINE = re.compile(
     r"[-*]\s*(?P<name>[^：:\n]+)[：:]\s*"
-    r"(?P<quantity>\d+(?:\.\d+)?)\s*(?P<unit>[^\s，。；;\n]+)"
+    r"(?P<quantity_text>[^\n]+)"
 )
 
 
@@ -226,8 +226,7 @@ def _inventory_claim_mismatch(content: str, result: object) -> str | None:
     actual = {
         (
             str(item.get("name", "")).strip(),
-            float(item.get("quantity", 0)),
-            str(item.get("unit", "")).strip(),
+            str(item.get("quantity_text", "")).strip(),
         )
         for item in result
         if isinstance(item, dict)
@@ -235,8 +234,7 @@ def _inventory_claim_mismatch(content: str, result: object) -> str | None:
     for match in _INVENTORY_LINE.finditer(content):
         claim = (
             match.group("name").strip(),
-            float(match.group("quantity")),
-            match.group("unit").strip(),
+            match.group("quantity_text").strip(),
         )
         if claim not in actual:
             return "Inventory value in answer differs from tool result"

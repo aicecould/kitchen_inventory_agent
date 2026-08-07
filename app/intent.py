@@ -17,8 +17,9 @@ class SimpleInventoryOperation:
 
 _UNITS = "个|克|千克|公斤|瓶|袋|盒|根|颗|份"
 _ADD_PATTERN = re.compile(
-    rf"^(?:添加|增加|加入)(?:库存)?\s*(?P<quantity>\d+(?:\.\d+)?)\s*"
-    rf"(?P<unit>{_UNITS})\s*(?P<name>.+?)(?:到库存)?$"
+    rf"^(?:添加|增加|加入)(?:库存)?\s*"
+    rf"(?P<quantity_text>\d+(?:\.\d+)?\s*(?:{_UNITS}))\s*"
+    rf"(?P<name>.+?)(?:到库存)?$"
 )
 _UPDATE_PATTERN = re.compile(
     rf"^(?:将)?\s*(?P<name>.+?)\s*(?:更新|修改|设置)为\s*"
@@ -40,7 +41,7 @@ def match_simple_inventory_query(text: str) -> bool:
 
 
 def match_simple_inventory_operation(text: str) -> SimpleInventoryOperation | None:
-    normalized = " ".join(text.strip().split())
+    normalized = text.strip()
     for pattern, operation in (
         (_ADD_PATTERN, "inventory.add"),
         (_UPDATE_PATTERN, "inventory.update"),
