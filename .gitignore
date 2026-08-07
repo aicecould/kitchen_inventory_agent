@@ -5,6 +5,7 @@ __pycache__/
 *.db
 .env
 .run/
+.worktrees/
 data/
 docs/
 classifier/artifacts/*.vec
