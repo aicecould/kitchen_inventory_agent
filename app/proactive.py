@@ -7,7 +7,7 @@ import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
@@ -21,12 +21,16 @@ if TYPE_CHECKING:
 
 _REMINDER_LIMIT = 100
 _MARKDOWN_LIST_PREFIX = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+_MARKDOWN_SYNTAX = re.compile(
+    r"[*_`~]|\[[^\]\r\n]*\]\([^)\r\n]*\)|(?:^|\s)#{1,6}\s|(?:^|\s)>\s"
+)
 _ONE_SENTENCE = re.compile(r"^[^。！？.!?]*[。！？.!?]$")
-_ACTION_ID = re.compile(r"\bact_[0-9a-f]{32}\b", re.IGNORECASE)
+_ACTION_ID = re.compile(r"act_[0-9a-f]{32}", re.IGNORECASE)
 _EXECUTED_INVENTORY_PATTERNS = (
     re.compile(
         r"(?:已经|已)(?:成功)?(?:为你)?(?:向|从)?(?:库存)?"
-        r"(?:添加|加入|新增|删除|移除|更新|修改|设置|补充|补货|购买|采购)"
+        r"(?:添加|加入|新增|删除|移除|更新|修改|设置|补充|补货|购买|采购|"
+        r"入库|出库|清空)"
     ),
     re.compile(
         r"(?:已经|已)(?:成功)?(?:为你)?将.+?"
@@ -42,12 +46,20 @@ _EXECUTED_INVENTORY_PATTERNS = (
         r"(?:added|removed|updated|restocked|replenished)\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"\b(?:was|were|has been|have been)\s+"
+        r"(?:added|removed|updated|restocked|replenished)\b",
+        re.IGNORECASE,
+    ),
 )
-_PRIORITY = ("expired", "expiring", "stale")
+_PRIORITY = ("expired", "expiring", "stale", "restock")
+ReminderCategory = Literal["expired", "expiring", "stale", "restock"]
 
 
 class ReminderResponse(BaseModel):
     message: str | None
+    category: ReminderCategory | None = None
+    item_name: str | None = None
 
 
 class VisitRepository:
@@ -117,7 +129,7 @@ class ReminderGenerator:
         inventory: list[dict[str, object]],
         history: list[HistorySegment],
     ) -> str | None:
-        highest_priority = _highest_priority_items(candidates)
+        highest_priority = _highest_priority_selection(candidates)
         if self.model is not None:
             try:
                 payload = json.dumps(
@@ -134,7 +146,8 @@ class ReminderGenerator:
                 prompt = (
                     "你是厨房库存提醒助手。按已过期、3天内临期、超过14天未确认、"
                     "补货建议的顺序选择重点；较高优先级存在时必须在提醒中写出其中"
-                    "至少一个食材名称。仅返回一句不超过100个Unicode字符的纯文本，"
+                    "一个食材名称，并原样返回对应的category和item_name。提醒必须以"
+                    "该item_name开头。仅返回一句不超过100个Unicode字符的纯文本，"
                     "不得换行、使用Markdown、声称已经更改库存或创建待确认操作；"
                     "没有值得提醒的内容时返回null。\n"
                     f"数据：{payload}"
@@ -149,7 +162,7 @@ class ReminderGenerator:
                     else None
                 )
                 if message is not None and _valid_model_message(
-                    message, highest_priority
+                    message, response, highest_priority
                 ):
                     return message
             except Exception:
@@ -186,25 +199,34 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _highest_priority_items(
+def _highest_priority_selection(
     candidates: dict[str, list[dict[str, object]]],
-) -> list[dict[str, object]]:
+) -> tuple[str, list[dict[str, object]]] | None:
     for category in _PRIORITY:
         items = candidates.get(category, [])
         if items:
-            return items
-    return []
+            return category, items
+    return None
 
 
 def _valid_model_message(
-    message: str, highest_priority: list[dict[str, object]]
+    message: str,
+    response: ReminderResponse,
+    highest_priority: tuple[str, list[dict[str, object]]] | None,
 ) -> bool:
-    if not _safe_message(message):
+    if not _safe_message(message) or highest_priority is None:
         return False
-    if not highest_priority:
-        return True
-    names = [str(item.get("name", "")).strip() for item in highest_priority]
-    return any(name and name in message for name in names)
+    category, items = highest_priority
+    item_name = (
+        response.item_name.strip() if isinstance(response.item_name, str) else ""
+    )
+    names = {str(item.get("name", "")).strip() for item in items}
+    return (
+        response.category == category
+        and bool(item_name)
+        and item_name in names
+        and message.startswith(item_name)
+    )
 
 
 def _safe_message(message: str) -> bool:
@@ -215,6 +237,7 @@ def _safe_message(message: str) -> bool:
         and "\n" not in message
         and len(message.splitlines()) == 1
         and _MARKDOWN_LIST_PREFIX.match(message) is None
+        and _MARKDOWN_SYNTAX.search(message) is None
         and _ONE_SENTENCE.fullmatch(message) is not None
         and _ACTION_ID.search(message) is None
         and not any(
@@ -237,9 +260,12 @@ def _deterministic_fallback(
         elif category == "expiring":
             suffix = "将在3天内过期，请优先使用。"
             generic = "有食材将在3天内过期，请优先使用。"
-        else:
+        elif category == "stale":
             suffix = "已超过14天未确认，请检查库存状态。"
             generic = "有食材已超过14天未确认，请检查库存状态。"
+        else:
+            suffix = "可能需要补货，请先确认库存再决定。"
+            generic = "有食材可能需要补货，请先确认库存再决定。"
         available = _REMINDER_LIMIT - len(suffix)
         named = f"{name[:available]}{suffix}" if name else generic
         return named if _safe_message(named) else generic
