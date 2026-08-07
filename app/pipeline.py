@@ -24,9 +24,11 @@ from app.context import (
 )
 from app.expiry import DeepSeekExpiryInferer
 from app.intent import (
+    RouteDecision,
     match_intent,
     match_simple_inventory_operation,
     match_simple_inventory_query,
+    route_deterministically,
 )
 from app.memory import (
     ConversationHistoryRepository,
@@ -63,6 +65,8 @@ class KitchenPipeline:
         target_language: str = "zh",
     ) -> AgentResult:
         trace = TraceRecorder()
+        route_decision: RouteDecision | None = None
+        force_agent = False
         if image_bytes is not None:
             trace.record(
                 "routing",
@@ -70,45 +74,70 @@ class KitchenPipeline:
                 "skipped",
                 "image request bypasses text-only classifier",
             )
-        elif self.food_classifier is None:
+        else:
+            route_decision = route_deterministically(text)
+            route_detail = route_decision.kind
+            if route_decision.operation is not None:
+                route_detail += f"; {route_decision.operation}"
             trace.record(
                 "routing",
-                "food_query_classifier",
-                "unavailable",
-                (
-                    f"fail-open; {self.food_classifier_load_error}"
-                    if self.food_classifier_load_error
-                    else "disabled; fail-open"
-                ),
+                "deterministic_route",
+                "undecided" if route_decision.kind == "undecided" else "matched",
+                route_detail,
             )
-        else:
-            try:
-                classification = trace.run(
-                    "routing",
-                    "food_query_classifier",
-                    lambda: self.food_classifier.classify(text),
-                    lambda value: (
-                        f"related={str(value.is_related).lower()}; "
-                        f"score={value.positive_score:.4f}; "
-                        f"threshold={value.threshold:.4f}"
-                    ),
-                )
-            except Exception:
-                trace.record(
-                    "routing",
-                    "food_query_classifier_fallback",
-                    "fail-open",
-                    "prediction failed; continuing request",
-                )
-                classification = None
-
-            if classification is not None and not classification.is_related:
+            if route_decision.kind == "irrelevant":
                 return AgentResult(
                     content="当前仅支持食谱和食材相关问题。",
                     blocked=True,
                     audit_reason="food_query_irrelevant",
                     execution_trace=trace.events,
                 )
+            force_agent = route_decision.kind == "contextual"
+
+        if (
+            image_bytes is None
+            and route_decision is not None
+            and route_decision.kind == "undecided"
+        ):
+            if self.food_classifier is None:
+                trace.record(
+                    "routing",
+                    "food_query_classifier",
+                    "unavailable",
+                    (
+                        f"fail-open; {self.food_classifier_load_error}"
+                        if self.food_classifier_load_error
+                        else "disabled; fail-open"
+                    ),
+                )
+            else:
+                try:
+                    classification = trace.run(
+                        "routing",
+                        "food_query_classifier",
+                        lambda: self.food_classifier.classify(text),
+                        lambda value: (
+                            f"related={str(value.is_related).lower()}; "
+                            f"score={value.positive_score:.4f}; "
+                            f"threshold={value.threshold:.4f}"
+                        ),
+                    )
+                except Exception:
+                    trace.record(
+                        "routing",
+                        "food_query_classifier_fallback",
+                        "fail-open",
+                        "prediction failed; continuing request",
+                    )
+                    classification = None
+
+                if classification is not None and not classification.is_related:
+                    return AgentResult(
+                        content="当前仅支持食谱和食材相关问题。",
+                        blocked=True,
+                        audit_reason="food_query_irrelevant",
+                        execution_trace=trace.events,
+                    )
 
         intent = match_intent(text)
         trace.record("routing", "intent_match", "success", intent)
@@ -181,6 +210,8 @@ class KitchenPipeline:
             confirmation_result=None,
             trace=trace,
             prior_tool_history=prior_tool_history,
+            route_decision=route_decision,
+            force_agent=force_agent,
         )
 
     def resolve_vision_confirmation(
@@ -334,9 +365,16 @@ class KitchenPipeline:
         confirmation_result: dict[str, object] | None,
         trace: TraceRecorder,
         prior_tool_history: list[dict[str, object]] | None = None,
+        route_decision: RouteDecision | None = None,
+        force_agent: bool = False,
     ) -> AgentResult:
         prior_tool_history = prior_tool_history or []
-        if match_simple_inventory_query(text):
+        operation = route_decision.operation if route_decision is not None else None
+        arguments = route_decision.arguments if route_decision is not None else {}
+        if not force_agent and (
+            operation == "inventory.list"
+            or (operation is None and match_simple_inventory_query(text))
+        ):
             trace.record(
                 "routing", "inventory_query_regex", "matched", "inventory.list"
             )
@@ -371,7 +409,46 @@ class KitchenPipeline:
                 confirmation_result=confirmation_result,
             )
 
-        simple_operation = match_simple_inventory_operation(text)
+        if not force_agent and operation == "inventory.find":
+            name = str(arguments["name"])
+            trace.record("routing", "inventory_query_regex", "matched", operation)
+            items = trace.run(
+                "database",
+                "find_inventory",
+                lambda: self.inventory.find_by_name(name),
+                lambda values: f"{len(values)} item(s)",
+            )
+            content = (
+                "库存中没有找到该食材。"
+                if not items
+                else f"{name}库存：\n"
+                + "\n".join(
+                    f"- {item['name']}：{item['quantity_text']}" for item in items
+                )
+            )
+            return self._finish_direct(
+                user_id=user_id,
+                request_text=text,
+                content=content,
+                tool_history=[
+                    *prior_tool_history,
+                    {
+                        "tool": "find_inventory",
+                        "arguments": {"name": name},
+                        "result": items,
+                    },
+                ],
+                trace=trace,
+                ingredients=ingredients,
+                confirmation_result=confirmation_result,
+            )
+
+        simple_operation = (
+            None if force_agent or operation is not None
+            else match_simple_inventory_operation(text)
+        )
+        if not force_agent and operation in {"inventory.add", "inventory.remove_all"}:
+            simple_operation = RouteDecision("supported", operation, arguments)
         if simple_operation is not None:
             trace.record(
                 "routing",

@@ -7,6 +7,17 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Literal
+
+
+RouteKind = Literal["irrelevant", "supported", "contextual", "undecided"]
+
+
+@dataclass(frozen=True, slots=True)
+class RouteDecision:
+    kind: RouteKind
+    operation: str | None
+    arguments: dict[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +44,50 @@ _REDUCE_PATTERN = re.compile(
 _LIST_INVENTORY_PATTERN = re.compile(
     r"^(?:查询|查看|看看|列出)(?:一下)?(?:当前|现有)?库存(?:情况|列表)?[。！？!?]?$"
 )
+_GREETING_PATTERN = re.compile(r"^(?:你好|您好|在吗|谢谢|再见)[。！？!?]?$")
+_NAMED_INVENTORY_PATTERN = re.compile(
+    r"^(?:查询|查看|看看)(?:一下)?\s*(?P<name>.+?)\s*"
+    r"(?:还有多少|有多少|库存)[。！？!?]?$"
+)
+_REMOVE_ALL_PATTERN = re.compile(
+    r"^(?:删除|移除)\s*所有\s*(?P<name>.+?)(?:库存)?[。！？!?]?$"
+)
+_CONTEXTUAL_PATTERN = re.compile(
+    r"^(?:下一步呢?|然后呢?|继续|用了一半|都用完了|删掉它)[。！？!?]?$"
+)
+
+
+def route_deterministically(text: str) -> RouteDecision:
+    normalized = text.strip()
+
+    if _GREETING_PATTERN.fullmatch(normalized):
+        return RouteDecision("irrelevant", None, {})
+    if match_simple_inventory_query(normalized):
+        return RouteDecision("supported", "inventory.list", {})
+
+    named_match = _NAMED_INVENTORY_PATTERN.fullmatch(normalized)
+    if named_match:
+        return RouteDecision(
+            "supported", "inventory.find", {"name": named_match.group("name").strip()}
+        )
+
+    remove_all_match = _REMOVE_ALL_PATTERN.fullmatch(normalized)
+    if remove_all_match:
+        return RouteDecision(
+            "supported",
+            "inventory.remove_all",
+            {"name": remove_all_match.group("name").strip()},
+        )
+
+    simple_operation = match_simple_inventory_operation(normalized)
+    if simple_operation is not None and simple_operation.operation == "inventory.add":
+        return RouteDecision(
+            "supported", simple_operation.operation, simple_operation.arguments
+        )
+
+    if _CONTEXTUAL_PATTERN.fullmatch(normalized):
+        return RouteDecision("contextual", None, {})
+    return RouteDecision("undecided", None, {})
 
 
 def match_simple_inventory_query(text: str) -> bool:
