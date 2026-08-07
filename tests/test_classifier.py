@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from classifier import train as classifier_train
 from classifier.data import load_dataset, stratified_split
 from classifier.evaluate import calculate_metrics, choose_threshold
 from classifier.model import FoodQueryClassifier, positive_score
@@ -77,3 +78,19 @@ def test_runtime_classifier_uses_positive_probability_threshold() -> None:
     assert positive_score(model, "西红柿炒鸡蛋怎么做") == pytest.approx(0.35)
     assert result.is_related is True
     assert result.positive_score == pytest.approx(0.35)
+
+
+def test_training_finds_linux_build_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary = tmp_path / ".run" / "fasttext-linux-build" / "fasttext"
+    binary.parent.mkdir(parents=True)
+    binary.touch()
+    monkeypatch.setattr(classifier_train, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr(classifier_train.shutil, "which", lambda _: None)
+    monkeypatch.delenv("FASTTEXT_BINARY", raising=False)
+
+    located = classifier_train.locate_fasttext_binary(None)
+
+    assert located == binary.resolve()

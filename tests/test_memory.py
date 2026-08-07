@@ -1,6 +1,36 @@
 from pathlib import Path
 
-from app.memory import parse_user_profile, write_user_allergens
+from app.memory import (
+    DEFAULT_USER_PROFILE_TEMPLATE,
+    parse_user_profile,
+    read_user_profile,
+    write_user_allergens,
+)
+
+
+def test_read_user_profile_initializes_missing_file_from_template(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "nested" / "profile.md"
+
+    profile = read_user_profile(path)
+
+    expected = DEFAULT_USER_PROFILE_TEMPLATE.read_text(encoding="utf-8")
+    assert path.read_text(encoding="utf-8") == expected
+    assert profile.markdown == expected
+    assert profile.allergens == []
+    assert profile.preferences == []
+
+
+def test_read_user_profile_does_not_replace_existing_file(tmp_path: Path) -> None:
+    path = tmp_path / "profile.md"
+    existing = "# 用户画像\n\n## 饮食偏好\n\n- 少辣\n"
+    path.write_text(existing, encoding="utf-8")
+
+    profile = read_user_profile(path)
+
+    assert path.read_text(encoding="utf-8") == existing
+    assert profile.preferences == ["少辣"]
 
 
 def test_parse_markdown_profile() -> None:

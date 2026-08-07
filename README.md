@@ -262,7 +262,7 @@ stage / name / status / detail / duration_ms
 
 ### 自动化测试
 
-当前测试套件包含 **46 项通过测试**，主要覆盖模块和 HTTP 接口行为：
+当前测试套件包含 **57 项通过测试**，主要覆盖模块、HTTP 接口和 Linux 运行脚本行为：
 
 - 库存 CRUD、非法数量和部分扣减；
 - 提案在确认前不写库、重复确认幂等、取消后不可执行、跨用户禁止；
@@ -270,14 +270,15 @@ stage / name / status / detail / duration_ms
 - 图片格式、尺寸、置信度阈值和百度 API 参数；
 - Spoonacular 参数映射、TheMealDB 回退和过敏原过滤；
 - Agent 输入限制和过敏原工具参数约束；
-- 用户画像读写、HTTP 输入限制、执行轨迹和审核正则。
+- 用户画像读写、HTTP 输入限制、执行轨迹和审核正则；
+- 用户画像缺失时的模板初始化，以及 Linux 脚本的帮助、参数和语法契约。
 
 这些测试验证了关键模块和部分接口组合行为。图片确认完整恢复、五段历史裁剪、工具调用审核的全部规则、并发状态转换和多轮 Agent 场景仍需要更系统的端到端场景覆盖。
 
 运行测试：
 
-```powershell
-.venv\Scripts\python.exe -m pytest -q
+```bash
+.venv/bin/python -m pytest -q
 ```
 
 ### 分类器数据与效果
@@ -348,6 +349,8 @@ app/
 ├── tools/
 │   ├── inventory.py          # SQLite 库存仓库
 │   └── recipe.py             # 菜谱主备路由与过滤
+├── templates/
+│   └── user_profile.md       # 基础用户画像模板
 ├── trace.py                  # 请求级执行轨迹
 ├── vision.py                 # 图片校验和置信度分层
 ├── vision_confirmations.py   # 图片确认持久化
@@ -355,6 +358,7 @@ app/
 
 classifier/
 ├── artifacts/                # 部署模型、元数据和评估结果
+├── build_fasttext.sh         # Linux FastText CLI 构建脚本
 ├── dataset/                  # 领域分类数据集
 ├── data.py                   # 数据校验和划分
 ├── evaluate.py               # 独立评估入口
@@ -364,7 +368,7 @@ classifier/
 
 data/                         # SQLite 数据库和 Markdown 用户画像
 frontend/                     # 展示页面、样式和前端交互
-scripts/                      # PowerShell 启停脚本
+scripts/                      # Linux Bash 启停脚本
 tests/                        # pytest 测试
 main.py                       # CLI 入口
 ```
@@ -373,13 +377,12 @@ main.py                       # CLI 入口
 
 项目使用 `enum.StrEnum`，需要 **Python 3.11 或更高版本**。
 
-PowerShell：
+Linux：
 
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-Copy-Item .env.example .env
+```bash
+python3.13 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+cp .env.example .env
 ```
 
 ## 配置
@@ -421,12 +424,15 @@ Copy-Item .env.example .env
 | `FOOD_CLASSIFIER_MODEL_PATH` | `classifier/artifacts/food_query.bin` | FastText 模型路径 |
 | `FOOD_CLASSIFIER_METADATA_PATH` | `classifier/artifacts/metadata.json` | 分类阈值和预处理版本元数据 |
 
+当 `USER_PROFILE_PATH` 指向的文件不存在时，应用会从受版本控制的
+`app/templates/user_profile.md` 创建基础画像；已有画像不会被覆盖。
+
 ## 运行方式
 
 ### Web 展示页
 
-```powershell
-.\scripts\start.ps1
+```bash
+./scripts/start.sh
 ```
 
 访问 `http://127.0.0.1:8000`。页面包含：
@@ -440,33 +446,33 @@ Copy-Item .env.example .env
 
 停止服务：
 
-```powershell
-.\scripts\stop.ps1
+```bash
+./scripts/stop.sh
 ```
 
 可以指定端口：
 
-```powershell
-.\scripts\start.ps1 -Port 8080
-.\scripts\stop.ps1 -Port 8080
+```bash
+./scripts/start.sh --port 8080
+./scripts/stop.sh --port 8080
 ```
 
 ### CLI
 
-```powershell
-.venv\Scripts\python.exe main.py `
-  --text "查询一下当前库存" `
-  --user-id "demo-user" `
+```bash
+.venv/bin/python main.py \
+  --text "查询一下当前库存" \
+  --user-id "demo-user" \
   --language zh
 ```
 
 图片请求：
 
-```powershell
-.venv\Scripts\python.exe main.py `
-  --text "根据图片里的食材推荐菜谱" `
-  --image ".\sample.jpg" `
-  --user-id "demo-user" `
+```bash
+.venv/bin/python main.py \
+  --text "根据图片里的食材推荐菜谱" \
+  --image "./sample.jpg" \
+  --user-id "demo-user" \
   --language zh
 ```
 
@@ -494,23 +500,23 @@ FastAPI 同时提供 OpenAPI 文档：`http://127.0.0.1:8000/docs`。
 
 训练脚本使用 FastText 0.9.2 CLI；应用内推理使用与 `.bin` 文件兼容的 `fasttext-predict`。
 
-Windows PowerShell 构建 FastText：
+Linux 构建 FastText：
 
-```powershell
-.\classifier\build_fasttext.ps1
+```bash
+./classifier/build_fasttext.sh
 ```
 
 训练：
 
-```powershell
-.venv\Scripts\python.exe -m classifier.train
+```bash
+.venv/bin/python -m classifier.train
 ```
 
 独立评估：
 
-```powershell
-.venv\Scripts\python.exe -m classifier.evaluate `
-  --dataset classifier\dataset\semantic_food_query_dataset_300.csv
+```bash
+.venv/bin/python -m classifier.evaluate \
+  --dataset classifier/dataset/semantic_food_query_dataset_300.csv
 ```
 
 生成的部署文件位于 `classifier/artifacts/`，应用运行只依赖 `food_query.bin` 和 `metadata.json`。

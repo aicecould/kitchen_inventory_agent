@@ -12,22 +12,24 @@
 
 应用内推理依赖已经包含在根目录 `requirements.txt` 中：
 
-```powershell
-pip install -r requirements.txt
+```bash
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
 训练使用官方 FastText 0.9.2 CLI，应用内推理使用兼容 `.bin` 文件的 `fasttext-predict`：
 
-```powershell
-.\classifier\build_fasttext.ps1
+```bash
+./classifier/build_fasttext.sh
 ```
 
-Linux/macOS 可直接安装 FastText CLI，并通过 `--fasttext-binary` 指定位置。
+脚本会从官方仓库获取 FastText v0.9.2，并将 Linux CLI 构建到
+`.run/fasttext-linux-build/fasttext`。也可以安装系统 FastText CLI，并通过
+`--fasttext-binary` 指定位置。
 
 ## 训练
 
-```powershell
-python -m classifier.train
+```bash
+.venv/bin/python -m classifier.train
 ```
 
 训练流程会：
@@ -57,7 +59,7 @@ classifier/artifacts/
 
 ## 独立评估
 
-```powershell
-python -m classifier.evaluate `
+```bash
+.venv/bin/python -m classifier.evaluate \
   --dataset classifier/dataset/semantic_food_query_dataset_300.csv
 ```

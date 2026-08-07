@@ -12,6 +12,10 @@ from pydantic import BaseModel, Field
 
 from app.context import HistorySegment
 
+DEFAULT_USER_PROFILE_TEMPLATE = (
+    Path(__file__).resolve().parent / "templates" / "user_profile.md"
+)
+
 
 class UserProfile(BaseModel):
     markdown: str
@@ -132,7 +136,13 @@ class ConversationHistoryRepository:
 
 def load_user_profile(path: Path) -> str:
     if not path.exists():
-        raise FileNotFoundError(f"User profile not found: {path}")
+        template = DEFAULT_USER_PROFILE_TEMPLATE.read_text(encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(template)
+        except FileExistsError:
+            pass
     return path.read_text(encoding="utf-8")
 
 

@@ -45,8 +45,7 @@ def locate_fasttext_binary(explicit: Path | None) -> Path:
         if os.environ.get("FASTTEXT_BINARY")
         else None,
         Path(shutil.which("fasttext")) if shutil.which("fasttext") else None,
-        ROOT_DIR / ".run" / "fasttext-build" / "Release" / "fasttext.exe",
-        ROOT_DIR / ".run" / "fasttext-build" / "fasttext",
+        ROOT_DIR / ".run" / "fasttext-linux-build" / "fasttext",
     ]
     for candidate in candidates:
         if candidate is not None and candidate.is_file():
