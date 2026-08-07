@@ -89,6 +89,33 @@ def test_inventory_audit_rejects_changed_displayed_instance_id() -> None:
     assert audit.reason == "Inventory value in answer differs from tool result"
 
 
+def test_inventory_audit_rejects_unbulleted_changed_instance_claims() -> None:
+    history = [
+        {
+            "tool": "list_inventory_instances",
+            "arguments": {},
+            "result": [inventory_instance()],
+        }
+    ]
+
+    changed_quantity = review_tool_calls(
+        "番茄 [inv_ab12]：100个",
+        history,
+    )
+    changed_id = review_tool_calls(
+        "番茄 [inv_cd34]：大约100个",
+        history,
+    )
+    exact = review_tool_calls(
+        "番茄 [inv_ab12]：大约100个",
+        history,
+    )
+
+    assert changed_quantity.reason == "Inventory value in answer differs from tool result"
+    assert changed_id.reason == "Inventory value in answer differs from tool result"
+    assert exact.passed is True
+
+
 def test_inventory_audit_validates_find_name_and_get_instance_id() -> None:
     wrong_name = review_tool_calls(
         "库存中没有找到该食材。",

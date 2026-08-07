@@ -6,7 +6,7 @@ import pytest
 from app.actions import InventoryActionService, PendingActionRepository
 from app.adapters.recipe_api import TheMealDbClient
 from app.agent import KitchenAgent
-from app.context import AgentContext
+from app.context import AgentContext, HistorySegment
 from app.prompts import SYSTEM_PROMPT
 from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
@@ -173,6 +173,76 @@ def test_inventory_write_tools_require_lookup_and_create_only_pending_actions(
         "expiry_source": "unknown",
     }
     assert len(actions.repository.list_pending("test")) == 5
+
+
+def test_exact_get_cannot_choose_duplicate_from_history_without_user_id_selection(
+    tmp_path: Path,
+) -> None:
+    inventory, actions, _ = inventory_tools(tmp_path)
+    first = inventory.add_instance("番茄", "2个", None, "unknown")
+    second = inventory.add_instance("番茄", "500g", None, "unknown")
+    history = HistorySegment(
+        request="查看番茄还有多少",
+        response=(
+            f"番茄 [{str(first['instance_id'])[:8]}]：2个\n"
+            f"番茄 [{str(second['instance_id'])[:8]}]：500g"
+        ),
+        tool_history=[
+            {
+                "tool": "find_inventory_instances",
+                "arguments": {"name": "番茄"},
+                "result": [first, second],
+            }
+        ],
+    )
+    agent = KitchenAgent(
+        model=None,  # type: ignore[arg-type]
+        inventory=inventory,
+        recipes=RecipeRouter(
+            None,
+            TheMealDbClient("https://example.invalid", timeout=1),
+        ),
+        actions=actions,
+    )
+    ambiguous_context = AgentContext(
+        user_id="test",
+        request_text="删掉一个番茄",
+        history_segments=[history],
+    )
+    ambiguous_tools = {
+        tool.name: tool
+        for tool in agent._create_tools(ambiguous_context, TraceRecorder())
+    }
+    first_id = str(first["instance_id"])
+
+    ambiguous_tools["get_inventory_instance"].invoke(  # type: ignore[attr-defined]
+        {"instance_id": first_id}
+    )
+
+    with pytest.raises(ValueError, match="AMBIGUOUS_INSTANCE_MATCH"):
+        ambiguous_tools["propose_remove_inventory_instance"].invoke(  # type: ignore[attr-defined]
+            {"instance_id": first_id}
+        )
+    assert actions.repository.list_pending("test") == []
+
+    selected_context = AgentContext(
+        user_id="test",
+        request_text=f"删除 {first_id[:8]}",
+        history_segments=[history],
+    )
+    selected_tools = {
+        tool.name: tool
+        for tool in agent._create_tools(selected_context, TraceRecorder())
+    }
+    selected_tools["get_inventory_instance"].invoke(  # type: ignore[attr-defined]
+        {"instance_id": first_id}
+    )
+    proposal = selected_tools["propose_remove_inventory_instance"].invoke(  # type: ignore[attr-defined]
+        {"instance_id": first_id}
+    )
+
+    assert proposal["status"] == "pending"
+    assert inventory.list_instances() == [first, second]
 
 
 def test_recipe_tool_requires_all_configured_allergens() -> None:

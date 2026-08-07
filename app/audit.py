@@ -6,6 +6,7 @@ import ast
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from app.context import ConfidenceStatus, Ingredient
@@ -24,7 +25,7 @@ _EXECUTED_INVENTORY_PATTERNS = (
 _MARKDOWN_URL = re.compile(r"\[[^\]]+\]\((https?://[^)\s]+)\)")
 _INSTANCE_ID = re.compile(r"^inv_[0-9a-f]{32}$")
 _INVENTORY_LINE = re.compile(
-    r"^[-*]\s+(?P<name>.+?)\s+\[(?P<instance_id>[^\]\r\n]+)\]"
+    r"^(?:[-*]\s+)?(?P<name>.+?)\s+\[(?P<instance_id>[^\]\r\n]+)\]"
     r"[：:](?P<quantity_text>[^\r\n]+)$",
     re.MULTILINE,
 )
@@ -203,9 +204,33 @@ def _as_value(value: object) -> Any:
 
 def _arguments_match(call_arguments: dict[str, object], result_arguments: dict[str, object]) -> bool:
     for key, value in call_arguments.items():
-        if key not in result_arguments or result_arguments[key] != value:
+        if key not in result_arguments:
             return False
+        result_value = result_arguments[key]
+        if result_value == value:
+            continue
+        if key == "expires_at" and _equivalent_datetimes(value, result_value):
+            continue
+        return False
     return True
+
+
+def _equivalent_datetimes(left: object, right: object) -> bool:
+    parsed: list[datetime] = []
+    for value in (left, right):
+        if isinstance(value, datetime):
+            candidate = value
+        elif isinstance(value, str):
+            try:
+                candidate = datetime.fromisoformat(value)
+            except ValueError:
+                return False
+        else:
+            return False
+        if candidate.tzinfo is None or candidate.utcoffset() is None:
+            return False
+        parsed.append(candidate)
+    return parsed[0] == parsed[1]
 
 
 def _validate_tool_record(entry: dict[str, object]) -> str | None:

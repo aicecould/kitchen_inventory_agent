@@ -412,6 +412,65 @@ def test_relative_use_runs_real_agent_and_keeps_replacement_pending(
     assert "propose_replace_inventory_instance" in model.bound_tool_names
 
 
+def test_relative_replacement_accepts_equivalent_expiry_serializations(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    original = pipeline.inventory.add_instance(
+        "番茄",
+        "2个",
+        datetime(2026, 8, 10, 9, tzinfo=UTC),
+        "user",
+    )
+    instance_id = str(original["instance_id"])
+    install_scripted_agent(
+        pipeline,
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "find_inventory_instances",
+                        "args": {"name": "番茄"},
+                        "id": "call-find",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "propose_replace_inventory_instance",
+                        "args": {
+                            "instance_id": instance_id,
+                            "quantity_text": "1个",
+                            "expires_at": "2026-08-10T09:00:00+00:00",
+                            "expiry_source": "user",
+                        },
+                        "id": "call-replace",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="已生成待确认操作，确认前库存不会改变。"),
+        ],
+    )
+
+    result = pipeline.process_request(user_id="test", text="用了一半")
+
+    assert result.blocked is False
+    assert pipeline.inventory.get_instance(instance_id) == original
+    pending = pipeline.actions.repository.list_pending("test")
+    assert len(pending) == 1
+    assert pending[0].arguments == {
+        "instance_id": instance_id,
+        "quantity_text": "1个",
+        "expires_at": "2026-08-10T09:00:00Z",
+        "expiry_source": "user",
+    }
+
+
 def test_named_replacement_reaches_agent_lookup_instead_of_direct_write(
     tmp_path: Path,
 ) -> None:

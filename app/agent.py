@@ -178,6 +178,12 @@ class KitchenAgent:
             if instance_id not in resolved_instance_ids:
                 raise ValueError("INSTANCE_LOOKUP_REQUIRED")
 
+        def user_selected_instance(instance_id: str) -> bool:
+            return any(
+                candidate in context.request_text
+                for candidate in (instance_id, instance_id[:8])
+            )
+
         @tool
         def list_inventory_instances() -> list[dict[str, object]]:
             """List every stored inventory instance with its ID and exact quantity text."""
@@ -212,8 +218,12 @@ class KitchenAgent:
                 lambda: repository.get_instance(instance_id),
                 lambda value: "found" if value else "not found",
             )
-            if instance is not None and instance_id not in ambiguous_instance_ids:
-                remember_instances([instance], exact_instance=True)
+            if instance is not None:
+                if user_selected_instance(instance_id):
+                    remember_instances([instance], exact_instance=True)
+                else:
+                    matches = repository.find_by_name(str(instance["name"]))
+                    remember_instances(matches)
             return instance
 
         @tool
