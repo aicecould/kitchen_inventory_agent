@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.tools.inventory import InventoryRepository
 
@@ -21,21 +21,46 @@ ActionStatus = Literal[
 class AddInventoryArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=100)
-    quantity: float = Field(gt=0)
-    unit: str = Field(min_length=1, max_length=20)
+    quantity_text: str = Field(min_length=1, max_length=100)
+    expires_at: datetime | None
+    expiry_source: Literal["llm", "user", "unknown"]
+
+    @field_validator("expires_at")
+    @classmethod
+    def expires_at_must_be_aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("expires_at must be timezone-aware")
+        return value
 
 
-class UpdateInventoryArguments(BaseModel):
+class ReplaceInventoryArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=100)
-    quantity: float = Field(ge=0)
-    unit: str = Field(min_length=1, max_length=20)
+    instance_id: str = Field(min_length=1, max_length=100)
+    quantity_text: str = Field(min_length=1, max_length=100)
+    expires_at: datetime | None
+    expiry_source: Literal["llm", "user", "unknown"]
+
+    @field_validator("expires_at")
+    @classmethod
+    def expires_at_must_be_aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("expires_at must be timezone-aware")
+        return value
 
 
 class RemoveInventoryArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    instance_id: str = Field(min_length=1, max_length=100)
+
+
+class RemoveAllInventoryArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=100)
-    quantity: float | None = Field(default=None, gt=0)
+
+
+class ConfirmInventoryArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    instance_id: str = Field(min_length=1, max_length=100)
 
 
 class PendingAction(BaseModel):
@@ -53,8 +78,10 @@ class PendingAction(BaseModel):
 
 ARGUMENT_MODELS = {
     "inventory.add": AddInventoryArguments,
-    "inventory.update": UpdateInventoryArguments,
+    "inventory.replace": ReplaceInventoryArguments,
     "inventory.remove": RemoveInventoryArguments,
+    "inventory.remove_all": RemoveAllInventoryArguments,
+    "inventory.confirm": ConfirmInventoryArguments,
 }
 
 WRITE_OPERATION_ALLOWLIST = frozenset(ARGUMENT_MODELS)
@@ -70,13 +97,16 @@ def validate_operation(operation: str, arguments: dict[str, object]) -> BaseMode
 def action_summary(operation: str, arguments: BaseModel) -> str:
     values = arguments.model_dump()
     if operation == "inventory.add":
-        return f"向库存添加 {values['quantity']:g} {values['unit']} {values['name']}"
-    if operation == "inventory.update":
-        return f"将 {values['name']} 的库存设置为 {values['quantity']:g} {values['unit']}"
-    quantity = values.get("quantity")
-    if quantity is None:
-        return f"从库存删除 {values['name']}"
-    return f"从库存减少 {quantity:g} {values['name']}"
+        return f"向库存添加 {values['quantity_text']} {values['name']}"
+    if operation == "inventory.replace":
+        return f"更新库存项 {str(values['instance_id'])[:8]}"
+    if operation == "inventory.remove":
+        return f"从库存删除库存项 {str(values['instance_id'])[:8]}"
+    if operation == "inventory.remove_all":
+        return f"从库存删除所有 {values['name']}"
+    if operation == "inventory.confirm":
+        return f"确认库存项 {str(values['instance_id'])[:8]}"
+    raise ValueError(f"Operation is not allowlisted: {operation}")
 
 
 class PendingActionRepository:
@@ -105,6 +135,19 @@ class PendingActionRepository:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_pending_actions_user_status "
                 "ON pending_actions(user_id, status)"
+            )
+            legacy_rows = connection.execute(
+                "SELECT action_id, arguments_json FROM pending_actions "
+                "WHERE operation LIKE 'inventory.%' AND status = 'pending'"
+            ).fetchall()
+            legacy_action_ids = [
+                str(action_id)
+                for action_id, arguments_json in legacy_rows
+                if {"quantity", "unit"} & set(json.loads(str(arguments_json)))
+            ]
+            connection.executemany(
+                "DELETE FROM pending_actions WHERE action_id = ?",
+                [(action_id,) for action_id in legacy_action_ids],
             )
 
     def create(
@@ -276,7 +319,7 @@ class InventoryActionService:
         return self.repository.create(
             user_id=user_id,
             operation=operation,
-            arguments=validated.model_dump(),
+            arguments=validated.model_dump(mode="json"),
             summary=action_summary(operation, validated),
             ttl_minutes=self.ttl_minutes,
         )
@@ -297,11 +340,18 @@ class InventoryActionService:
         return self.repository.cancel(action_id, user_id)
 
     def _execute(self, operation: str, arguments: BaseModel) -> dict[str, object]:
-        values = arguments.model_dump()
+        values = arguments.model_dump(mode="python")
         if operation == "inventory.add":
-            return self.inventory.add_item(**values)  # type: ignore[arg-type]
-        if operation == "inventory.update":
-            return self.inventory.update_item(**values)  # type: ignore[arg-type]
+            return self.inventory.add_instance(**values)  # type: ignore[arg-type]
+        if operation == "inventory.replace":
+            return self.inventory.replace_instance(**values)  # type: ignore[arg-type]
         if operation == "inventory.remove":
-            return self.inventory.remove_item(**values)  # type: ignore[arg-type]
+            return self.inventory.remove_instance(**values)  # type: ignore[arg-type]
+        if operation == "inventory.remove_all":
+            removed = self.inventory.remove_all_by_name(**values)  # type: ignore[arg-type]
+            items = removed["removed_instances"]
+            assert isinstance(items, list)
+            return {"name": values["name"], "removed_count": len(items), "items": items}
+        if operation == "inventory.confirm":
+            return self.inventory.confirm_instance(**values)  # type: ignore[arg-type]
         raise ValueError(f"Operation is not allowlisted: {operation}")
