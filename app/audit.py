@@ -22,9 +22,18 @@ _EXECUTED_INVENTORY_PATTERNS = (
     re.compile(r"(?:库存)?操作(?:已经|已)(?:成功)?执行"),
 )
 _MARKDOWN_URL = re.compile(r"\[[^\]]+\]\((https?://[^)\s]+)\)")
+_INSTANCE_ID = re.compile(r"^inv_[0-9a-f]{32}$")
 _INVENTORY_LINE = re.compile(
-    r"[-*]\s*(?P<name>[^：:\n]+)[：:]\s*"
-    r"(?P<quantity_text>[^\n]+)"
+    r"^[-*]\s+(?P<name>.+?)\s+\[(?P<instance_id>[^\]\r\n]+)\]"
+    r"[：:](?P<quantity_text>[^\r\n]+)$",
+    re.MULTILINE,
+)
+_INVENTORY_READ_TOOLS = frozenset(
+    {
+        "list_inventory_instances",
+        "find_inventory_instances",
+        "get_inventory_instance",
+    }
 )
 
 
@@ -135,11 +144,18 @@ def review_tool_calls(
     ):
         return AuditResult(False, "Pending inventory operation was described as executed")
 
+    inventory_snapshots: list[object] = []
     for entry in parsed_calls:
-        if entry.get("tool") == "list_inventory":
-            mismatch = _inventory_claim_mismatch(content, entry["result"])
-            if mismatch:
-                return AuditResult(False, mismatch)
+        if entry.get("tool") not in _INVENTORY_READ_TOOLS:
+            continue
+        result = entry["result"]
+        if isinstance(result, dict):
+            inventory_snapshots.append(result)
+        elif isinstance(result, list):
+            inventory_snapshots.extend(result)
+    mismatch = _inventory_claim_mismatch(content, inventory_snapshots)
+    if mismatch:
+        return AuditResult(False, mismatch)
 
     recipe_calls = [
         entry for entry in parsed_calls if entry.get("tool") == "search_recipes"
@@ -198,14 +214,35 @@ def _validate_tool_record(entry: dict[str, object]) -> str | None:
     result = entry.get("result")
     if not isinstance(arguments, dict):
         return f"Tool arguments are not structured: {tool_name}"
-    if tool_name == "list_inventory":
+    if tool_name == "list_inventory_instances":
         if arguments or not isinstance(result, list):
             return "Inventory list parameters or result are invalid"
-    if tool_name == "get_inventory_item" and isinstance(result, dict):
-        requested_name = str(arguments.get("name", "")).strip()
-        result_name = str(result.get("name", "")).strip()
-        if not requested_name or requested_name != result_name:
-            return "Inventory item result differs from requested name"
+        return _validate_inventory_instances(result)
+    if tool_name == "find_inventory_instances":
+        requested_name = arguments.get("name")
+        if (
+            not isinstance(requested_name, str)
+            or not requested_name.strip()
+            or not isinstance(result, list)
+        ):
+            return "Inventory find parameters or result are invalid"
+        result_error = _validate_inventory_instances(result)
+        if result_error:
+            return result_error
+        if any(item.get("name") != requested_name for item in result):
+            return "Inventory instances differ from requested name"
+    if tool_name == "get_inventory_instance":
+        requested_id = arguments.get("instance_id")
+        if not isinstance(requested_id, str) or _INSTANCE_ID.fullmatch(requested_id) is None:
+            return "Inventory instance request has an invalid ID"
+        if result is not None and not isinstance(result, dict):
+            return "Inventory instance result is invalid"
+        if isinstance(result, dict):
+            result_error = _validate_inventory_instances([result])
+            if result_error:
+                return result_error
+            if result.get("instance_id") != requested_id:
+                return "Inventory instance result differs from requested ID"
     if tool_name == "search_recipes":
         requested_ingredients = arguments.get("ingredients")
         if not isinstance(requested_ingredients, list) or not requested_ingredients:
@@ -221,23 +258,51 @@ def _validate_tool_record(entry: dict[str, object]) -> str | None:
 
 
 def _inventory_claim_mismatch(content: str, result: object) -> str | None:
-    if not isinstance(result, list):
+    if isinstance(result, dict):
+        instances = [result]
+    elif isinstance(result, list):
+        instances = result
+    else:
         return None
-    actual = {
-        (
-            str(item.get("name", "")).strip(),
-            str(item.get("quantity_text", "")).strip(),
-        )
-        for item in result
-        if isinstance(item, dict)
-    }
+    actual: set[tuple[str, str, str]] = set()
+    for item in instances:
+        if not isinstance(item, dict):
+            continue
+        instance_id = str(item.get("instance_id", ""))
+        for displayed_id in {instance_id, instance_id[:8]}:
+            actual.add(
+                (
+                    str(item.get("name", "")),
+                    displayed_id,
+                    str(item.get("quantity_text", "")),
+                )
+            )
     for match in _INVENTORY_LINE.finditer(content):
         claim = (
-            match.group("name").strip(),
-            match.group("quantity_text").strip(),
+            match.group("name"),
+            match.group("instance_id"),
+            match.group("quantity_text"),
         )
         if claim not in actual:
             return "Inventory value in answer differs from tool result"
+    return None
+
+
+def _validate_inventory_instances(result: list[object]) -> str | None:
+    seen_ids: set[str] = set()
+    for item in result:
+        if not isinstance(item, dict):
+            return "Inventory instance result is invalid"
+        instance_id = item.get("instance_id")
+        if not isinstance(instance_id, str) or _INSTANCE_ID.fullmatch(instance_id) is None:
+            return "Inventory instance result has an invalid ID"
+        if instance_id in seen_ids:
+            return "Inventory instance result IDs are duplicated"
+        seen_ids.add(instance_id)
+        if not isinstance(item.get("name"), str) or not isinstance(
+            item.get("quantity_text"), str
+        ):
+            return "Inventory instance result is invalid"
     return None
 
 

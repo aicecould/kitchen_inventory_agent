@@ -26,7 +26,6 @@ from app.expiry import DeepSeekExpiryInferer
 from app.intent import (
     RouteDecision,
     match_intent,
-    match_simple_inventory_operation,
     match_simple_inventory_query,
     route_deterministically,
 )
@@ -386,7 +385,8 @@ class KitchenPipeline:
             )
             if items:
                 lines = [
-                    f"- {item['name']}：{item['quantity_text']}"
+                    f"- {item['name']} [{str(item['instance_id'])[:8]}]："
+                    f"{item['quantity_text']}"
                     for item in items
                 ]
                 content = "当前库存：\n" + "\n".join(lines)
@@ -399,7 +399,7 @@ class KitchenPipeline:
                 tool_history=[
                     *prior_tool_history,
                     {
-                        "tool": "list_inventory",
+                        "tool": "list_inventory_instances",
                         "arguments": {},
                         "result": items,
                     }
@@ -423,7 +423,9 @@ class KitchenPipeline:
                 if not items
                 else f"{name}库存：\n"
                 + "\n".join(
-                    f"- {item['name']}：{item['quantity_text']}" for item in items
+                    f"- {item['name']} [{str(item['instance_id'])[:8]}]："
+                    f"{item['quantity_text']}"
+                    for item in items
                 )
             )
             return self._finish_direct(
@@ -433,7 +435,7 @@ class KitchenPipeline:
                 tool_history=[
                     *prior_tool_history,
                     {
-                        "tool": "find_inventory",
+                        "tool": "find_inventory_instances",
                         "arguments": {"name": name},
                         "result": items,
                     },
@@ -443,10 +445,7 @@ class KitchenPipeline:
                 confirmation_result=confirmation_result,
             )
 
-        simple_operation = (
-            None if force_agent or operation is not None
-            else match_simple_inventory_operation(text)
-        )
+        simple_operation = None
         if not force_agent and operation in {"inventory.add", "inventory.remove_all"}:
             simple_operation = RouteDecision("supported", operation, arguments)
         if simple_operation is not None:
@@ -484,7 +483,9 @@ class KitchenPipeline:
                     *prior_tool_history,
                     {
                         "tool": (
-                            f"propose_{simple_operation.operation.replace('.', '_')}"
+                            "propose_add_inventory_instance"
+                            if simple_operation.operation == "inventory.add"
+                            else "propose_remove_all_inventory_instances"
                         ),
                         "arguments": action.arguments,
                         "result": action.model_dump(mode="json"),

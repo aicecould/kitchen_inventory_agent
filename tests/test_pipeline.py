@@ -1,11 +1,20 @@
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, Sequence
 
 from classifier.model import ClassificationResult
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.tools import BaseTool
+from pydantic import Field
+
+from app.adapters.recipe_api import TheMealDbClient
+from app.agent import KitchenAgent
 from app.config import get_settings
 from app.context import AgentContext, AgentResult
 from app.pipeline import build_pipeline
+from app.tools.recipe import RecipeRouter
 
 
 class ForbiddenClassifier:
@@ -27,6 +36,17 @@ class IrrelevantClassifierSpy:
         )
 
 
+class RelatedClassifierSpy:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def classify(self, text: str) -> ClassificationResult:
+        self.calls.append(text)
+        return ClassificationResult(
+            is_related=True, positive_score=0.99, threshold=0.5
+        )
+
+
 class CapturingAgent:
     def __init__(self) -> None:
         self.contexts: list[AgentContext] = []
@@ -34,6 +54,34 @@ class CapturingAgent:
     def run(self, context: AgentContext, target_language: str = "zh") -> AgentResult:
         self.contexts.append(context)
         return AgentResult(content="已根据上文继续处理。")
+
+
+class FixedExpiryInferer:
+    def infer(self, name: str, now: datetime) -> datetime:
+        assert name == "番茄"
+        return datetime(2099, 1, 2, tzinfo=UTC)
+
+
+class ScriptedChatModel(FakeMessagesListChatModel):
+    bound_tool_names: list[str] = Field(default_factory=list)
+    received_messages: list[list[BaseMessage]] = Field(default_factory=list)
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Any | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> "ScriptedChatModel":
+        self.bound_tool_names = [
+            str(getattr(tool, "name", tool.get("name") if isinstance(tool, dict) else ""))
+            for tool in tools
+        ]
+        return self
+
+    def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any):
+        self.received_messages.append(list(messages))
+        return super()._generate(messages, *args, **kwargs)
 
 
 def build_test_pipeline(tmp_path: Path):
@@ -46,6 +94,28 @@ def build_test_pipeline(tmp_path: Path):
         user_profile_path=profile_path,
     )
     return build_pipeline(settings)
+
+
+def install_scripted_agent(
+    pipeline: Any,
+    responses: list[AIMessage],
+) -> ScriptedChatModel:
+    model = ScriptedChatModel(responses=responses)
+    recipes = RecipeRouter(
+        None,
+        TheMealDbClient(
+            base_url=pipeline.settings.themealdb_base_url,
+            api_key=pipeline.settings.themealdb_api_key,
+            timeout=pipeline.settings.http_timeout_seconds,
+        ),
+    )
+    pipeline.agent = KitchenAgent(
+        model=model,  # type: ignore[arg-type]
+        inventory=pipeline.inventory,
+        recipes=recipes,
+        actions=pipeline.actions,
+    )
+    return model
 
 
 def test_non_food_query_is_blocked_before_deepseek(
@@ -83,6 +153,7 @@ def test_simple_write_preserves_quantity_text_without_deepseek(
         user_profile_path=profile_path,
     )
     pipeline = build_pipeline(settings)
+    pipeline.actions.expiry_inferer = FixedExpiryInferer()
 
     result = pipeline.process_request(user_id="test", text="添加 02个 番茄到库存")
 
@@ -93,9 +164,10 @@ def test_simple_write_preserves_quantity_text_without_deepseek(
     assert pending[0].arguments == {
         "name": "番茄",
         "quantity_text": "02个",
-        "expires_at": None,
-        "expiry_source": "unknown",
+        "expires_at": "2099-01-02T00:00:00Z",
+        "expiry_source": "llm",
     }
+    assert result.tool_history[0]["tool"] == "propose_add_inventory_instance"
 
 
 def test_missing_classifier_artifact_fails_open(tmp_path: Path) -> None:
@@ -138,11 +210,13 @@ def test_inventory_query_returns_exact_instance_snapshots_without_deepseek(
 
     result = pipeline.process_request(user_id="test", text="查询一下当前库存")
 
-    assert result.content == "当前库存：\n- 土豆：2 个"
+    assert result.content == (
+        f"当前库存：\n- 土豆 [{str(item['instance_id'])[:8]}]：2 个"
+    )
     assert result.blocked is False
     assert result.tool_history == [
         {
-            "tool": "list_inventory",
+            "tool": "list_inventory_instances",
             "arguments": {},
             "result": [item],
         }
@@ -183,11 +257,13 @@ def test_supported_list_bypasses_classifier_and_returns_real_inventory(
     pipeline = build_test_pipeline(tmp_path)
     classifier = ForbiddenClassifier()
     pipeline.food_classifier = classifier  # type: ignore[assignment]
-    pipeline.inventory.add_instance("土豆", "2个", None, "unknown")
+    item = pipeline.inventory.add_instance("土豆", "大约100个", None, "unknown")
 
     result = pipeline.process_request(user_id="test", text="查询库存")
 
-    assert result.content == "当前库存：\n- 土豆：2个"
+    assert result.content == (
+        f"当前库存：\n- 土豆 [{str(item['instance_id'])[:8]}]：大约100个"
+    )
     assert classifier.calls == 0
     assert result.execution_trace[0].name == "deterministic_route"
     assert result.execution_trace[0].detail == "supported; inventory.list"
@@ -204,10 +280,14 @@ def test_supported_named_read_bypasses_classifier_and_returns_exact_instances(
 
     result = pipeline.process_request(user_id="test", text="查看土豆还有多少")
 
-    assert result.content == "土豆库存：\n- 土豆：2个\n- 土豆：半袋"
+    assert result.content == (
+        "土豆库存：\n"
+        f"- 土豆 [{str(first['instance_id'])[:8]}]：2个\n"
+        f"- 土豆 [{str(second['instance_id'])[:8]}]：半袋"
+    )
     assert result.tool_history == [
         {
-            "tool": "find_inventory",
+            "tool": "find_inventory_instances",
             "arguments": {"name": "土豆"},
             "result": [first, second],
         }
@@ -237,6 +317,7 @@ def test_supported_remove_all_bypasses_classifier_and_stays_pending(
     assert len(pending) == 1
     assert pending[0].operation == "inventory.remove_all"
     assert pending[0].arguments == {"name": "土豆"}
+    assert result.tool_history[0]["tool"] == "propose_remove_all_inventory_instances"
     assert classifier.calls == 0
     assert result.execution_trace[0].detail == "supported; inventory.remove_all"
 
@@ -265,6 +346,126 @@ def test_contextual_route_bypasses_classifier_and_supplies_recent_history(
     ]
     assert result.execution_trace[0].name == "deterministic_route"
     assert result.execution_trace[0].detail == "contextual"
+
+
+def test_relative_use_runs_real_agent_and_keeps_replacement_pending(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    classifier = ForbiddenClassifier()
+    original = pipeline.inventory.add_instance("番茄", "2个", None, "unknown")
+    instance_id = str(original["instance_id"])
+    model = install_scripted_agent(
+        pipeline,
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "find_inventory_instances",
+                        "args": {"name": "番茄"},
+                        "id": "call-find",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "propose_replace_inventory_instance",
+                        "args": {
+                            "instance_id": instance_id,
+                            "quantity_text": "1个",
+                            "expires_at": None,
+                            "expiry_source": "unknown",
+                        },
+                        "id": "call-replace",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="已生成替换库存实例的待确认操作，确认前库存不会改变。"),
+        ],
+    )
+    pipeline.food_classifier = classifier  # type: ignore[assignment]
+
+    result = pipeline.process_request(user_id="test", text="用了一半")
+
+    assert result.blocked is False
+    assert classifier.calls == 0
+    assert pipeline.inventory.get_instance(instance_id) == original
+    pending = pipeline.actions.repository.list_pending("test")
+    assert len(pending) == 1
+    assert pending[0].operation == "inventory.replace"
+    assert pending[0].arguments == {
+        "instance_id": instance_id,
+        "quantity_text": "1个",
+        "expires_at": None,
+        "expiry_source": "unknown",
+    }
+    assert [entry["tool"] for entry in result.tool_history] == [
+        "find_inventory_instances",
+        "propose_replace_inventory_instance",
+    ]
+    assert "find_inventory_instances" in model.bound_tool_names
+    assert "propose_replace_inventory_instance" in model.bound_tool_names
+
+
+def test_named_replacement_reaches_agent_lookup_instead_of_direct_write(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    classifier = RelatedClassifierSpy()
+    original = pipeline.inventory.add_instance("番茄", "2个", None, "unknown")
+    instance_id = str(original["instance_id"])
+    install_scripted_agent(
+        pipeline,
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "find_inventory_instances",
+                        "args": {"name": "番茄"},
+                        "id": "call-find",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "propose_replace_inventory_instance",
+                        "args": {
+                            "instance_id": instance_id,
+                            "quantity_text": "1个",
+                            "expires_at": None,
+                            "expiry_source": "unknown",
+                        },
+                        "id": "call-replace",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="已生成待确认操作，确认前库存不会改变。"),
+        ],
+    )
+    pipeline.food_classifier = classifier  # type: ignore[assignment]
+
+    result = pipeline.process_request(user_id="test", text="将番茄更新为1个")
+
+    assert result.blocked is False
+    assert classifier.calls == ["将番茄更新为1个"]
+    assert pipeline.inventory.get_instance(instance_id) == original
+    pending = pipeline.actions.repository.list_pending("test")
+    assert len(pending) == 1
+    assert pending[0].operation == "inventory.replace"
+    assert [entry["tool"] for entry in result.tool_history] == [
+        "find_inventory_instances",
+        "propose_replace_inventory_instance",
+    ]
 
 
 def test_undecided_request_invokes_classifier_once(tmp_path: Path) -> None:
