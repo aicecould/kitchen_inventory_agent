@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sqlite3
 
@@ -10,15 +10,96 @@ from app.actions import (
     PendingActionRepository,
     validate_operation,
 )
+from app.expiry import ExpiryInferer
 from app.tools.inventory import InventoryRepository
 
 
-def build_service(tmp_path: Path) -> tuple[InventoryActionService, InventoryRepository]:
+def build_service(
+    tmp_path: Path, expiry_inferer: ExpiryInferer | None = None
+) -> tuple[InventoryActionService, InventoryRepository]:
     inventory = InventoryRepository(tmp_path / "inventory.db")
     inventory.initialize()
     pending = PendingActionRepository(tmp_path / "inventory.db")
     pending.initialize()
-    return InventoryActionService(pending, inventory), inventory
+    service = (
+        InventoryActionService(pending, inventory)
+        if expiry_inferer is None
+        else InventoryActionService(
+            pending, inventory, expiry_inferer=expiry_inferer
+        )
+    )
+    return service, inventory
+
+
+class FutureInferer:
+    def infer(self, name: str, now: datetime) -> datetime | None:
+        return now + timedelta(days=5)
+
+
+class FailingInferer:
+    def infer(self, name: str, now: datetime) -> datetime | None:
+        raise RuntimeError("provider unavailable")
+
+
+class FixedInferer:
+    def __init__(self, result: datetime | None) -> None:
+        self.result = result
+
+    def infer(self, name: str, now: datetime) -> datetime | None:
+        return self.result
+
+
+class ForbiddenInferer:
+    def infer(self, name: str, now: datetime) -> datetime | None:
+        raise AssertionError("explicit user expiry must bypass inference")
+
+
+def test_propose_add_stores_valid_inferred_expiry(tmp_path: Path) -> None:
+    service, _ = build_service(tmp_path, FutureInferer())
+
+    action = service.propose_add("u", "牛奶", "一盒")
+
+    expires_at = datetime.fromisoformat(str(action.arguments["expires_at"]))
+    assert expires_at > action.created_at
+    assert action.arguments["expiry_source"] == "llm"
+
+
+def test_propose_add_falls_back_to_unknown_when_inference_raises(
+    tmp_path: Path,
+) -> None:
+    service, _ = build_service(tmp_path, FailingInferer())
+
+    action = service.propose_add("u", "牛奶", "一盒")
+
+    assert action.arguments["expires_at"] is None
+    assert action.arguments["expiry_source"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    "prediction",
+    [datetime(2000, 1, 1, tzinfo=UTC), datetime(2099, 1, 1)],
+)
+def test_propose_add_falls_back_to_unknown_for_invalid_inferred_expiry(
+    tmp_path: Path, prediction: datetime
+) -> None:
+    service, _ = build_service(tmp_path, FixedInferer(prediction))
+
+    action = service.propose_add("u", "牛奶", "一盒")
+
+    assert action.arguments["expires_at"] is None
+    assert action.arguments["expiry_source"] == "unknown"
+
+
+def test_propose_add_uses_explicit_user_expiry_without_inference(tmp_path: Path) -> None:
+    service, _ = build_service(tmp_path, ForbiddenInferer())
+    user_expiry = datetime(2026, 8, 12, 9, tzinfo=UTC)
+
+    action = service.propose_add(
+        "u", "牛奶", "一盒", user_expires_at=user_expiry
+    )
+
+    assert action.arguments["expires_at"] == "2026-08-12T09:00:00Z"
+    assert action.arguments["expiry_source"] == "user"
 
 
 def test_add_is_delayed_and_idempotent_when_confirmed(tmp_path: Path) -> None:

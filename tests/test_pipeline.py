@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.config import get_settings
@@ -44,8 +45,15 @@ def test_simple_write_creates_confirmation_without_deepseek(
     result = pipeline.process_request(user_id="test", text="添加 2 个 番茄到库存")
 
     assert "待确认" in result.content
-    assert pipeline.inventory.get_item("番茄") is None
-    assert len(pipeline.actions.repository.list_pending("test")) == 1
+    assert pipeline.inventory.find_by_name("番茄") == []
+    pending = pipeline.actions.repository.list_pending("test")
+    assert len(pending) == 1
+    assert pending[0].arguments == {
+        "name": "番茄",
+        "quantity_text": "2 个",
+        "expires_at": None,
+        "expiry_source": "unknown",
+    }
 
 
 def test_missing_classifier_artifact_fails_open(tmp_path: Path) -> None:
@@ -82,7 +90,9 @@ def test_inventory_query_returns_prefilled_database_result_without_deepseek(
         user_profile_path=profile_path,
     )
     pipeline = build_pipeline(settings)
-    pipeline.inventory.add_item("土豆", 2, "个")
+    pipeline.inventory.add_instance(
+        "土豆", "2 个", None, "unknown", now=datetime(2026, 8, 7, tzinfo=UTC)
+    )
 
     result = pipeline.process_request(user_id="test", text="查询一下当前库存")
 

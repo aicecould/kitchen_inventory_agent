@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from classifier.model import FoodQueryClassifier
@@ -22,6 +23,7 @@ from app.context import (
     Ingredient,
     VisionConfirmationPrompt,
 )
+from app.expiry import DeepSeekExpiryInferer
 from app.intent import (
     match_intent,
     match_simple_inventory_operation,
@@ -38,6 +40,31 @@ from app.tools.recipe import RecipeRouter
 from app.trace import TraceRecorder
 from app.vision import recognize_ingredients
 from app.vision_confirmations import VisionConfirmationRepository
+
+
+_NUMERIC_QUANTITY_TEXT = re.compile(
+    r"^(?P<quantity>\d+(?:\.\d+)?)\s*(?P<unit>\S+)$"
+)
+
+
+def _inventory_tool_result(
+    items: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    for item in items:
+        quantity_text = str(item["quantity_text"])
+        match = _NUMERIC_QUANTITY_TEXT.fullmatch(quantity_text)
+        if match is None:
+            result.append(item)
+            continue
+        result.append(
+            {
+                "name": item["name"],
+                "quantity": float(match.group("quantity")),
+                "unit": match.group("unit"),
+            }
+        )
+    return result
 
 
 @dataclass(slots=True)
@@ -342,24 +369,29 @@ class KitchenPipeline:
             items = trace.run(
                 "database",
                 "list_inventory",
-                self.inventory.list_items,
+                self.inventory.list_instances,
                 lambda values: f"{len(values)} item(s)",
             )
             if items:
                 lines = [
-                    f"- {item['name']}：{float(item['quantity']):g} {item['unit']}"
+                    f"- {item['name']}：{item['quantity_text']}"
                     for item in items
                 ]
                 content = "当前库存：\n" + "\n".join(lines)
             else:
                 content = "当前库存为空。"
+            tool_items = _inventory_tool_result(items)
             return self._finish_direct(
                 user_id=user_id,
                 request_text=text,
                 content=content,
                 tool_history=[
                     *prior_tool_history,
-                    {"tool": "list_inventory", "arguments": {}, "result": items}
+                    {
+                        "tool": "list_inventory",
+                        "arguments": {},
+                        "result": tool_items,
+                    }
                 ],
                 trace=trace,
                 ingredients=ingredients,
@@ -374,14 +406,30 @@ class KitchenPipeline:
                 "matched",
                 simple_operation.operation,
             )
-            action = trace.run(
-                "database",
-                "create_pending_action",
-                lambda: self.actions.propose(
-                    user_id, simple_operation.operation, simple_operation.arguments
-                ),
-                lambda value: f"{value.operation}; status={value.status}",
-            )
+            if simple_operation.operation == "inventory.add":
+                quantity = float(simple_operation.arguments["quantity"])
+                quantity_text = (
+                    f"{quantity:g} {simple_operation.arguments['unit']}"
+                )
+                action = trace.run(
+                    "database",
+                    "create_pending_action",
+                    lambda: self.actions.propose_add(
+                        user_id,
+                        str(simple_operation.arguments["name"]),
+                        quantity_text,
+                    ),
+                    lambda value: f"{value.operation}; status={value.status}",
+                )
+            else:
+                action = trace.run(
+                    "database",
+                    "create_pending_action",
+                    lambda: self.actions.propose(
+                        user_id, simple_operation.operation, simple_operation.arguments
+                    ),
+                    lambda value: f"{value.operation}; status={value.status}",
+                )
             return self._finish_direct(
                 user_id=user_id,
                 request_text=text,
@@ -392,7 +440,7 @@ class KitchenPipeline:
                         "tool": (
                             f"propose_{simple_operation.operation.replace('.', '_')}"
                         ),
-                        "arguments": simple_operation.arguments,
+                        "arguments": action.arguments,
                         "result": action.model_dump(mode="json"),
                     }
                 ],
@@ -505,10 +553,14 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
     inventory.initialize()
     action_repository = PendingActionRepository(settings.inventory_db_path)
     action_repository.initialize()
+    expiry_inferer = (
+        DeepSeekExpiryInferer(settings) if settings.deepseek_api_key else None
+    )
     actions = InventoryActionService(
         action_repository,
         inventory,
         ttl_minutes=settings.pending_action_ttl_minutes,
+        expiry_inferer=expiry_inferer,
     )
     history = ConversationHistoryRepository(settings.inventory_db_path, max_segments=5)
     history.initialize()

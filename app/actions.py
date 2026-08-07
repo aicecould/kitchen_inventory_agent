@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.expiry import ExpiryInferer
 from app.tools.inventory import InventoryRepository
 
 ActionStatus = Literal[
@@ -307,10 +308,57 @@ class InventoryActionService:
         repository: PendingActionRepository,
         inventory: InventoryRepository,
         ttl_minutes: int = 15,
+        *,
+        expiry_inferer: ExpiryInferer | None = None,
     ) -> None:
         self.repository = repository
         self.inventory = inventory
+        self.expiry_inferer = expiry_inferer
         self.ttl_minutes = ttl_minutes
+
+    def propose_add(
+        self,
+        user_id: str,
+        name: str,
+        quantity_text: str,
+        *,
+        user_expires_at: datetime | None = None,
+    ) -> PendingAction:
+        if user_expires_at is not None:
+            expires_at = user_expires_at
+            expiry_source = "user"
+        else:
+            now = datetime.now(timezone.utc)
+            try:
+                inferred = (
+                    self.expiry_inferer.infer(name, now)
+                    if self.expiry_inferer is not None
+                    else None
+                )
+            except Exception:
+                inferred = None
+            if (
+                inferred is not None
+                and inferred.tzinfo is not None
+                and inferred.utcoffset() is not None
+                and inferred > now
+            ):
+                expires_at = inferred
+                expiry_source = "llm"
+            else:
+                expires_at = None
+                expiry_source = "unknown"
+
+        return self.propose(
+            user_id,
+            "inventory.add",
+            {
+                "name": name,
+                "quantity_text": quantity_text,
+                "expires_at": expires_at.isoformat() if expires_at is not None else None,
+                "expiry_source": expiry_source,
+            },
+        )
 
     def propose(
         self, user_id: str, operation: str, arguments: dict[str, object]
