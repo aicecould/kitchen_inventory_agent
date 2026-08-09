@@ -32,14 +32,17 @@ _ADD_PATTERN = re.compile(
     rf"(?P<quantity_text>\d+(?:\.\d+)?\s*(?:{_UNITS}))\s*"
     rf"(?P<name>.+?)(?:到库存)?$"
 )
-_UPDATE_PATTERN = re.compile(
-    rf"^(?:将)?\s*(?P<name>.+?)\s*(?:更新|修改|设置)为\s*"
-    rf"(?P<quantity>\d+(?:\.\d+)?)\s*(?P<unit>{_UNITS})$"
+_FULL_INSTANCE_ID = r"inv_[0-9a-f]{32}"
+_REPLACE_INSTANCE_PATTERN = re.compile(
+    rf"^(?:将\s*)?(?P<instance_id>{_FULL_INSTANCE_ID})\s*"
+    r"(?:更新|修改|替换|设置)为\s*(?P<quantity_text>.+?)[。！？!?]?$"
 )
-_REMOVE_PATTERN = re.compile(r"^(?:删除|移除)\s*(?P<name>.+?)(?:库存)?$")
-_REDUCE_PATTERN = re.compile(
-    rf"^(?:减少|移除)\s*(?P<name>.+?)\s*(?P<quantity>\d+(?:\.\d+)?)\s*"
-    rf"(?P<unit>{_UNITS})$"
+_REMOVE_INSTANCE_PATTERN = re.compile(
+    rf"^(?:删除|移除)\s*(?P<instance_id>{_FULL_INSTANCE_ID})[。！？!?]?$"
+)
+_CONFIRM_INSTANCE_PATTERN = re.compile(
+    rf"^(?:确认|校准)\s*(?P<instance_id>{_FULL_INSTANCE_ID})"
+    r"(?:\s*(?:仍存在|还在))?[。！？!?]?$"
 )
 _LIST_INVENTORY_PATTERN = re.compile(
     r"^(?:查询|查看|看看|列出)(?:一下)?(?:当前|现有)?库存(?:情况|列表)?[。！？!?]?$"
@@ -79,6 +82,23 @@ def route_deterministically(text: str) -> RouteDecision:
             {"name": remove_all_match.group("name").strip()},
         )
 
+    for pattern, operation in (
+        (_REPLACE_INSTANCE_PATTERN, "inventory.replace"),
+        (_REMOVE_INSTANCE_PATTERN, "inventory.remove"),
+        (_CONFIRM_INSTANCE_PATTERN, "inventory.confirm"),
+    ):
+        match = pattern.fullmatch(normalized)
+        if match is not None:
+            return RouteDecision(
+                "supported",
+                operation,
+                {
+                    key: value.strip()
+                    for key, value in match.groupdict().items()
+                    if value is not None
+                },
+            )
+
     simple_operation = match_simple_inventory_operation(normalized)
     if simple_operation is not None and simple_operation.operation == "inventory.add":
         return RouteDecision(
@@ -97,24 +117,17 @@ def match_simple_inventory_query(text: str) -> bool:
 
 def match_simple_inventory_operation(text: str) -> SimpleInventoryOperation | None:
     normalized = text.strip()
-    for pattern, operation in (
-        (_ADD_PATTERN, "inventory.add"),
-        (_UPDATE_PATTERN, "inventory.update"),
-        (_REDUCE_PATTERN, "inventory.remove"),
-        (_REMOVE_PATTERN, "inventory.remove"),
-    ):
-        match = pattern.fullmatch(normalized)
-        if not match:
-            continue
-        values: dict[str, object] = {
-            key: value.strip() for key, value in match.groupdict().items() if value
-        }
-        if "quantity" in values:
-            values["quantity"] = float(str(values["quantity"]))
-        if operation == "inventory.remove":
-            values.pop("unit", None)
-        return SimpleInventoryOperation(operation, values)
-    return None
+    match = _ADD_PATTERN.fullmatch(normalized)
+    if match is None:
+        return None
+    return SimpleInventoryOperation(
+        "inventory.add",
+        {
+            key: value.strip()
+            for key, value in match.groupdict().items()
+            if value is not None
+        },
+    )
 
 
 def match_intent(text: str) -> str:

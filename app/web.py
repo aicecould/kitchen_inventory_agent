@@ -284,6 +284,8 @@ async def process_request(
             status_code=502,
             detail=f"百度果蔬识别失败（错误码 {exc.code}）：{exc.user_message}",
         ) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

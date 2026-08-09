@@ -17,6 +17,7 @@ from app.tools.inventory import InventoryRepository
 ActionStatus = Literal[
     "pending", "executing", "executed", "cancelled", "expired", "failed"
 ]
+_INSTANCE_ID_PATTERN = r"^inv_[0-9a-f]{32}$"
 
 
 class AddInventoryArguments(BaseModel):
@@ -36,7 +37,7 @@ class AddInventoryArguments(BaseModel):
 
 class ReplaceInventoryArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    instance_id: str = Field(min_length=1, max_length=100)
+    instance_id: str = Field(pattern=_INSTANCE_ID_PATTERN)
     quantity_text: str = Field(min_length=1, max_length=100)
     expires_at: datetime | None
     expiry_source: Literal["llm", "user", "unknown"]
@@ -51,7 +52,7 @@ class ReplaceInventoryArguments(BaseModel):
 
 class RemoveInventoryArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    instance_id: str = Field(min_length=1, max_length=100)
+    instance_id: str = Field(pattern=_INSTANCE_ID_PATTERN)
 
 
 class RemoveAllInventoryArguments(BaseModel):
@@ -61,7 +62,7 @@ class RemoveAllInventoryArguments(BaseModel):
 
 class ConfirmInventoryArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    instance_id: str = Field(min_length=1, max_length=100)
+    instance_id: str = Field(pattern=_INSTANCE_ID_PATTERN)
 
 
 class PendingAction(BaseModel):

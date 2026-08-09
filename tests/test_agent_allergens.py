@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -81,6 +82,8 @@ def test_agent_prompt_requires_instance_lookup_and_ambiguity_clarification() -> 
     assert "先调用" in SYSTEM_PROMPT and "查询" in SYSTEM_PROMPT
     assert "多个" in SYSTEM_PROMPT and "澄清" in SYSTEM_PROMPT
     assert "完整的 quantity_text" in SYSTEM_PROMPT
+    assert "完整 instance_id" in SYSTEM_PROMPT
+    assert "短前缀" in SYSTEM_PROMPT and "不能" in SYSTEM_PROMPT
 
 
 def test_inventory_read_tools_return_real_instance_snapshots(tmp_path: Path) -> None:
@@ -183,16 +186,25 @@ def test_inventory_write_tools_require_lookup_and_create_only_pending_actions(
 
 
 def test_exact_get_cannot_choose_duplicate_from_history_without_user_id_selection(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    values = iter(
+        [
+            "abcd1111111111111111111111111111",
+            "abcd2222222222222222222222222222",
+        ]
+    )
+    monkeypatch.setattr(
+        "app.tools.inventory.uuid4", lambda: SimpleNamespace(hex=next(values))
+    )
     inventory, actions, _ = inventory_tools(tmp_path)
     first = inventory.add_instance("番茄", "2个", None, "unknown")
     second = inventory.add_instance("番茄", "500g", None, "unknown")
     history = HistorySegment(
         request="查看番茄还有多少",
         response=(
-            f"番茄 [{str(first['instance_id'])[:8]}]：2个\n"
-            f"番茄 [{str(second['instance_id'])[:8]}]：500g"
+            f"番茄 [{first['instance_id']}]：2个\n"
+            f"番茄 [{second['instance_id']}]：500g"
         ),
         tool_history=[
             {
@@ -232,9 +244,27 @@ def test_exact_get_cannot_choose_duplicate_from_history_without_user_id_selectio
         )
     assert actions.repository.list_pending("test") == []
 
-    selected_context = AgentContext(
+    prefix_context = AgentContext(
         user_id="test",
         request_text=f"删除 {first_id[:8]}",
+        history_segments=[history],
+    )
+    prefix_tools = {
+        tool.name: tool
+        for tool in agent._create_tools(prefix_context, TraceRecorder())
+    }
+    prefix_tools["get_inventory_instance"].invoke(  # type: ignore[attr-defined]
+        {"instance_id": first_id}
+    )
+    with pytest.raises(ValueError, match="AMBIGUOUS_INSTANCE_MATCH"):
+        prefix_tools["propose_remove_inventory_instance"].invoke(  # type: ignore[attr-defined]
+            {"instance_id": first_id}
+        )
+    assert actions.repository.list_pending("test") == []
+
+    selected_context = AgentContext(
+        user_id="test",
+        request_text=f"删除 {first_id}",
         history_segments=[history],
     )
     selected_tools = {

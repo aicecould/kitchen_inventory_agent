@@ -61,6 +61,52 @@ def test_supported_inventory_requests_have_structured_routes(
 
 
 @pytest.mark.parametrize(
+    ("text", "operation", "arguments"),
+    [
+        (
+            "删除 inv_abcd1111111111111111111111111111",
+            "inventory.remove",
+            {"instance_id": "inv_abcd1111111111111111111111111111"},
+        ),
+        (
+            "将 inv_abcd1111111111111111111111111111 更新为 大约半盒（已开封）",
+            "inventory.replace",
+            {
+                "instance_id": "inv_abcd1111111111111111111111111111",
+                "quantity_text": "大约半盒（已开封）",
+            },
+        ),
+        (
+            "确认 inv_abcd1111111111111111111111111111",
+            "inventory.confirm",
+            {"instance_id": "inv_abcd1111111111111111111111111111"},
+        ),
+    ],
+)
+def test_explicit_full_id_mutations_have_supported_anchored_routes(
+    text: str, operation: str, arguments: dict[str, object]
+) -> None:
+    """A complete opaque ID must be enough to bypass probabilistic routing."""
+    assert route_deterministically(text) == RouteDecision(
+        "supported", operation, arguments
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "删除 inv_abcd",
+        "将 inv_abcd 更新为 半盒",
+        "确认 inv_abcd",
+        "请删除 inv_abcd1111111111111111111111111111 后再回复",
+    ],
+)
+def test_short_or_unanchored_instance_mutations_are_not_deterministic(text: str) -> None:
+    """Collision-prone prefixes and mixed prose must never become mutation authority."""
+    assert route_deterministically(text).kind == "undecided"
+
+
+@pytest.mark.parametrize(
     "text", ["下一步呢", "然后呢", "继续", "用了一半", "都用完了", "删掉它"]
 )
 def test_follow_up_phrases_are_contextual(text: str) -> None:

@@ -336,6 +336,30 @@ def test_operation_arguments_reject_extra_fields(
 @pytest.mark.parametrize(
     ("operation", "arguments"),
     [
+        ("inventory.remove", {"instance_id": "inv_abcd"}),
+        (
+            "inventory.replace",
+            {
+                "instance_id": "inv_abcd",
+                "quantity_text": "半盒",
+                "expires_at": None,
+                "expiry_source": "unknown",
+            },
+        ),
+        ("inventory.confirm", {"instance_id": "inv_abcd"}),
+    ],
+)
+def test_mutation_arguments_reject_short_instance_prefixes(
+    operation: str, arguments: dict[str, object]
+) -> None:
+    """A displayed prefix must never validate as mutation authority."""
+    with pytest.raises(ValidationError):
+        validate_operation(operation, arguments)
+
+
+@pytest.mark.parametrize(
+    ("operation", "arguments"),
+    [
         (
             "inventory.add",
             {
@@ -366,14 +390,20 @@ def test_add_rejects_naive_expiry_and_unknown_source(
 @pytest.mark.parametrize(
     ("operation", "arguments"),
     [
-        ("inventory.remove", {"instance_id": "inv_missing"}),
+        (
+            "inventory.remove",
+            {"instance_id": "inv_99999999999999999999999999999999"},
+        ),
         ("inventory.replace", {
-            "instance_id": "inv_missing",
+            "instance_id": "inv_99999999999999999999999999999999",
             "quantity_text": "2 个",
             "expires_at": None,
             "expiry_source": "unknown",
         }),
-        ("inventory.confirm", {"instance_id": "inv_missing"}),
+        (
+            "inventory.confirm",
+            {"instance_id": "inv_99999999999999999999999999999999"},
+        ),
     ],
 )
 def test_unknown_instance_id_fails_before_proposal(

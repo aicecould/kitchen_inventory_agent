@@ -179,10 +179,7 @@ class KitchenAgent:
                 raise ValueError("INSTANCE_LOOKUP_REQUIRED")
 
         def user_selected_instance(instance_id: str) -> bool:
-            return any(
-                candidate in context.request_text
-                for candidate in (instance_id, instance_id[:8])
-            )
+            return instance_id in context.request_text
 
         @tool
         def list_inventory_instances() -> list[dict[str, object]]:

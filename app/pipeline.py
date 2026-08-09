@@ -386,7 +386,7 @@ class KitchenPipeline:
             )
             if items:
                 lines = [
-                    f"- {item['name']} [{str(item['instance_id'])[:8]}]："
+                    f"- {item['name']} [{item['instance_id']}]："
                     f"{item['quantity_text']}"
                     for item in items
                 ]
@@ -424,7 +424,7 @@ class KitchenPipeline:
                 if not items
                 else f"{name}库存：\n"
                 + "\n".join(
-                    f"- {item['name']} [{str(item['instance_id'])[:8]}]："
+                    f"- {item['name']} [{item['instance_id']}]："
                     f"{item['quantity_text']}"
                     for item in items
                 )
@@ -447,7 +447,13 @@ class KitchenPipeline:
             )
 
         simple_operation = None
-        if not force_agent and operation in {"inventory.add", "inventory.remove_all"}:
+        if not force_agent and operation in {
+            "inventory.add",
+            "inventory.replace",
+            "inventory.remove",
+            "inventory.remove_all",
+            "inventory.confirm",
+        }:
             simple_operation = RouteDecision("supported", operation, arguments)
         if simple_operation is not None:
             trace.record(
@@ -456,6 +462,7 @@ class KitchenPipeline:
                 "matched",
                 simple_operation.operation,
             )
+            proposal_arguments = dict(simple_operation.arguments)
             if simple_operation.operation == "inventory.add":
                 action = trace.run(
                     "database",
@@ -468,14 +475,43 @@ class KitchenPipeline:
                     lambda value: f"{value.operation}; status={value.status}",
                 )
             else:
+                if simple_operation.operation in {
+                    "inventory.replace",
+                    "inventory.remove",
+                    "inventory.confirm",
+                }:
+                    instance_id = str(proposal_arguments["instance_id"])
+                    current = trace.run(
+                        "database",
+                        "get_inventory_instance",
+                        lambda: self.inventory.get_instance(instance_id),
+                        lambda value: "found" if value is not None else "not found",
+                    )
+                    if current is None:
+                        raise KeyError(
+                            f"inventory instance not found: {instance_id}"
+                        )
+                    if simple_operation.operation == "inventory.replace":
+                        proposal_arguments = {
+                            **proposal_arguments,
+                            "expires_at": current["expires_at"],
+                            "expiry_source": current["expiry_source"],
+                        }
                 action = trace.run(
                     "database",
                     "create_pending_action",
                     lambda: self.actions.propose(
-                        user_id, simple_operation.operation, simple_operation.arguments
+                        user_id, simple_operation.operation, proposal_arguments
                     ),
                     lambda value: f"{value.operation}; status={value.status}",
                 )
+            tool_names = {
+                "inventory.add": "propose_add_inventory_instance",
+                "inventory.replace": "propose_replace_inventory_instance",
+                "inventory.remove": "propose_remove_inventory_instance",
+                "inventory.remove_all": "propose_remove_all_inventory_instances",
+                "inventory.confirm": "propose_confirm_inventory_instance",
+            }
             return self._finish_direct(
                 user_id=user_id,
                 request_text=text,
@@ -483,11 +519,7 @@ class KitchenPipeline:
                 tool_history=[
                     *prior_tool_history,
                     {
-                        "tool": (
-                            "propose_add_inventory_instance"
-                            if simple_operation.operation == "inventory.add"
-                            else "propose_remove_all_inventory_instances"
-                        ),
+                        "tool": tool_names[simple_operation.operation],
                         "arguments": action.arguments,
                         "result": action.model_dump(mode="json"),
                     }

@@ -1,8 +1,10 @@
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Sequence
 
+import pytest
 from classifier.model import ClassificationResult
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, BaseMessage
@@ -211,7 +213,7 @@ def test_inventory_query_returns_exact_instance_snapshots_without_deepseek(
     result = pipeline.process_request(user_id="test", text="查询一下当前库存")
 
     assert result.content == (
-        f"当前库存：\n- 土豆 [{str(item['instance_id'])[:8]}]：2 个"
+        f"当前库存：\n- 土豆 [{item['instance_id']}]：2 个"
     )
     assert result.blocked is False
     assert result.tool_history == [
@@ -262,7 +264,7 @@ def test_supported_list_bypasses_classifier_and_returns_real_inventory(
     result = pipeline.process_request(user_id="test", text="查询库存")
 
     assert result.content == (
-        f"当前库存：\n- 土豆 [{str(item['instance_id'])[:8]}]：大约100个"
+        f"当前库存：\n- 土豆 [{item['instance_id']}]：大约100个"
     )
     assert classifier.calls == 0
     assert result.execution_trace[0].name == "deterministic_route"
@@ -282,8 +284,8 @@ def test_supported_named_read_bypasses_classifier_and_returns_exact_instances(
 
     assert result.content == (
         "土豆库存：\n"
-        f"- 土豆 [{str(first['instance_id'])[:8]}]：2个\n"
-        f"- 土豆 [{str(second['instance_id'])[:8]}]：半袋"
+        f"- 土豆 [{first['instance_id']}]：2个\n"
+        f"- 土豆 [{second['instance_id']}]：半袋"
     )
     assert result.tool_history == [
         {
@@ -320,6 +322,96 @@ def test_supported_remove_all_bypasses_classifier_and_stays_pending(
     assert result.tool_history[0]["tool"] == "propose_remove_all_inventory_instances"
     assert classifier.calls == 0
     assert result.execution_trace[0].detail == "supported; inventory.remove_all"
+
+
+def test_shared_prefix_instances_are_rendered_with_distinct_full_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two colliding decorative prefixes must remain separately selectable."""
+    values = iter(
+        [
+            "abcd1111111111111111111111111111",
+            "abcd2222222222222222222222222222",
+        ]
+    )
+    monkeypatch.setattr(
+        "app.tools.inventory.uuid4", lambda: SimpleNamespace(hex=next(values))
+    )
+    pipeline = build_test_pipeline(tmp_path)
+    first = pipeline.inventory.add_instance("番茄", "2个", None, "unknown")
+    second = pipeline.inventory.add_instance("番茄", "半盒", None, "unknown")
+
+    result = pipeline.process_request(user_id="test", text="查看番茄还有多少")
+
+    assert str(first["instance_id"]) in result.content
+    assert str(second["instance_id"]) in result.content
+    assert result.content.count("inv_abcd") == 2
+
+
+def test_explicit_full_id_replace_bypasses_classifier_and_stays_pending(
+    tmp_path: Path,
+) -> None:
+    """Opaque replacement text must reach a pending proposal without model routing."""
+    pipeline = build_test_pipeline(tmp_path)
+    classifier = ForbiddenClassifier()
+    pipeline.food_classifier = classifier  # type: ignore[assignment]
+    original = pipeline.inventory.add_instance(
+        "牛奶",
+        "一盒",
+        datetime(2026, 8, 20, 9, tzinfo=UTC),
+        "user",
+    )
+    instance_id = str(original["instance_id"])
+
+    result = pipeline.process_request(
+        user_id="test",
+        text=f"将 {instance_id} 更新为 大约半盒（已开封）",
+    )
+
+    assert classifier.calls == 0
+    assert result.blocked is False
+    assert instance_id in result.content
+    assert pipeline.inventory.get_instance(instance_id) == original
+    pending = pipeline.actions.repository.list_pending("test")
+    assert len(pending) == 1
+    assert pending[0].operation == "inventory.replace"
+    assert pending[0].arguments == {
+        "instance_id": instance_id,
+        "quantity_text": "大约半盒（已开封）",
+        "expires_at": "2026-08-20T09:00:00Z",
+        "expiry_source": "user",
+    }
+    assert pending[0].status == "pending"
+
+
+@pytest.mark.parametrize(
+    ("verb", "operation"),
+    [
+        ("删除", "inventory.remove"),
+        ("确认", "inventory.confirm"),
+    ],
+)
+def test_explicit_full_id_remove_and_confirm_bypass_classifier_and_stay_pending(
+    tmp_path: Path, verb: str, operation: str
+) -> None:
+    """Explicit delete and calibration routes must stop at the confirmation gate."""
+    pipeline = build_test_pipeline(tmp_path)
+    classifier = ForbiddenClassifier()
+    pipeline.food_classifier = classifier  # type: ignore[assignment]
+    original = pipeline.inventory.add_instance("鸡蛋", "6个", None, "unknown")
+    instance_id = str(original["instance_id"])
+
+    result = pipeline.process_request(user_id="test", text=f"{verb} {instance_id}")
+
+    assert classifier.calls == 0
+    assert result.blocked is False
+    assert instance_id in result.content
+    assert pipeline.inventory.get_instance(instance_id) == original
+    pending = pipeline.actions.repository.list_pending("test")
+    assert len(pending) == 1
+    assert pending[0].operation == operation
+    assert pending[0].arguments == {"instance_id": instance_id}
+    assert pending[0].status == "pending"
 
 
 def test_contextual_route_bypasses_classifier_and_supplies_recent_history(

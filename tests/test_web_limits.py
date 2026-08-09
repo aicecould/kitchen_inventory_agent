@@ -251,6 +251,33 @@ def test_process_response_includes_backend_execution_trace(
     assert any(event["name"] == "regex_audit" for event in trace)
 
 
+def test_process_rejects_empty_bulk_delete_before_creating_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deterministic no-match delete must be a safe not-found, not a proposal."""
+    import app.web as web
+
+    profile = tmp_path / "profile.md"
+    profile.write_text("# 用户画像\n", encoding="utf-8")
+    settings = replace(
+        get_settings(),
+        deepseek_api_key="",
+        inventory_db_path=tmp_path / "inventory.db",
+        user_profile_path=profile,
+    )
+    pipeline = web.build_pipeline(settings)
+    monkeypatch.setattr(web, "_pipeline", pipeline)
+
+    response = client.post(
+        "/api/process",
+        data={"text": "删除所有番茄", "language": "zh"},
+    )
+
+    assert response.status_code == 404
+    assert "inventory instances not found: 番茄" in response.json()["detail"]
+    assert pipeline.actions.repository.list_pending(web.SHOWCASE_USER_ID) == []
+
+
 def test_allergen_api_persists_broad_and_custom_values(
     tmp_path: object, monkeypatch: object
 ) -> None:
