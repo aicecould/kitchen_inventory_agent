@@ -20,7 +20,7 @@ from app.proactive import (
 
 
 class FakeChatOpenAI:
-    response = ReminderResponse(message=None)
+    response = ReminderResponse()
     failure: Exception | None = None
     instances: list["FakeChatOpenAI"] = []
 
@@ -36,7 +36,7 @@ class FakeChatOpenAI:
         self.schema = schema
         return self
 
-    def invoke(self, prompt: str) -> ReminderResponse:
+    def invoke(self, prompt: str) -> object:
         self.prompt = prompt
         if self.failure is not None:
             raise self.failure
@@ -45,7 +45,7 @@ class FakeChatOpenAI:
 
 @pytest.fixture(autouse=True)
 def reset_fake_model() -> None:
-    FakeChatOpenAI.response = ReminderResponse(message=None)
+    FakeChatOpenAI.response = ReminderResponse()
     FakeChatOpenAI.failure = None
     FakeChatOpenAI.instances.clear()
 
@@ -146,7 +146,6 @@ def test_valid_model_reminder_uses_existing_settings_and_recent_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     FakeChatOpenAI.response = ReminderResponse(
-        message="牛奶即将过期，请优先使用。",
         category="expiring",
         item_name="牛奶",
     )
@@ -158,7 +157,7 @@ def test_valid_model_reminder_uses_existing_settings_and_recent_history(
         [HistorySegment(request="昨天买了什么？", response="买了牛奶。")],
     )
 
-    assert message == "牛奶即将过期，请优先使用。"
+    assert message == "有食材将在3天内过期，请优先使用。"
     model = FakeChatOpenAI.instances[0]
     assert model.schema is ReminderResponse
     assert model.kwargs == {
@@ -175,24 +174,24 @@ def test_valid_model_reminder_uses_existing_settings_and_recent_history(
     assert "牛奶" in model.prompt
 
 
-def test_model_reminder_accepts_exactly_100_unicode_characters(
+def test_long_selected_item_cannot_expand_the_rendered_reminder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    name = "鲜" * 100
     FakeChatOpenAI.response = ReminderResponse(
-        message="鲜" * 99 + "。",
         category="restock",
-        item_name="鲜",
+        item_name=name,
     )
     generator = build_generator(tmp_path, monkeypatch)
 
     message = generator.generate(
-        {**empty_candidates(), "restock": [candidate("鲜")]},
-        [candidate("鲜")],
+        {**empty_candidates(), "restock": [candidate(name)]},
+        [candidate(name)],
         [],
     )
 
-    assert message == "鲜" * 99 + "。"
-    assert len(message) == 100
+    assert message == "有食材可能需要补货，请先确认库存再决定。"
+    assert len(message) <= 100
 
 
 @pytest.mark.parametrize(
@@ -208,16 +207,16 @@ def test_model_reminder_accepts_exactly_100_unicode_characters(
         f"请确认待办 act_{'b' * 32}。",
     ],
 )
-def test_invalid_model_reminder_falls_back_to_highest_priority_candidate(
+def test_model_supplied_free_text_is_never_rendered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     invalid_message: str,
 ) -> None:
-    FakeChatOpenAI.response = ReminderResponse(
-        message=invalid_message,
-        category="expired",
-        item_name="牛奶",
-    )
+    FakeChatOpenAI.response = {
+        "message": invalid_message,
+        "category": "expired",
+        "item_name": "牛奶",
+    }
     generator = build_generator(tmp_path, monkeypatch)
 
     message = generator.generate(
@@ -230,7 +229,7 @@ def test_invalid_model_reminder_falls_back_to_highest_priority_candidate(
         [],
     )
 
-    assert message == "牛奶已过期，请检查后决定是否丢弃。"
+    assert message == "有食材已过期，请检查后决定是否丢弃。"
     assert len(message) <= 100
     assert "\r" not in message and "\n" not in message
 
@@ -242,6 +241,8 @@ def test_invalid_model_reminder_falls_back_to_highest_priority_candidate(
         ("牛奶", f"牛奶待办act_{'c' * 32}待确认。"),
         ("牛奶", "牛奶已入库。"),
         ("Milk", "Milk was added to inventory."),
+        ("Milk", "Milk is now in inventory."),
+        ("牛奶", "牛奶<mailto:a@b>已过期。"),
     ],
 )
 def test_inline_markdown_adjacent_ids_and_execution_claims_are_rejected(
@@ -250,8 +251,37 @@ def test_inline_markdown_adjacent_ids_and_execution_claims_are_rejected(
     name: str,
     invalid_message: str,
 ) -> None:
+    FakeChatOpenAI.response = {
+        "message": invalid_message,
+        "category": "expired",
+        "item_name": name,
+    }
+    generator = build_generator(tmp_path, monkeypatch)
+
+    message = generator.generate(
+        {"expired": [candidate(name)], "expiring": [], "stale": []},
+        [candidate(name)],
+        [],
+    )
+
+    assert message == "有食材已过期，请检查后决定是否丢弃。"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Milk is now in inventory",
+        "Milk has entered inventory",
+        "牛奶<mailto:a@b>",
+        "牛奶<ftp://example.test>",
+    ],
+)
+def test_untrusted_inventory_labels_never_reach_rendered_reminders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
     FakeChatOpenAI.response = ReminderResponse(
-        message=invalid_message,
         category="expired",
         item_name=name,
     )
@@ -263,14 +293,13 @@ def test_inline_markdown_adjacent_ids_and_execution_claims_are_rejected(
         [],
     )
 
-    assert message == f"{name}已过期，请检查后决定是否丢弃。"
+    assert message == "有食材已过期，请检查后决定是否丢弃。"
 
 
 def test_model_must_address_highest_priority_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     FakeChatOpenAI.response = ReminderResponse(
-        message="冷冻玉米很久未确认，请检查库存。",
         category="stale",
         item_name="冷冻玉米",
     )
@@ -286,26 +315,13 @@ def test_model_must_address_highest_priority_candidate(
         [],
     )
 
-    assert message == "牛奶已过期，请检查后决定是否丢弃。"
+    assert message == "有食材已过期，请检查后决定是否丢弃。"
 
 
-@pytest.mark.parametrize(
-    ("category", "item_name"),
-    [("stale", "玉米"), ("expired", "米")],
-)
 def test_candidate_selection_rejects_lower_priority_substring_collision(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    category: str,
-    item_name: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    FakeChatOpenAI.response = ReminderResponse.model_validate(
-        {
-            "category": category,
-            "item_name": item_name,
-            "message": "玉米已超过14天未确认，请检查库存。",
-        }
-    )
+    FakeChatOpenAI.response = ReminderResponse(category="stale", item_name="玉米")
     generator = build_generator(tmp_path, monkeypatch)
 
     message = generator.generate(
@@ -319,7 +335,7 @@ def test_candidate_selection_rejects_lower_priority_substring_collision(
         [],
     )
 
-    assert message == "米已过期，请检查后决定是否丢弃。"
+    assert message == "有食材已过期，请检查后决定是否丢弃。"
 
 
 def test_provider_failure_without_deterministic_candidates_returns_none(
@@ -345,7 +361,75 @@ def test_restock_is_the_lowest_priority_and_has_a_deterministic_fallback(
 
     message = generator.generate(candidates, [candidate("大米")], [])
 
-    assert message == "大米可能需要补货，请先确认库存再决定。"
+    assert message == "有食材可能需要补货，请先确认库存再决定。"
+
+
+@pytest.mark.parametrize(
+    ("selected_item", "expected"),
+    [
+        ("大米", "有食材可能需要补货，请先确认库存再决定。"),
+        ("面粉", None),
+    ],
+)
+def test_service_validates_model_restock_selection_against_real_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    selected_item: str,
+    expected: str | None,
+) -> None:
+    FakeChatOpenAI.response = ReminderResponse(
+        category="restock",
+        item_name=selected_item,
+    )
+    service, pipeline = build_service(tmp_path, monkeypatch)
+    scan_time = datetime(2026, 8, 7, 9, tzinfo=UTC)
+    pipeline.inventory.add_instance(
+        "大米", "少量", None, "unknown", now=scan_time
+    )
+    pipeline.history.append(
+        user_id="u",
+        request="大米快吃完了",
+        response="可以在下次检查库存时考虑补货。",
+    )
+    service.visits.check_and_touch("u", scan_time - timedelta(hours=25))
+    inventory_before = pipeline.inventory.list_instances()
+    history_before = pipeline.history.list_recent("u")
+
+    message = service.check("u", now=scan_time)
+
+    assert message == expected
+    assert pipeline.inventory.list_instances() == inventory_before
+    assert pipeline.actions.repository.list_pending("u") == []
+    assert pipeline.history.list_recent("u") == history_before
+
+
+def test_service_does_not_force_restock_when_provider_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    FakeChatOpenAI.failure = RuntimeError("provider unavailable")
+    service, pipeline = build_service(tmp_path, monkeypatch)
+    scan_time = datetime(2026, 8, 7, 9, tzinfo=UTC)
+    pipeline.inventory.add_instance(
+        "大米", "少量", None, "unknown", now=scan_time
+    )
+    pipeline.history.append(
+        user_id="u",
+        request="大米快吃完了",
+        response="可以在下次检查库存时考虑补货。",
+    )
+    service.visits.check_and_touch("u", scan_time - timedelta(hours=25))
+    inventory_before = pipeline.inventory.list_instances()
+    history_before = pipeline.history.list_recent("u")
+
+    assert pipeline.inventory.reminder_candidates(scan_time) == {
+        "expired": [],
+        "expiring": [],
+        "stale": [],
+    }
+    assert service.check("u", now=scan_time) is None
+    assert pipeline.inventory.list_instances() == inventory_before
+    assert pipeline.actions.repository.list_pending("u") == []
+    assert pipeline.history.list_recent("u") == history_before
 
 
 @pytest.mark.parametrize(
