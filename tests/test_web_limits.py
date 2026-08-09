@@ -42,6 +42,16 @@ def test_frontend_shell_serves_a_hidden_accessible_proactive_reminder() -> None:
     assert "hidden" in document.elements["proactive-reminder"]
 
 
+def test_frontend_loads_safe_markdown_renderer_before_the_application() -> None:
+    """The browser must load the audited link renderer before app.js consumes it."""
+    response = client.get("/")
+
+    assert response.status_code == 200
+    markdown_position = response.text.index('/static/markdown.js')
+    app_position = response.text.index('/static/app.js')
+    assert markdown_position < app_position
+
+
 def test_inventory_api_serves_duplicate_instances_with_display_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

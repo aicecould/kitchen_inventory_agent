@@ -151,6 +151,7 @@ class KitchenPipeline:
             return self._finish_direct(
                 user_id=user_id,
                 request_text=text,
+                target_language=target_language,
                 content="当前原型暂不支持订单或购物车管理。",
                 tool_history=[],
                 trace=trace,
@@ -401,6 +402,7 @@ class KitchenPipeline:
             return self._finish_direct(
                 user_id=user_id,
                 request_text=text,
+                target_language=target_language,
                 content=content,
                 tool_history=[
                     *prior_tool_history,
@@ -437,6 +439,7 @@ class KitchenPipeline:
             return self._finish_direct(
                 user_id=user_id,
                 request_text=text,
+                target_language=target_language,
                 content=content,
                 tool_history=[
                     *prior_tool_history,
@@ -527,6 +530,7 @@ class KitchenPipeline:
             return self._finish_direct(
                 user_id=user_id,
                 request_text=text,
+                target_language=target_language,
                 content=f"已生成待确认操作：{action.summary}。确认前库存不会改变。",
                 tool_history=[
                     *prior_tool_history,
@@ -572,6 +576,7 @@ class KitchenPipeline:
         *,
         user_id: str,
         request_text: str,
+        target_language: str,
         content: str,
         tool_history: list[dict[str, object]],
         trace: TraceRecorder,
@@ -579,7 +584,9 @@ class KitchenPipeline:
         confirmation_result: dict[str, object] | None = None,
     ) -> AgentResult:
         ingredients = ingredients or []
-        canonical = canonical_tool_response(tool_history)
+        canonical = canonical_tool_response(
+            tool_history, target_language=target_language
+        )
         if canonical is not None:
             content = canonical
         content = append_confidence_notice(content, ingredients)
@@ -593,6 +600,7 @@ class KitchenPipeline:
         tool_result = review_tool_calls(
             content,
             tool_history,
+            target_language=target_language,
             ingredients=ingredients,
             vision_confirmation_result=confirmation_result,
         )

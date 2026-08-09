@@ -631,7 +631,9 @@ def test_agent_mixed_inventory_recipe_response_is_canonical_and_useful(
     )
 
     result = pipeline.process_request(
-        user_id="test", text="根据库存推荐一道番茄菜谱"
+        user_id="test",
+        text="根据库存推荐一道番茄菜谱",
+        target_language="en",
     )
 
     assert result.blocked is False
@@ -639,7 +641,12 @@ def test_agent_mixed_inventory_recipe_response_is_canonical_and_useful(
     assert str(item["instance_id"]) in result.content
     assert "大约100个" in result.content
     assert "Tomato Soup" in result.content
+    assert "Ingredients: tomato" in result.content
+    assert "Instructions: Simmer." in result.content
+    assert "Source: example" in result.content
     assert "https://recipes.example/tomato-soup" in result.content
+    assert "Inventory snapshots (read-only):" in result.content
+    assert "库存实例快照" not in result.content
 
 
 def test_relative_replacement_accepts_equivalent_expiry_serializations(

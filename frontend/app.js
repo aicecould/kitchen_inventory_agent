@@ -1,3 +1,4 @@
+const { escapeHtml, renderSafeMarkdown } = globalThis.KitchenMarkdown;
 const form = document.querySelector("#agent-form");
 const promptInput = document.querySelector("#prompt");
 const charCount = document.querySelector("#char-count");
@@ -480,114 +481,6 @@ function renderExecutionTrace(trace) {
 
 function shorten(value, limit) {
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
-}
-
-function renderInlineMarkdown(text) {
-  const codeSpans = [];
-  let rendered = text.replace(/`([^`\n]+)`/g, (_, code) => {
-    const index = codeSpans.push(code) - 1;
-    return `\uE000${index}\uE001`;
-  });
-  rendered = rendered
-    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/__([^_\n]+)__/g, "<strong>$1</strong>")
-    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
-  return rendered.replace(/\uE000(\d+)\uE001/g, (_, index) => {
-    return `<code>${codeSpans[Number(index)]}</code>`;
-  });
-}
-
-function renderSafeMarkdown(markdown) {
-  const lines = escapeHtml(String(markdown || "")).replace(/\r\n?/g, "\n").split("\n");
-  const output = [];
-  let paragraph = [];
-  let listType = null;
-  let inCodeBlock = false;
-  let codeLines = [];
-
-  const closeParagraph = () => {
-    if (!paragraph.length) return;
-    output.push(`<p>${paragraph.map(renderInlineMarkdown).join("<br>")}</p>`);
-    paragraph = [];
-  };
-  const closeList = () => {
-    if (!listType) return;
-    output.push(`</${listType}>`);
-    listType = null;
-  };
-  const closeCodeBlock = () => {
-    output.push(`<pre><code>${codeLines.join("\n")}</code></pre>`);
-    codeLines = [];
-    inCodeBlock = false;
-  };
-
-  lines.forEach((line) => {
-    if (/^\s*```/.test(line)) {
-      if (inCodeBlock) {
-        closeCodeBlock();
-      } else {
-        closeParagraph();
-        closeList();
-        inCodeBlock = true;
-      }
-      return;
-    }
-    if (inCodeBlock) {
-      codeLines.push(line);
-      return;
-    }
-    if (!line.trim()) {
-      closeParagraph();
-      closeList();
-      return;
-    }
-    const heading = line.match(/^(#{1,3})\s+(.+)$/);
-    if (heading) {
-      closeParagraph();
-      closeList();
-      const level = heading[1].length;
-      output.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
-      return;
-    }
-    if (/^\s*(?:---|___|\*\*\*)\s*$/.test(line)) {
-      closeParagraph();
-      closeList();
-      output.push("<hr>");
-      return;
-    }
-    const unordered = line.match(/^\s*[-*]\s+(.+)$/);
-    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
-    if (unordered || ordered) {
-      closeParagraph();
-      const nextListType = unordered ? "ul" : "ol";
-      if (listType !== nextListType) {
-        closeList();
-        listType = nextListType;
-        output.push(`<${listType}>`);
-      }
-      output.push(`<li>${renderInlineMarkdown((unordered || ordered)[1])}</li>`);
-      return;
-    }
-    const quote = line.match(/^&gt;\s?(.+)$/);
-    if (quote) {
-      closeParagraph();
-      closeList();
-      output.push(`<blockquote>${renderInlineMarkdown(quote[1])}</blockquote>`);
-      return;
-    }
-    paragraph.push(line);
-  });
-
-  if (inCodeBlock) closeCodeBlock();
-  closeParagraph();
-  closeList();
-  return output.join("");
-}
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>'"]/g, (character) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
-  })[character]);
 }
 
 function previewField(label, value, className = "") {

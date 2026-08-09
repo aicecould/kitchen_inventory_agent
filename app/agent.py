@@ -101,7 +101,7 @@ class KitchenAgent:
         messages = response.get("messages", [])
         content = self._last_text(messages)
         history = self._tool_history(messages)
-        canonical = canonical_tool_response(history)
+        canonical = canonical_tool_response(history, target_language=target_language)
         if canonical is not None:
             content = canonical
         elif target_language == "zh" and any(
@@ -127,6 +127,7 @@ class KitchenAgent:
         tool_audit = review_tool_calls(
             content,
             history,
+            target_language=target_language,
             ingredients=context.ingredients,
             vision_confirmation_result=context.vision_confirmation_result,
         )

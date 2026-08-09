@@ -376,7 +376,7 @@ def test_pending_inventory_audit_rejects_english_and_paraphrased_execution_claim
 
 
 def test_canonical_mixed_response_appends_recipe_titles_and_source_links() -> None:
-    """Replacing model prose must retain deterministic mixed-request recipe utility."""
+    """Replacing model prose must retain every useful structured recipe field."""
     assert hasattr(audit_module, "canonical_tool_response")
     item = inventory_instance()
     history = [
@@ -411,5 +411,79 @@ def test_canonical_mixed_response_appends_recipe_titles_and_source_links() -> No
 
     assert content is not None
     assert "Tomato Soup" in content
+    assert "食材：tomato" in content
+    assert "步骤：Simmer." in content
+    assert "来源：example" in content
     assert "https://recipes.example/tomato-soup" in content
     assert review_tool_calls(content, history).passed is True
+
+
+def test_canonical_mixed_response_discloses_an_empty_recipe_result() -> None:
+    """An empty recipe tool result must not disappear behind an inventory snapshot."""
+    history = [
+        {
+            "tool": "list_inventory_instances",
+            "arguments": {},
+            "result": [inventory_instance()],
+        },
+        {
+            "tool": "search_recipes",
+            "arguments": {
+                "ingredients": ["tomato"],
+                "intolerances": [],
+                "exclude_ingredients": [],
+                "custom_allergen_mapping": [],
+            },
+            "result": [],
+        },
+    ]
+
+    content = audit_module.canonical_tool_response(history)
+
+    assert content is not None
+    assert "菜谱工具结果：" in content
+    assert "未找到符合条件的菜谱。" in content
+    assert review_tool_calls(content, history).passed is True
+
+
+def test_canonical_mixed_response_honors_english_target_language() -> None:
+    """Non-Chinese inventory-bearing output must use the safe English rendering."""
+    item = inventory_instance()
+    proposal, _ = proposal_history("inventory.remove")
+    history = [
+        {"tool": "list_inventory_instances", "arguments": {}, "result": [item]},
+        *proposal,
+        {
+            "tool": "search_recipes",
+            "arguments": {
+                "ingredients": ["tomato"],
+                "intolerances": [],
+                "exclude_ingredients": [],
+                "custom_allergen_mapping": [],
+            },
+            "result": [
+                {
+                    "id": "recipe-1",
+                    "title": "Tomato Soup",
+                    "instructions": "Simmer, then serve.",
+                    "ingredients": ["tomato", "salt"],
+                    "source": "example",
+                    "source_url": "https://recipes.example/tomato-soup",
+                    "image_url": None,
+                }
+            ],
+        },
+    ]
+
+    content = audit_module.canonical_tool_response(history, target_language="en")
+
+    assert content is not None
+    assert "Inventory snapshots (read-only):" in content
+    assert "Pending actions (not executed):" in content
+    assert "status=pending (not executed)" in content
+    assert "Recipe tool results:" in content
+    assert "Ingredients: tomato; salt" in content
+    assert "Instructions: Simmer, then serve." in content
+    assert "Source: example" in content
+    assert "库存实例快照" not in content
+    assert review_tool_calls(content, history, target_language="en").passed is True

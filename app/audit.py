@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.context import ConfidenceStatus, Ingredient
 
@@ -37,11 +38,20 @@ _INVENTORY_TOOLS = _INVENTORY_READ_TOOLS | frozenset(
     _INVENTORY_PROPOSAL_OPERATIONS
 )
 _OPERATION_LABELS = {
-    "inventory.add": "库存新增",
-    "inventory.replace": "库存替换",
-    "inventory.remove": "单项删除",
-    "inventory.remove_all": "同名全部删除",
-    "inventory.confirm": "库存校准",
+    "zh": {
+        "inventory.add": "库存新增",
+        "inventory.replace": "库存替换",
+        "inventory.remove": "单项删除",
+        "inventory.remove_all": "同名全部删除",
+        "inventory.confirm": "库存校准",
+    },
+    "en": {
+        "inventory.add": "Add inventory item",
+        "inventory.replace": "Replace inventory item",
+        "inventory.remove": "Remove inventory item",
+        "inventory.remove_all": "Remove all exact-name items",
+        "inventory.confirm": "Confirm inventory item",
+    },
 }
 _INVENTORY_SNAPSHOT_FIELDS = {
     "instance_id",
@@ -93,6 +103,8 @@ def append_confidence_notice(content: str, ingredients: list[Ingredient]) -> str
 
 def canonical_tool_response(
     tool_history: list[dict[str, object]],
+    *,
+    target_language: str = "zh",
 ) -> str | None:
     """Render inventory-bearing tool history without trusting model-authored facts."""
 
@@ -104,13 +116,14 @@ def canonical_tool_response(
         }
         for entry in tool_history
     ]
-    return _canonical_response_from_calls(parsed_calls)
+    return _canonical_response_from_calls(parsed_calls, target_language)
 
 
 def review_tool_calls(
     content: str,
     tool_history: list[dict[str, object]],
     *,
+    target_language: str = "zh",
     ingredients: list[Ingredient] | None = None,
     vision_confirmation_result: dict[str, object] | None = None,
 ) -> AuditResult:
@@ -172,7 +185,7 @@ def review_tool_calls(
             and not _arguments_match(arguments, result_arguments)
         ):
             return AuditResult(False, "Inventory proposal arguments differ from tool result")
-    canonical = _canonical_response_from_calls(parsed_calls)
+    canonical = _canonical_response_from_calls(parsed_calls, target_language)
     if canonical is not None:
         expected = canonical if notice is None else f"{canonical}\n\n> {notice}"
         if content != expected:
@@ -411,27 +424,41 @@ def _validate_proposal_preview(
 
 def _canonical_response_from_calls(
     parsed_calls: list[dict[str, object]],
+    target_language: str = "zh",
 ) -> str | None:
     if not any(entry.get("tool") in _INVENTORY_TOOLS for entry in parsed_calls):
         return None
 
+    language = _canonical_language(target_language)
     sections: list[str] = []
-    read_lines = _canonical_read_lines(parsed_calls)
+    read_lines = _canonical_read_lines(parsed_calls, language)
     if read_lines:
-        sections.append("库存实例快照（只读）：\n" + "\n".join(read_lines))
+        heading = (
+            "库存实例快照（只读）："
+            if language == "zh"
+            else "Inventory snapshots (read-only):"
+        )
+        sections.append(heading + "\n" + "\n".join(read_lines))
 
-    proposal_lines = _canonical_proposal_lines(parsed_calls)
+    proposal_lines = _canonical_proposal_lines(parsed_calls, language)
     if proposal_lines:
-        sections.append("待确认操作（尚未执行）：\n" + "\n".join(proposal_lines))
+        heading = (
+            "待确认操作（尚未执行）："
+            if language == "zh"
+            else "Pending actions (not executed):"
+        )
+        sections.append(heading + "\n" + "\n".join(proposal_lines))
 
-    recipe_lines = _canonical_recipe_lines(parsed_calls)
-    if recipe_lines:
-        sections.append("菜谱工具结果：\n" + "\n".join(recipe_lines))
+    recipe_lines = _canonical_recipe_lines(parsed_calls, language)
+    if recipe_lines is not None:
+        heading = "菜谱工具结果：" if language == "zh" else "Recipe tool results:"
+        sections.append(heading + "\n" + "\n".join(recipe_lines))
     return "\n\n".join(sections)
 
 
 def _canonical_read_lines(
     parsed_calls: list[dict[str, object]],
+    language: str,
 ) -> list[str]:
     lines: list[str] = []
     seen_ids: set[str] = set()
@@ -450,27 +477,37 @@ def _canonical_read_lines(
             if instance_id in seen_ids:
                 continue
             seen_ids.add(instance_id)
-            lines.append(f"- {_canonical_snapshot(instance)}")
+            lines.append(f"- {_canonical_snapshot(instance, language)}")
         if instances:
             continue
         arguments = entry.get("arguments")
         structured_arguments = arguments if isinstance(arguments, dict) else {}
         if tool_name == "list_inventory_instances":
-            lines.append("- 当前库存为空。")
-        elif tool_name == "find_inventory_instances":
             lines.append(
-                f"- 精确名称“{structured_arguments.get('name', '')}”无匹配实例。"
+                "- 当前库存为空。"
+                if language == "zh"
+                else "- The inventory is empty."
+            )
+        elif tool_name == "find_inventory_instances":
+            name = structured_arguments.get("name", "")
+            lines.append(
+                f"- 精确名称“{name}”无匹配实例。"
+                if language == "zh"
+                else f'- No instance matches the exact name "{name}".'
             )
         else:
+            instance_id = structured_arguments.get("instance_id", "")
             lines.append(
-                "- 完整实例 ID "
-                f"{structured_arguments.get('instance_id', '')} 无匹配实例。"
+                f"- 完整实例 ID {instance_id} 无匹配实例。"
+                if language == "zh"
+                else f"- No instance matches full instance ID {instance_id}."
             )
     return lines
 
 
 def _canonical_proposal_lines(
     parsed_calls: list[dict[str, object]],
+    language: str,
 ) -> list[str]:
     lines: list[str] = []
     for entry in parsed_calls:
@@ -480,65 +517,109 @@ def _canonical_proposal_lines(
         if operation is None or not isinstance(result, dict):
             continue
         action_id = result.get("action_id", "")
-        lines.append(
-            f"- {_OPERATION_LABELS[operation]} | action_id={action_id} | "
+        pending_status = (
             "status=pending（尚未执行）"
+            if language == "zh"
+            else "status=pending (not executed)"
+        )
+        lines.append(
+            f"- {_OPERATION_LABELS[language][operation]} | action_id={action_id} | "
+            f"{pending_status}"
         )
         preview = result.get("preview")
         structured_preview = preview if isinstance(preview, dict) else {}
         if operation == "inventory.add":
             proposed = structured_preview.get("proposed")
             value = proposed if isinstance(proposed, dict) else {}
-            lines.append(
-                "  - 拟新增："
-                f"{value.get('name', '')}：{value.get('quantity_text', '')}；"
-                f"过期 {_display_value(value.get('expires_at'))}；"
-                f"日期来源 {value.get('expiry_source', '')}"
-            )
+            if language == "zh":
+                lines.append(
+                    "  - 拟新增："
+                    f"{value.get('name', '')}：{value.get('quantity_text', '')}；"
+                    f"过期 {_display_value(value.get('expires_at'), language)}；"
+                    f"日期来源 {value.get('expiry_source', '')}"
+                )
+            else:
+                lines.append(
+                    "  - Proposed addition: "
+                    f"{value.get('name', '')}: {value.get('quantity_text', '')}; "
+                    f"expires {_display_value(value.get('expires_at'), language)}; "
+                    f"expiry source {value.get('expiry_source', '')}"
+                )
         elif operation == "inventory.replace":
             current = structured_preview.get("current")
             proposed = structured_preview.get("proposed")
             current_value = current if isinstance(current, dict) else {}
             proposed_value = proposed if isinstance(proposed, dict) else {}
-            lines.append(f"  - 当前：{_canonical_snapshot(current_value)}")
+            current_label = "当前" if language == "zh" else "Current"
             lines.append(
-                "  - 拟替换："
-                f"{proposed_value.get('name', '')} "
-                f"[{proposed_value.get('instance_id', '')}]："
-                f"{proposed_value.get('quantity_text', '')}；"
-                f"过期 {_display_value(proposed_value.get('expires_at'))}；"
-                f"日期来源 {proposed_value.get('expiry_source', '')}"
+                f"  - {current_label}: {_canonical_snapshot(current_value, language)}"
             )
+            if language == "zh":
+                lines.append(
+                    "  - 拟替换："
+                    f"{proposed_value.get('name', '')} "
+                    f"[{proposed_value.get('instance_id', '')}]："
+                    f"{proposed_value.get('quantity_text', '')}；"
+                    f"过期 {_display_value(proposed_value.get('expires_at'), language)}；"
+                    f"日期来源 {proposed_value.get('expiry_source', '')}"
+                )
+            else:
+                lines.append(
+                    "  - Proposed replacement: "
+                    f"{proposed_value.get('name', '')} "
+                    f"[{proposed_value.get('instance_id', '')}]: "
+                    f"{proposed_value.get('quantity_text', '')}; "
+                    f"expires {_display_value(proposed_value.get('expires_at'), language)}; "
+                    f"expiry source {proposed_value.get('expiry_source', '')}"
+                )
         elif operation in {"inventory.remove", "inventory.confirm"}:
             current = structured_preview.get("current")
             current_value = current if isinstance(current, dict) else {}
-            label = "删除目标" if operation == "inventory.remove" else "确认目标"
-            lines.append(f"  - {label}：{_canonical_snapshot(current_value)}")
-        else:
+            if language == "zh":
+                label = "删除目标" if operation == "inventory.remove" else "确认目标"
+            else:
+                label = "Removal target" if operation == "inventory.remove" else "Confirmation target"
             lines.append(
-                "  - 精确名称 "
-                f"{structured_preview.get('name', '')}；预计数量 "
-                f"{structured_preview.get('expected_count', '')}"
+                f"  - {label}: {_canonical_snapshot(current_value, language)}"
             )
+        else:
+            if language == "zh":
+                lines.append(
+                    "  - 精确名称 "
+                    f"{structured_preview.get('name', '')}；预计数量 "
+                    f"{structured_preview.get('expected_count', '')}"
+                )
+            else:
+                lines.append(
+                    "  - Exact name "
+                    f"{structured_preview.get('name', '')}; expected count "
+                    f"{structured_preview.get('expected_count', '')}"
+                )
             items = structured_preview.get("items")
             if isinstance(items, list):
                 for item in items:
                     if isinstance(item, dict):
-                        lines.append(f"  - 删除目标：{_canonical_snapshot(item)}")
+                        target_label = "删除目标" if language == "zh" else "Removal target"
+                        lines.append(
+                            f"  - {target_label}: {_canonical_snapshot(item, language)}"
+                        )
     return lines
 
 
 def _canonical_recipe_lines(
     parsed_calls: list[dict[str, object]],
-) -> list[str]:
+    language: str,
+) -> list[str] | None:
     lines: list[str] = []
     seen: set[tuple[str, str]] = set()
+    searched = False
     for entry in parsed_calls:
         if entry.get("tool") != "search_recipes":
             continue
         result = entry.get("result")
         if not isinstance(result, list):
             continue
+        searched = True
         for item in result:
             if not isinstance(item, dict):
                 continue
@@ -548,29 +629,95 @@ def _canonical_recipe_lines(
             if not title or key in seen:
                 continue
             seen.add(key)
-            source = str(item.get("source") or "未知来源")
+            source = str(
+                item.get("source")
+                or ("未知来源" if language == "zh" else "Unknown source")
+            ).strip()
             rendered_title = (
                 f"[{title}]({source_url})"
-                if source_url.startswith(("http://", "https://"))
+                if _is_safe_http_url(source_url)
                 else title
             )
-            lines.append(f"- {rendered_title}；来源 {source}")
-    return lines
+            ingredients = item.get("ingredients")
+            ingredient_values = (
+                [
+                    _single_line(str(value))
+                    for value in ingredients
+                    if _single_line(str(value))
+                ]
+                if isinstance(ingredients, list)
+                else []
+            )
+            instructions = _single_line(str(item.get("instructions") or ""))
+            if language == "zh":
+                lines.extend(
+                    [
+                        f"- {rendered_title}",
+                        f"  - 食材：{'、'.join(ingredient_values) or '未提供'}",
+                        f"  - 步骤：{instructions or '未提供'}",
+                        f"  - 来源：{source}",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        f"- {rendered_title}",
+                        f"  - Ingredients: {'; '.join(ingredient_values) or 'Not provided'}",
+                        f"  - Instructions: {instructions or 'Not provided'}",
+                        f"  - Source: {source}",
+                    ]
+                )
+    if not searched:
+        return None
+    if lines:
+        return lines
+    return [
+        "- 未找到符合条件的菜谱。"
+        if language == "zh"
+        else "- No matching recipes were found."
+    ]
 
 
-def _canonical_snapshot(item: dict[str, object]) -> str:
+def _canonical_snapshot(item: dict[str, object], language: str) -> str:
+    if language == "zh":
+        return (
+            f"{item.get('name', '')} [{item.get('instance_id', '')}]："
+            f"{item.get('quantity_text', '')}；"
+            f"入库 {_display_value(item.get('stocked_at'), language)}；"
+            f"过期 {_display_value(item.get('expires_at'), language)}；"
+            f"日期来源 {item.get('expiry_source', '')}；"
+            f"最后确认 {_display_value(item.get('last_confirmed_at'), language)}"
+        )
     return (
-        f"{item.get('name', '')} [{item.get('instance_id', '')}]："
-        f"{item.get('quantity_text', '')}；"
-        f"入库 {_display_value(item.get('stocked_at'))}；"
-        f"过期 {_display_value(item.get('expires_at'))}；"
-        f"日期来源 {item.get('expiry_source', '')}；"
-        f"最后确认 {_display_value(item.get('last_confirmed_at'))}"
+        f"{item.get('name', '')} [{item.get('instance_id', '')}]: "
+        f"{item.get('quantity_text', '')}; "
+        f"stocked {_display_value(item.get('stocked_at'), language)}; "
+        f"expires {_display_value(item.get('expires_at'), language)}; "
+        f"expiry source {item.get('expiry_source', '')}; "
+        f"last confirmed {_display_value(item.get('last_confirmed_at'), language)}"
     )
 
 
-def _display_value(value: object) -> str:
-    return "未知" if value is None or value == "" else str(value)
+def _display_value(value: object, language: str) -> str:
+    if value is None or value == "":
+        return "未知" if language == "zh" else "unknown"
+    return str(value)
+
+
+def _canonical_language(target_language: str) -> str:
+    return "zh" if str(target_language).strip().casefold().startswith("zh") else "en"
+
+
+def _single_line(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _is_safe_http_url(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return parsed.scheme.casefold() in {"http", "https"} and bool(parsed.netloc)
 
 
 def _is_utc_iso(value: object) -> bool:
