@@ -101,9 +101,10 @@ def build_test_pipeline(tmp_path: Path):
 def install_scripted_agent(
     pipeline: Any,
     responses: list[AIMessage],
+    recipes: Any | None = None,
 ) -> ScriptedChatModel:
     model = ScriptedChatModel(responses=responses)
-    recipes = RecipeRouter(
+    recipe_router = recipes or RecipeRouter(
         None,
         TheMealDbClient(
             base_url=pipeline.settings.themealdb_base_url,
@@ -114,10 +115,25 @@ def install_scripted_agent(
     pipeline.agent = KitchenAgent(
         model=model,  # type: ignore[arg-type]
         inventory=pipeline.inventory,
-        recipes=recipes,
+        recipes=recipe_router,
         actions=pipeline.actions,
     )
     return model
+
+
+class FixedRecipeRouter:
+    def search(self, **kwargs: object) -> list[dict[str, object]]:
+        return [
+            {
+                "id": "recipe-1",
+                "title": "Tomato Soup",
+                "instructions": "Simmer.",
+                "ingredients": ["tomato"],
+                "source": "example",
+                "source_url": "https://recipes.example/tomato-soup",
+                "image_url": None,
+            }
+        ]
 
 
 def test_non_food_query_is_blocked_before_deepseek(
@@ -213,7 +229,10 @@ def test_inventory_query_returns_exact_instance_snapshots_without_deepseek(
     result = pipeline.process_request(user_id="test", text="查询一下当前库存")
 
     assert result.content == (
-        f"当前库存：\n- 土豆 [{item['instance_id']}]：2 个"
+        "库存实例快照（只读）：\n"
+        f"- 土豆 [{item['instance_id']}]：2 个；"
+        f"入库 {item['stocked_at']}；过期 未知；日期来源 unknown；"
+        f"最后确认 {item['last_confirmed_at']}"
     )
     assert result.blocked is False
     assert result.tool_history == [
@@ -264,7 +283,10 @@ def test_supported_list_bypasses_classifier_and_returns_real_inventory(
     result = pipeline.process_request(user_id="test", text="查询库存")
 
     assert result.content == (
-        f"当前库存：\n- 土豆 [{item['instance_id']}]：大约100个"
+        "库存实例快照（只读）：\n"
+        f"- 土豆 [{item['instance_id']}]：大约100个；"
+        f"入库 {item['stocked_at']}；过期 未知；日期来源 unknown；"
+        f"最后确认 {item['last_confirmed_at']}"
     )
     assert classifier.calls == 0
     assert result.execution_trace[0].name == "deterministic_route"
@@ -283,9 +305,13 @@ def test_supported_named_read_bypasses_classifier_and_returns_exact_instances(
     result = pipeline.process_request(user_id="test", text="查看土豆还有多少")
 
     assert result.content == (
-        "土豆库存：\n"
-        f"- 土豆 [{first['instance_id']}]：2个\n"
-        f"- 土豆 [{second['instance_id']}]：半袋"
+        "库存实例快照（只读）：\n"
+        f"- 土豆 [{first['instance_id']}]：2个；"
+        f"入库 {first['stocked_at']}；过期 未知；日期来源 unknown；"
+        f"最后确认 {first['last_confirmed_at']}\n"
+        f"- 土豆 [{second['instance_id']}]：半袋；"
+        f"入库 {second['stocked_at']}；过期 未知；日期来源 unknown；"
+        f"最后确认 {second['last_confirmed_at']}"
     )
     assert result.tool_history == [
         {
@@ -502,6 +528,94 @@ def test_relative_use_runs_real_agent_and_keeps_replacement_pending(
     ]
     assert "find_inventory_instances" in model.bound_tool_names
     assert "propose_replace_inventory_instance" in model.bound_tool_names
+
+
+def test_agent_inventory_proposal_replaces_english_execution_prose_with_canonical_pending(
+    tmp_path: Path,
+) -> None:
+    """Model-authored execution prose must never survive a proposal tool call."""
+    pipeline = build_test_pipeline(tmp_path)
+    pipeline.food_classifier = RelatedClassifierSpy()  # type: ignore[assignment]
+    install_scripted_agent(
+        pipeline,
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "propose_add_inventory_instance",
+                        "args": {"name": "牛奶", "quantity_text": "一盒"},
+                        "id": "call-add",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="I added the milk to inventory."),
+        ],
+    )
+
+    result = pipeline.process_request(user_id="test", text="请把一盒牛奶加入库存")
+
+    assert result.blocked is False
+    assert "I added" not in result.content
+    assert "待确认操作（尚未执行）" in result.content
+    assert "status=pending（尚未执行）" in result.content
+    assert "牛奶" in result.content and "一盒" in result.content
+    assert pipeline.inventory.find_by_name("牛奶") == []
+
+
+def test_agent_mixed_inventory_recipe_response_is_canonical_and_useful(
+    tmp_path: Path,
+) -> None:
+    """Canonical inventory replacement must append real recipe titles and links."""
+    pipeline = build_test_pipeline(tmp_path)
+    pipeline.food_classifier = RelatedClassifierSpy()  # type: ignore[assignment]
+    item = pipeline.inventory.add_instance("番茄", "大约100个", None, "unknown")
+    install_scripted_agent(
+        pipeline,
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "list_inventory_instances",
+                        "args": {},
+                        "id": "call-list",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_recipes",
+                        "args": {
+                            "ingredients": ["tomato"],
+                            "intolerances": [],
+                            "exclude_ingredients": [],
+                            "custom_allergen_mapping": [],
+                        },
+                        "id": "call-recipe",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="I checked the pantry and found something useful."),
+        ],
+        recipes=FixedRecipeRouter(),
+    )
+
+    result = pipeline.process_request(
+        user_id="test", text="根据库存推荐一道番茄菜谱"
+    )
+
+    assert result.blocked is False
+    assert "I checked" not in result.content
+    assert str(item["instance_id"]) in result.content
+    assert "大约100个" in result.content
+    assert "Tomato Soup" in result.content
+    assert "https://recipes.example/tomato-soup" in result.content
 
 
 def test_relative_replacement_accepts_equivalent_expiry_serializations(

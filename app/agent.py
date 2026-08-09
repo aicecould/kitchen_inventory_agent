@@ -17,7 +17,12 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.actions import InventoryActionService
 from app.allergens import AllergenIntolerance
-from app.audit import append_confidence_notice, regex_audit, review_tool_calls
+from app.audit import (
+    append_confidence_notice,
+    canonical_tool_response,
+    regex_audit,
+    review_tool_calls,
+)
 from app.config import Settings
 from app.context import AgentContext, AgentResult
 from app.prompts import SYSTEM_PROMPT
@@ -95,11 +100,14 @@ class KitchenAgent:
         )
         messages = response.get("messages", [])
         content = self._last_text(messages)
-        if target_language == "zh" and any(
+        history = self._tool_history(messages)
+        canonical = canonical_tool_response(history)
+        if canonical is not None:
+            content = canonical
+        elif target_language == "zh" and any(
             code in content for code in _ALLERGEN_TOOL_ERRORS
         ):
             content = "菜谱查询缺少或包含无效的过敏原过滤条件，本次没有发送查询请求。"
-        history = self._tool_history(messages)
         content = append_confidence_notice(content, context.ingredients)
         audit = regex_audit(content)
         trace.record(

@@ -13,7 +13,12 @@ from app.actions import (
 from app.adapters.recipe_api import SpoonacularClient, TheMealDbClient
 from app.adapters.vision_api import VisionApiClient
 from app.agent import KitchenAgent, build_agent
-from app.audit import append_confidence_notice, regex_audit, review_tool_calls
+from app.audit import (
+    append_confidence_notice,
+    canonical_tool_response,
+    regex_audit,
+    review_tool_calls,
+)
 from app.config import Settings, get_settings
 from app.context import (
     AgentContext,
@@ -567,6 +572,9 @@ class KitchenPipeline:
         confirmation_result: dict[str, object] | None = None,
     ) -> AgentResult:
         ingredients = ingredients or []
+        canonical = canonical_tool_response(tool_history)
+        if canonical is not None:
+            content = canonical
         content = append_confidence_notice(content, ingredients)
         regex_result = regex_audit(content)
         trace.record(

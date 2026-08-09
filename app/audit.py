@@ -16,19 +16,9 @@ BLOCK_PATTERNS = (
     re.compile(r"忽略(?:之前|以上)(?:的)?指令"),
     re.compile(r"(?:已经|已)完成(?:付款|下单)"),
 )
-_EXECUTED_INVENTORY_PATTERNS = (
-    re.compile(r"(?:已经|已)(?:成功)?(?:向库存)?(?:添加|加入|新增)"),
-    re.compile(r"(?:库存|数量)(?:已经|已)(?:成功)?(?:更新|修改|设置)"),
-    re.compile(r"(?:已经|已)(?:成功)?从库存(?:删除|移除)"),
-    re.compile(r"(?:库存)?操作(?:已经|已)(?:成功)?执行"),
-)
 _MARKDOWN_URL = re.compile(r"\[[^\]]+\]\((https?://[^)\s]+)\)")
 _INSTANCE_ID = re.compile(r"^inv_[0-9a-f]{32}$")
-_INVENTORY_LINE = re.compile(
-    r"^(?:[-*]\s+)?(?P<name>.+?)\s+\[(?P<instance_id>[^\]\r\n]+)\]"
-    r"[：:](?P<quantity_text>[^\r\n]+)$",
-    re.MULTILINE,
-)
+_ACTION_ID = re.compile(r"^act_[0-9a-f]{32}$")
 _INVENTORY_READ_TOOLS = frozenset(
     {
         "list_inventory_instances",
@@ -36,6 +26,32 @@ _INVENTORY_READ_TOOLS = frozenset(
         "get_inventory_instance",
     }
 )
+_INVENTORY_PROPOSAL_OPERATIONS = {
+    "propose_add_inventory_instance": "inventory.add",
+    "propose_replace_inventory_instance": "inventory.replace",
+    "propose_remove_inventory_instance": "inventory.remove",
+    "propose_remove_all_inventory_instances": "inventory.remove_all",
+    "propose_confirm_inventory_instance": "inventory.confirm",
+}
+_INVENTORY_TOOLS = _INVENTORY_READ_TOOLS | frozenset(
+    _INVENTORY_PROPOSAL_OPERATIONS
+)
+_OPERATION_LABELS = {
+    "inventory.add": "库存新增",
+    "inventory.replace": "库存替换",
+    "inventory.remove": "单项删除",
+    "inventory.remove_all": "同名全部删除",
+    "inventory.confirm": "库存校准",
+}
+_INVENTORY_SNAPSHOT_FIELDS = {
+    "instance_id",
+    "name",
+    "quantity_text",
+    "stocked_at",
+    "expires_at",
+    "expiry_source",
+    "last_confirmed_at",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +89,22 @@ def append_confidence_notice(content: str, ingredients: list[Ingredient]) -> str
     if notice is None or notice in content:
         return content
     return f"{content.rstrip()}\n\n> {notice}"
+
+
+def canonical_tool_response(
+    tool_history: list[dict[str, object]],
+) -> str | None:
+    """Render inventory-bearing tool history without trusting model-authored facts."""
+
+    parsed_calls = [
+        {
+            **entry,
+            "arguments": _as_value(entry.get("arguments")),
+            "result": _as_value(entry.get("result")),
+        }
+        for entry in tool_history
+    ]
+    return _canonical_response_from_calls(parsed_calls)
 
 
 def review_tool_calls(
@@ -124,7 +156,7 @@ def review_tool_calls(
     proposals = [
         entry
         for entry in parsed_calls
-        if str(entry.get("tool", "")).startswith("propose_")
+        if entry.get("tool") in _INVENTORY_PROPOSAL_OPERATIONS
     ]
     for entry in proposals:
         result = entry["result"]
@@ -140,23 +172,13 @@ def review_tool_calls(
             and not _arguments_match(arguments, result_arguments)
         ):
             return AuditResult(False, "Inventory proposal arguments differ from tool result")
-    if proposals and any(
-        pattern.search(content) for pattern in _EXECUTED_INVENTORY_PATTERNS
-    ):
-        return AuditResult(False, "Pending inventory operation was described as executed")
-
-    inventory_snapshots: list[object] = []
-    for entry in parsed_calls:
-        if entry.get("tool") not in _INVENTORY_READ_TOOLS:
-            continue
-        result = entry["result"]
-        if isinstance(result, dict):
-            inventory_snapshots.append(result)
-        elif isinstance(result, list):
-            inventory_snapshots.extend(result)
-    mismatch = _inventory_claim_mismatch(content, inventory_snapshots)
-    if mismatch:
-        return AuditResult(False, mismatch)
+    canonical = _canonical_response_from_calls(parsed_calls)
+    if canonical is not None:
+        expected = canonical if notice is None else f"{canonical}\n\n> {notice}"
+        if content != expected:
+            return AuditResult(
+                False, "Inventory response does not match canonical tool output"
+            )
 
     recipe_calls = [
         entry for entry in parsed_calls if entry.get("tool") == "search_recipes"
@@ -268,6 +290,24 @@ def _validate_tool_record(entry: dict[str, object]) -> str | None:
                 return result_error
             if result.get("instance_id") != requested_id:
                 return "Inventory instance result differs from requested ID"
+    if tool_name in _INVENTORY_PROPOSAL_OPERATIONS:
+        if not isinstance(result, dict):
+            return "Inventory proposal has no structured result"
+        expected_operation = _INVENTORY_PROPOSAL_OPERATIONS[tool_name]
+        if result.get("operation") != expected_operation:
+            return "Inventory proposal operation differs from tool"
+        action_id = result.get("action_id")
+        if not isinstance(action_id, str) or _ACTION_ID.fullmatch(action_id) is None:
+            return "Inventory proposal has an invalid action ID"
+        result_arguments = result.get("arguments")
+        preview = result.get("preview")
+        if not isinstance(result_arguments, dict) or not isinstance(preview, dict):
+            return "Inventory proposal arguments or preview are invalid"
+        preview_error = _validate_proposal_preview(
+            expected_operation, result_arguments, preview
+        )
+        if preview_error:
+            return preview_error
     if tool_name == "search_recipes":
         requested_ingredients = arguments.get("ingredients")
         if not isinstance(requested_ingredients, list) or not requested_ingredients:
@@ -282,53 +322,269 @@ def _validate_tool_record(entry: dict[str, object]) -> str | None:
     return None
 
 
-def _inventory_claim_mismatch(content: str, result: object) -> str | None:
-    if isinstance(result, dict):
-        instances = [result]
-    elif isinstance(result, list):
-        instances = result
-    else:
-        return None
-    actual: set[tuple[str, str, str]] = set()
-    for item in instances:
-        if not isinstance(item, dict):
-            continue
-        instance_id = str(item.get("instance_id", ""))
-        for displayed_id in {instance_id, instance_id[:8]}:
-            actual.add(
-                (
-                    str(item.get("name", "")),
-                    displayed_id,
-                    str(item.get("quantity_text", "")),
-                )
-            )
-    for match in _INVENTORY_LINE.finditer(content):
-        claim = (
-            match.group("name"),
-            match.group("instance_id"),
-            match.group("quantity_text"),
-        )
-        if claim not in actual:
-            return "Inventory value in answer differs from tool result"
-    return None
-
-
 def _validate_inventory_instances(result: list[object]) -> str | None:
     seen_ids: set[str] = set()
     for item in result:
         if not isinstance(item, dict):
             return "Inventory instance result is invalid"
+        if set(item) != _INVENTORY_SNAPSHOT_FIELDS:
+            return "Inventory instance result has an invalid field contract"
         instance_id = item.get("instance_id")
         if not isinstance(instance_id, str) or _INSTANCE_ID.fullmatch(instance_id) is None:
             return "Inventory instance result has an invalid ID"
         if instance_id in seen_ids:
             return "Inventory instance result IDs are duplicated"
         seen_ids.add(instance_id)
-        if not isinstance(item.get("name"), str) or not isinstance(
-            item.get("quantity_text"), str
+        if (
+            not isinstance(item.get("name"), str)
+            or not str(item["name"]).strip()
+            or not isinstance(item.get("quantity_text"), str)
+            or not str(item["quantity_text"]).strip()
+            or item.get("expiry_source") not in {"llm", "user", "unknown"}
         ):
             return "Inventory instance result is invalid"
+        for field in ("stocked_at", "last_confirmed_at"):
+            if not _is_utc_iso(item.get(field)):
+                return "Inventory instance result has an invalid UTC timestamp"
+        if item.get("expires_at") is not None and not _is_utc_iso(
+            item.get("expires_at")
+        ):
+            return "Inventory instance result has an invalid UTC expiry"
     return None
+
+
+def _validate_proposal_preview(
+    operation: str,
+    arguments: dict[str, object],
+    preview: dict[str, object],
+) -> str | None:
+    if operation == "inventory.add":
+        proposed = preview.get("proposed")
+        if not isinstance(proposed, dict) or proposed != arguments:
+            return "Inventory add preview differs from proposal arguments"
+        return None
+
+    if operation in {"inventory.replace", "inventory.remove", "inventory.confirm"}:
+        current = preview.get("current")
+        if not isinstance(current, dict):
+            return "Inventory proposal current preview is invalid"
+        instance_error = _validate_inventory_instances([current])
+        if instance_error:
+            return instance_error
+        if current.get("instance_id") != arguments.get("instance_id"):
+            return "Inventory proposal preview differs from target instance"
+        if operation == "inventory.replace":
+            proposed = preview.get("proposed")
+            if not isinstance(proposed, dict):
+                return "Inventory replace proposed preview is invalid"
+            expected = {
+                "instance_id": arguments.get("instance_id"),
+                "name": current.get("name"),
+                "quantity_text": arguments.get("quantity_text"),
+                "expires_at": arguments.get("expires_at"),
+                "expiry_source": arguments.get("expiry_source"),
+            }
+            if proposed != expected:
+                return "Inventory replace preview differs from proposal arguments"
+        return None
+
+    if operation == "inventory.remove_all":
+        name = arguments.get("name")
+        items = preview.get("items")
+        count = preview.get("expected_count")
+        if preview.get("name") != name or not isinstance(items, list):
+            return "Inventory remove-all preview differs from proposal arguments"
+        instance_error = _validate_inventory_instances(items)
+        if instance_error:
+            return instance_error
+        if (
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or count <= 0
+            or count != len(items)
+            or any(item.get("name") != name for item in items)
+        ):
+            return "Inventory remove-all preview count or items are invalid"
+        return None
+    return "Inventory proposal operation is not supported"
+
+
+def _canonical_response_from_calls(
+    parsed_calls: list[dict[str, object]],
+) -> str | None:
+    if not any(entry.get("tool") in _INVENTORY_TOOLS for entry in parsed_calls):
+        return None
+
+    sections: list[str] = []
+    read_lines = _canonical_read_lines(parsed_calls)
+    if read_lines:
+        sections.append("库存实例快照（只读）：\n" + "\n".join(read_lines))
+
+    proposal_lines = _canonical_proposal_lines(parsed_calls)
+    if proposal_lines:
+        sections.append("待确认操作（尚未执行）：\n" + "\n".join(proposal_lines))
+
+    recipe_lines = _canonical_recipe_lines(parsed_calls)
+    if recipe_lines:
+        sections.append("菜谱工具结果：\n" + "\n".join(recipe_lines))
+    return "\n\n".join(sections)
+
+
+def _canonical_read_lines(
+    parsed_calls: list[dict[str, object]],
+) -> list[str]:
+    lines: list[str] = []
+    seen_ids: set[str] = set()
+    for entry in parsed_calls:
+        tool_name = entry.get("tool")
+        if tool_name not in _INVENTORY_READ_TOOLS:
+            continue
+        result = entry.get("result")
+        instances: list[dict[str, object]] = []
+        if isinstance(result, dict):
+            instances = [result]
+        elif isinstance(result, list):
+            instances = [item for item in result if isinstance(item, dict)]
+        for instance in instances:
+            instance_id = str(instance.get("instance_id", ""))
+            if instance_id in seen_ids:
+                continue
+            seen_ids.add(instance_id)
+            lines.append(f"- {_canonical_snapshot(instance)}")
+        if instances:
+            continue
+        arguments = entry.get("arguments")
+        structured_arguments = arguments if isinstance(arguments, dict) else {}
+        if tool_name == "list_inventory_instances":
+            lines.append("- 当前库存为空。")
+        elif tool_name == "find_inventory_instances":
+            lines.append(
+                f"- 精确名称“{structured_arguments.get('name', '')}”无匹配实例。"
+            )
+        else:
+            lines.append(
+                "- 完整实例 ID "
+                f"{structured_arguments.get('instance_id', '')} 无匹配实例。"
+            )
+    return lines
+
+
+def _canonical_proposal_lines(
+    parsed_calls: list[dict[str, object]],
+) -> list[str]:
+    lines: list[str] = []
+    for entry in parsed_calls:
+        tool_name = entry.get("tool")
+        operation = _INVENTORY_PROPOSAL_OPERATIONS.get(str(tool_name))
+        result = entry.get("result")
+        if operation is None or not isinstance(result, dict):
+            continue
+        action_id = result.get("action_id", "")
+        lines.append(
+            f"- {_OPERATION_LABELS[operation]} | action_id={action_id} | "
+            "status=pending（尚未执行）"
+        )
+        preview = result.get("preview")
+        structured_preview = preview if isinstance(preview, dict) else {}
+        if operation == "inventory.add":
+            proposed = structured_preview.get("proposed")
+            value = proposed if isinstance(proposed, dict) else {}
+            lines.append(
+                "  - 拟新增："
+                f"{value.get('name', '')}：{value.get('quantity_text', '')}；"
+                f"过期 {_display_value(value.get('expires_at'))}；"
+                f"日期来源 {value.get('expiry_source', '')}"
+            )
+        elif operation == "inventory.replace":
+            current = structured_preview.get("current")
+            proposed = structured_preview.get("proposed")
+            current_value = current if isinstance(current, dict) else {}
+            proposed_value = proposed if isinstance(proposed, dict) else {}
+            lines.append(f"  - 当前：{_canonical_snapshot(current_value)}")
+            lines.append(
+                "  - 拟替换："
+                f"{proposed_value.get('name', '')} "
+                f"[{proposed_value.get('instance_id', '')}]："
+                f"{proposed_value.get('quantity_text', '')}；"
+                f"过期 {_display_value(proposed_value.get('expires_at'))}；"
+                f"日期来源 {proposed_value.get('expiry_source', '')}"
+            )
+        elif operation in {"inventory.remove", "inventory.confirm"}:
+            current = structured_preview.get("current")
+            current_value = current if isinstance(current, dict) else {}
+            label = "删除目标" if operation == "inventory.remove" else "确认目标"
+            lines.append(f"  - {label}：{_canonical_snapshot(current_value)}")
+        else:
+            lines.append(
+                "  - 精确名称 "
+                f"{structured_preview.get('name', '')}；预计数量 "
+                f"{structured_preview.get('expected_count', '')}"
+            )
+            items = structured_preview.get("items")
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        lines.append(f"  - 删除目标：{_canonical_snapshot(item)}")
+    return lines
+
+
+def _canonical_recipe_lines(
+    parsed_calls: list[dict[str, object]],
+) -> list[str]:
+    lines: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in parsed_calls:
+        if entry.get("tool") != "search_recipes":
+            continue
+        result = entry.get("result")
+        if not isinstance(result, list):
+            continue
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title", "")).strip()
+            source_url = str(item.get("source_url") or "").strip()
+            key = (title, source_url)
+            if not title or key in seen:
+                continue
+            seen.add(key)
+            source = str(item.get("source") or "未知来源")
+            rendered_title = (
+                f"[{title}]({source_url})"
+                if source_url.startswith(("http://", "https://"))
+                else title
+            )
+            lines.append(f"- {rendered_title}；来源 {source}")
+    return lines
+
+
+def _canonical_snapshot(item: dict[str, object]) -> str:
+    return (
+        f"{item.get('name', '')} [{item.get('instance_id', '')}]："
+        f"{item.get('quantity_text', '')}；"
+        f"入库 {_display_value(item.get('stocked_at'))}；"
+        f"过期 {_display_value(item.get('expires_at'))}；"
+        f"日期来源 {item.get('expiry_source', '')}；"
+        f"最后确认 {_display_value(item.get('last_confirmed_at'))}"
+    )
+
+
+def _display_value(value: object) -> str:
+    return "未知" if value is None or value == "" else str(value)
+
+
+def _is_utc_iso(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return (
+        parsed.tzinfo is not None
+        and parsed.utcoffset() is not None
+        and parsed.utcoffset().total_seconds() == 0
+    )
 
 
 def _looks_like_recipe_recommendation(content: str) -> bool:
