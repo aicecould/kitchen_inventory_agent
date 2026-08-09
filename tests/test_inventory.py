@@ -39,6 +39,129 @@ def test_legacy_schema_is_destructively_replaced_once(tmp_path: Path) -> None:
     assert repository.get_instance(str(kept["instance_id"])) == kept
 
 
+@pytest.mark.parametrize(
+    "definition",
+    [
+        (
+            "CREATE TABLE inventory("
+            "instance_id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+            "quantity_text TEXT NOT NULL, stocked_at TEXT NOT NULL, "
+            "expires_at TEXT, expiry_source TEXT NOT NULL, "
+            "last_confirmed_at TEXT NOT NULL, deployment_note TEXT)"
+        ),
+        "CREATE TABLE inventory(quantity REAL, name TEXT PRIMARY KEY, unit TEXT)",
+        (
+            "CREATE TABLE inventory("
+            "name TEXT NOT NULL, instance_id TEXT PRIMARY KEY, "
+            "quantity_text TEXT NOT NULL, stocked_at TEXT NOT NULL, "
+            "expires_at TEXT, expiry_source TEXT NOT NULL, "
+            "last_confirmed_at TEXT NOT NULL)"
+        ),
+    ],
+)
+def test_unknown_or_reordered_schema_fails_closed_without_losing_data(
+    tmp_path: Path, definition: str
+) -> None:
+    """Any shape other than exact legacy or v2 must survive a refused migration."""
+    database = tmp_path / "inventory.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(definition)
+        columns = [
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(inventory)").fetchall()
+        ]
+        values: dict[str, object] = {
+            "instance_id": "inv_11111111111111111111111111111111",
+            "name": "土豆",
+            "quantity": 2,
+            "quantity_text": "2个",
+            "unit": "个",
+            "stocked_at": "2026-08-07T00:00:00+00:00",
+            "expires_at": None,
+            "expiry_source": "unknown",
+            "last_confirmed_at": "2026-08-07T00:00:00+00:00",
+            "deployment_note": "keep-me",
+        }
+        placeholders = ", ".join("?" for _ in columns)
+        connection.execute(
+            f"INSERT INTO inventory({', '.join(columns)}) VALUES ({placeholders})",
+            [values[column] for column in columns],
+        )
+
+    with pytest.raises(RuntimeError, match="refusing destructive migration"):
+        InventoryRepository(database).initialize()
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM inventory").fetchone() == (1,)
+        remaining_columns = tuple(
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(inventory)").fetchall()
+        )
+    assert remaining_columns == tuple(columns)
+
+
+def test_v2_schema_uses_stocked_at_indexes_and_stable_order(tmp_path: Path) -> None:
+    """The public v2 contract must be exact and deterministic across insertion order."""
+    database = tmp_path / "inventory.db"
+    repository = InventoryRepository(database)
+    repository.initialize()
+    later = datetime(2026, 8, 8, 9, 0, tzinfo=UTC)
+    earlier = datetime(2026, 8, 7, 9, 0, tzinfo=UTC)
+    pear_later = repository.add_instance("pear", "2个", None, "unknown", now=later)
+    apple = repository.add_instance("apple", "1个", None, "unknown", now=later)
+    pear_earlier = repository.add_instance("pear", "1个", None, "unknown", now=earlier)
+
+    with sqlite3.connect(database) as connection:
+        columns = tuple(
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(inventory)").fetchall()
+        )
+        indexes = {
+            str(row[1])
+            for row in connection.execute("PRAGMA index_list(inventory)").fetchall()
+        }
+
+    assert columns == (
+        "instance_id",
+        "name",
+        "quantity_text",
+        "stocked_at",
+        "expires_at",
+        "expiry_source",
+        "last_confirmed_at",
+    )
+    assert {
+        "idx_inventory_name",
+        "idx_inventory_expires_at",
+        "idx_inventory_last_confirmed_at",
+    }.issubset(indexes)
+    assert repository.list_instances() == [apple, pear_earlier, pear_later]
+    assert set(apple) == {
+        "instance_id",
+        "name",
+        "quantity_text",
+        "stocked_at",
+        "expires_at",
+        "expiry_source",
+        "last_confirmed_at",
+    }
+
+
+def test_future_schema_version_fails_closed_and_preserves_v2_rows(tmp_path: Path) -> None:
+    """A future version marker must not be normalized back to v2 on read startup."""
+    database = tmp_path / "inventory.db"
+    repository = InventoryRepository(database)
+    repository.initialize()
+    kept = repository.add_instance("土豆", "2个", None, "unknown")
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO schema_versions(version) VALUES (3)")
+
+    with pytest.raises(RuntimeError, match="unsupported schema version"):
+        repository.initialize()
+
+    assert repository.get_instance(str(kept["instance_id"])) == kept
+
+
 def test_instance_updates_confirmation_and_removals_return_snapshots(tmp_path: Path) -> None:
     """Instance mutations must affect only their target and expose the removed record."""
     repository = InventoryRepository(tmp_path / "inventory.db")

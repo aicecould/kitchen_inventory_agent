@@ -66,7 +66,18 @@ def test_inventory_api_serves_duplicate_instances_with_display_metadata(
     response = TestClient(app, raise_server_exceptions=False).get("/api/inventory")
 
     assert response.status_code == 200
-    assert response.json()["items"] == [first, second]
+    assert response.json()["items"] == sorted(
+        [first, second], key=lambda item: str(item["instance_id"])
+    )
+    assert set(response.json()["items"][0]) == {
+        "instance_id",
+        "name",
+        "quantity_text",
+        "stocked_at",
+        "expires_at",
+        "expiry_source",
+        "last_confirmed_at",
+    }
 
 
 def test_status_exposes_request_limits() -> None:
@@ -114,7 +125,20 @@ def test_backend_rejects_unsupported_image_format_before_pipeline() -> None:
     assert "JPG、PNG 或 BMP" in response.json()["detail"]
 
 
-def test_process_response_includes_backend_execution_trace() -> None:
+def test_process_response_includes_backend_execution_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.web as web
+
+    profile = tmp_path / "profile.md"
+    profile.write_text("# 用户画像\n", encoding="utf-8")
+    settings = replace(
+        get_settings(),
+        inventory_db_path=tmp_path / "inventory.db",
+        user_profile_path=profile,
+    )
+    monkeypatch.setattr(web, "get_settings", lambda: settings)
+    monkeypatch.setattr(web, "_pipeline", web.build_pipeline(settings))
     response = client.post(
         "/api/process",
         data={"text": "查询一下当前库存", "language": "zh"},

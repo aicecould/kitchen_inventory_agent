@@ -8,17 +8,22 @@ import sqlite3
 from uuid import uuid4
 
 
-_INVENTORY_COLUMNS = {
+_LEGACY_INVENTORY_COLUMNS = ("name", "quantity", "unit")
+_INVENTORY_COLUMNS = (
     "instance_id",
     "name",
     "quantity_text",
+    "stocked_at",
     "expires_at",
     "expiry_source",
-    "created_at",
-    "updated_at",
     "last_confirmed_at",
-}
+)
+_INVENTORY_SELECT = ", ".join(_INVENTORY_COLUMNS)
 _EXPIRY_SOURCES = {"llm", "user", "unknown"}
+
+
+class InventorySchemaError(RuntimeError):
+    """Raised when an inventory database is not a known safe schema state."""
 
 
 class InventoryRepository:
@@ -29,12 +34,41 @@ class InventoryRepository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            columns = {
-                row[1]
+            columns = tuple(
+                str(row[1])
                 for row in connection.execute("PRAGMA table_info(inventory)").fetchall()
-            }
-            if columns and columns != _INVENTORY_COLUMNS:
+            )
+            version_columns = tuple(
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(schema_versions)"
+                ).fetchall()
+            )
+            if version_columns and version_columns != ("version",):
+                raise InventorySchemaError(
+                    "unknown schema_versions shape; refusing destructive migration"
+                )
+            if version_columns:
+                versions = {
+                    int(row[0])
+                    for row in connection.execute(
+                        "SELECT version FROM schema_versions"
+                    ).fetchall()
+                }
+                unsupported = versions - {2}
+                if unsupported:
+                    rendered = ", ".join(str(value) for value in sorted(unsupported))
+                    raise InventorySchemaError(
+                        f"unsupported schema version(s): {rendered}"
+                    )
+            if columns == _LEGACY_INVENTORY_COLUMNS:
                 connection.execute("DROP TABLE inventory")
+            elif columns and columns != _INVENTORY_COLUMNS:
+                rendered = ", ".join(columns)
+                raise InventorySchemaError(
+                    "unknown inventory schema "
+                    f"({rendered}); refusing destructive migration"
+                )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS schema_versions (version INTEGER PRIMARY KEY)"
             )
@@ -44,34 +78,48 @@ class InventoryRepository:
                     instance_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     quantity_text TEXT NOT NULL,
+                    stocked_at TEXT NOT NULL,
                     expires_at TEXT,
                     expiry_source TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
                     last_confirmed_at TEXT NOT NULL
                 )
                 """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_inventory_name ON inventory(name)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_inventory_expires_at "
+                "ON inventory(expires_at)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_inventory_last_confirmed_at "
+                "ON inventory(last_confirmed_at)"
             )
             connection.execute("INSERT OR IGNORE INTO schema_versions(version) VALUES (2)")
 
     def list_instances(self) -> list[dict[str, object]]:
         with self._connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM inventory ORDER BY rowid"
+                f"SELECT {_INVENTORY_SELECT} FROM inventory "
+                "ORDER BY name, stocked_at, instance_id"
             ).fetchall()
         return [self._snapshot(row) for row in rows]
 
     def find_by_name(self, name: str) -> list[dict[str, object]]:
         with self._connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM inventory WHERE name = ? ORDER BY rowid", (name,)
+                f"SELECT {_INVENTORY_SELECT} FROM inventory WHERE name = ? "
+                "ORDER BY name, stocked_at, instance_id",
+                (name,),
             ).fetchall()
         return [self._snapshot(row) for row in rows]
 
     def get_instance(self, instance_id: str) -> dict[str, object] | None:
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT * FROM inventory WHERE instance_id = ?", (instance_id,)
+                f"SELECT {_INVENTORY_SELECT} FROM inventory WHERE instance_id = ?",
+                (instance_id,),
             ).fetchone()
         return None if row is None else self._snapshot(row)
 
@@ -92,18 +140,20 @@ class InventoryRepository:
             "instance_id": f"inv_{uuid4().hex}",
             "name": name,
             "quantity_text": quantity_text,
+            "stocked_at": timestamp,
             "expires_at": self._serialize_datetime(expires_at),
             "expiry_source": expiry_source,
-            "created_at": timestamp,
-            "updated_at": timestamp,
             "last_confirmed_at": timestamp,
         }
         with self._connection() as connection:
             connection.execute(
                 """
-                INSERT INTO inventory VALUES (
-                    :instance_id, :name, :quantity_text, :expires_at, :expiry_source,
-                    :created_at, :updated_at, :last_confirmed_at
+                INSERT INTO inventory(
+                    instance_id, name, quantity_text, stocked_at, expires_at,
+                    expiry_source, last_confirmed_at
+                ) VALUES (
+                    :instance_id, :name, :quantity_text, :stocked_at, :expires_at,
+                    :expiry_source, :last_confirmed_at
                 )
                 """,
                 snapshot,
@@ -121,26 +171,27 @@ class InventoryRepository:
     ) -> dict[str, object]:
         self._validate_text(quantity_text, "quantity_text")
         self._validate_expiry_source(expiry_source)
-        updated_at = self._timestamp(now)
+        if now is not None:
+            self._as_utc(now)
         with self._connection() as connection:
             cursor = connection.execute(
                 """
                 UPDATE inventory
-                SET quantity_text = ?, expires_at = ?, expiry_source = ?, updated_at = ?
+                SET quantity_text = ?, expires_at = ?, expiry_source = ?
                 WHERE instance_id = ?
                 """,
                 (
                     quantity_text,
                     self._serialize_datetime(expires_at),
                     expiry_source,
-                    updated_at,
                     instance_id,
                 ),
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"inventory instance not found: {instance_id}")
             row = connection.execute(
-                "SELECT * FROM inventory WHERE instance_id = ?", (instance_id,)
+                f"SELECT {_INVENTORY_SELECT} FROM inventory WHERE instance_id = ?",
+                (instance_id,),
             ).fetchone()
         assert row is not None
         return self._snapshot(row)
@@ -153,15 +204,16 @@ class InventoryRepository:
             cursor = connection.execute(
                 """
                 UPDATE inventory
-                SET last_confirmed_at = ?, updated_at = ?
+                SET last_confirmed_at = ?
                 WHERE instance_id = ?
                 """,
-                (timestamp, timestamp, instance_id),
+                (timestamp, instance_id),
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"inventory instance not found: {instance_id}")
             row = connection.execute(
-                "SELECT * FROM inventory WHERE instance_id = ?", (instance_id,)
+                f"SELECT {_INVENTORY_SELECT} FROM inventory WHERE instance_id = ?",
+                (instance_id,),
             ).fetchone()
         assert row is not None
         return self._snapshot(row)
@@ -169,7 +221,8 @@ class InventoryRepository:
     def remove_instance(self, instance_id: str) -> dict[str, object]:
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT * FROM inventory WHERE instance_id = ?", (instance_id,)
+                f"SELECT {_INVENTORY_SELECT} FROM inventory WHERE instance_id = ?",
+                (instance_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"inventory instance not found: {instance_id}")
@@ -179,7 +232,9 @@ class InventoryRepository:
     def remove_all_by_name(self, name: str) -> dict[str, object]:
         with self._connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM inventory WHERE name = ? ORDER BY rowid", (name,)
+                f"SELECT {_INVENTORY_SELECT} FROM inventory WHERE name = ? "
+                "ORDER BY name, stocked_at, instance_id",
+                (name,),
             ).fetchall()
             if not rows:
                 raise KeyError(f"inventory instances not found: {name}")

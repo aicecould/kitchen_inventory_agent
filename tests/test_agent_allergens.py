@@ -152,7 +152,14 @@ def test_inventory_write_tools_require_lookup_and_create_only_pending_actions(
         {"instance_id": unique_id}
     )
 
-    assert inventory.list_instances() == [first, second, unique]
+    assert inventory.list_instances() == sorted(
+        [first, second, unique],
+        key=lambda item: (
+            str(item["name"]),
+            str(item["stocked_at"]),
+            str(item["instance_id"]),
+        ),
+    )
     assert [value["status"] for value in (add, replace, remove, remove_all, confirm)] == [
         "pending",
         "pending",
