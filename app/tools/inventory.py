@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import re
 import sqlite3
 from uuid import uuid4
 
 
-_LEGACY_INVENTORY_COLUMNS = ("name", "quantity", "unit")
 _INVENTORY_COLUMNS = (
     "instance_id",
     "name",
@@ -20,6 +20,42 @@ _INVENTORY_COLUMNS = (
 )
 _INVENTORY_SELECT = ", ".join(_INVENTORY_COLUMNS)
 _EXPIRY_SOURCES = {"llm", "user", "unknown"}
+_LEGACY_INVENTORY_SQL = """
+CREATE TABLE inventory (
+    name TEXT PRIMARY KEY,
+    quantity REAL NOT NULL CHECK (quantity >= 0),
+    unit TEXT NOT NULL
+)
+"""
+_INVENTORY_SQL = """
+CREATE TABLE inventory (
+    instance_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    quantity_text TEXT NOT NULL,
+    stocked_at TEXT NOT NULL,
+    expires_at TEXT,
+    expiry_source TEXT NOT NULL,
+    last_confirmed_at TEXT NOT NULL
+)
+"""
+_SCHEMA_VERSIONS_SQL = """
+CREATE TABLE schema_versions (version INTEGER PRIMARY KEY)
+"""
+_LEGACY_INVENTORY_SIGNATURE = (
+    ("name", "TEXT", 0, None, 1, 0),
+    ("quantity", "REAL", 1, None, 0, 0),
+    ("unit", "TEXT", 1, None, 0, 0),
+)
+_INVENTORY_SIGNATURE = (
+    ("instance_id", "TEXT", 0, None, 1, 0),
+    ("name", "TEXT", 1, None, 0, 0),
+    ("quantity_text", "TEXT", 1, None, 0, 0),
+    ("stocked_at", "TEXT", 1, None, 0, 0),
+    ("expires_at", "TEXT", 0, None, 0, 0),
+    ("expiry_source", "TEXT", 1, None, 0, 0),
+    ("last_confirmed_at", "TEXT", 1, None, 0, 0),
+)
+_SCHEMA_VERSIONS_SIGNATURE = (("version", "INTEGER", 0, None, 1, 0),)
 
 
 class InventorySchemaError(RuntimeError):
@@ -34,21 +70,21 @@ class InventoryRepository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            columns = tuple(
-                str(row[1])
-                for row in connection.execute("PRAGMA table_info(inventory)").fetchall()
+            inventory_schema = self._table_schema(connection, "inventory")
+            version_schema = self._table_schema(connection, "schema_versions")
+
+            inventory_kind = self._inventory_schema_kind(inventory_schema)
+            version_schema_is_exact = self._schema_matches(
+                version_schema,
+                _SCHEMA_VERSIONS_SIGNATURE,
+                _SCHEMA_VERSIONS_SQL,
             )
-            version_columns = tuple(
-                str(row[1])
-                for row in connection.execute(
-                    "PRAGMA table_info(schema_versions)"
-                ).fetchall()
-            )
-            if version_columns and version_columns != ("version",):
+            if version_schema is not None and not version_schema_is_exact:
                 raise InventorySchemaError(
                     "unknown schema_versions shape; refusing destructive migration"
                 )
-            if version_columns:
+            versions: set[int] | None = None
+            if version_schema_is_exact:
                 versions = {
                     int(row[0])
                     for row in connection.execute(
@@ -61,30 +97,37 @@ class InventoryRepository:
                     raise InventorySchemaError(
                         f"unsupported schema version(s): {rendered}"
                     )
-            if columns == _LEGACY_INVENTORY_COLUMNS:
-                connection.execute("DROP TABLE inventory")
-            elif columns and columns != _INVENTORY_COLUMNS:
-                rendered = ", ".join(columns)
+
+            if inventory_kind == "unknown":
+                rendered = ", ".join(
+                    column[0] for column in inventory_schema[0]
+                ) if inventory_schema is not None else "missing"
                 raise InventorySchemaError(
                     "unknown inventory schema "
                     f"({rendered}); refusing destructive migration"
                 )
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS schema_versions (version INTEGER PRIMARY KEY)"
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS inventory (
-                    instance_id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    quantity_text TEXT NOT NULL,
-                    stocked_at TEXT NOT NULL,
-                    expires_at TEXT,
-                    expiry_source TEXT NOT NULL,
-                    last_confirmed_at TEXT NOT NULL
+
+            if inventory_kind == "legacy":
+                if version_schema is not None:
+                    raise InventorySchemaError(
+                        "contradictory schema state: legacy inventory has a "
+                        "schema version table; refusing destructive migration"
+                    )
+                connection.execute("DROP TABLE inventory")
+            elif inventory_kind == "v2":
+                if versions != {2}:
+                    raise InventorySchemaError(
+                        "existing v2 inventory requires a coherent version 2 marker"
+                    )
+            elif version_schema is not None:
+                raise InventorySchemaError(
+                    "contradictory schema state: schema version table exists without "
+                    "inventory; refusing initialization"
                 )
-                """
-            )
+
+            if inventory_kind in {"missing", "legacy"}:
+                connection.execute(_SCHEMA_VERSIONS_SQL)
+                connection.execute(_INVENTORY_SQL)
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_inventory_name ON inventory(name)"
             )
@@ -97,6 +140,63 @@ class InventoryRepository:
                 "ON inventory(last_confirmed_at)"
             )
             connection.execute("INSERT OR IGNORE INTO schema_versions(version) VALUES (2)")
+
+    @classmethod
+    def _inventory_schema_kind(
+        cls,
+        schema: tuple[tuple[tuple[object, ...], ...], str] | None,
+    ) -> str:
+        if schema is None:
+            return "missing"
+        if cls._schema_matches(
+            schema, _LEGACY_INVENTORY_SIGNATURE, _LEGACY_INVENTORY_SQL
+        ):
+            return "legacy"
+        if cls._schema_matches(schema, _INVENTORY_SIGNATURE, _INVENTORY_SQL):
+            return "v2"
+        return "unknown"
+
+    @classmethod
+    def _schema_matches(
+        cls,
+        actual: tuple[tuple[tuple[object, ...], ...], str] | None,
+        expected_signature: tuple[tuple[object, ...], ...],
+        expected_sql: str,
+    ) -> bool:
+        if actual is None:
+            return False
+        signature, table_sql = actual
+        return signature == expected_signature and table_sql == cls._normalize_sql(
+            expected_sql
+        )
+
+    @classmethod
+    def _table_schema(
+        cls, connection: sqlite3.Connection, table: str
+    ) -> tuple[tuple[tuple[object, ...], ...], str] | None:
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        pragma_rows = connection.execute(f"PRAGMA table_xinfo({table})").fetchall()
+        signature = tuple(
+            (
+                str(column[1]),
+                " ".join(str(column[2]).upper().split()),
+                int(column[3]),
+                None if column[4] is None else str(column[4]).strip(),
+                int(column[5]),
+                int(column[6]),
+            )
+            for column in pragma_rows
+        )
+        return signature, cls._normalize_sql(str(row[0]))
+
+    @staticmethod
+    def _normalize_sql(sql: str) -> str:
+        return re.sub(r"\s+", "", sql).casefold()
 
     def list_instances(self) -> list[dict[str, object]]:
         with self._connection() as connection:

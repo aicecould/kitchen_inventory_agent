@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from app.tools.inventory import InventoryRepository
+from app.tools.inventory import InventoryRepository, InventorySchemaError
 
 
 def test_instances_keep_duplicate_names_and_original_quantity_text(tmp_path: Path) -> None:
@@ -28,7 +28,13 @@ def test_legacy_schema_is_destructively_replaced_once(tmp_path: Path) -> None:
     db = tmp_path / "inventory.db"
     with sqlite3.connect(db) as connection:
         connection.execute(
-            "CREATE TABLE inventory(name TEXT PRIMARY KEY, quantity REAL, unit TEXT)"
+            """
+            CREATE TABLE inventory (
+                name TEXT PRIMARY KEY,
+                quantity REAL NOT NULL CHECK (quantity >= 0),
+                unit TEXT NOT NULL
+            )
+            """
         )
         connection.execute("INSERT INTO inventory VALUES ('土豆', 2, '个')")
     repository = InventoryRepository(db)
@@ -160,6 +166,166 @@ def test_future_schema_version_fails_closed_and_preserves_v2_rows(tmp_path: Path
         repository.initialize()
 
     assert repository.get_instance(str(kept["instance_id"])) == kept
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        (
+            "CREATE TABLE inventory("
+            "instance_id BLOB PRIMARY KEY, name TEXT NOT NULL, "
+            "quantity_text TEXT NOT NULL, stocked_at TEXT NOT NULL, "
+            "expires_at TEXT, expiry_source TEXT NOT NULL, "
+            "last_confirmed_at TEXT NOT NULL)"
+        ),
+        (
+            "CREATE TABLE inventory("
+            "instance_id TEXT PRIMARY KEY, name TEXT, "
+            "quantity_text TEXT NOT NULL, stocked_at TEXT NOT NULL, "
+            "expires_at TEXT, expiry_source TEXT NOT NULL, "
+            "last_confirmed_at TEXT NOT NULL)"
+        ),
+        (
+            "CREATE TABLE inventory("
+            "instance_id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+            "quantity_text TEXT NOT NULL, stocked_at TEXT NOT NULL, "
+            "expires_at TEXT, expiry_source TEXT NOT NULL DEFAULT 'unknown', "
+            "last_confirmed_at TEXT NOT NULL)"
+        ),
+        (
+            "CREATE TABLE inventory("
+            "instance_id TEXT, name TEXT NOT NULL, "
+            "quantity_text TEXT NOT NULL, stocked_at TEXT NOT NULL, "
+            "expires_at TEXT, expiry_source TEXT NOT NULL, "
+            "last_confirmed_at TEXT NOT NULL)"
+        ),
+        (
+            "CREATE TABLE inventory("
+            "instance_id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+            "quantity_text TEXT NOT NULL, stocked_at TEXT NOT NULL, "
+            "expires_at TEXT, expiry_source TEXT NOT NULL, "
+            "last_confirmed_at TEXT NOT NULL, CHECK(length(name) > 0))"
+        ),
+    ],
+    ids=["type", "not-null", "default", "primary-key", "table-check"],
+)
+def test_same_v2_names_with_different_definition_fail_closed_and_retain_data(
+    tmp_path: Path, definition: str
+) -> None:
+    """Changing any approved schema attribute must never normalize an unknown table."""
+    database = tmp_path / "inventory.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(definition)
+        connection.execute(
+            "CREATE TABLE schema_versions(version INTEGER PRIMARY KEY)"
+        )
+        connection.execute("INSERT INTO schema_versions(version) VALUES (2)")
+        connection.execute(
+            """
+            INSERT INTO inventory(
+                instance_id, name, quantity_text, stocked_at, expires_at,
+                expiry_source, last_confirmed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "inv_11111111111111111111111111111111",
+                "土豆",
+                "2个",
+                "2026-08-07T00:00:00+00:00",
+                None,
+                "unknown",
+                "2026-08-07T00:00:00+00:00",
+            ),
+        )
+        original_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inventory'"
+        ).fetchone()
+
+    with pytest.raises(InventorySchemaError, match="unknown inventory schema"):
+        InventoryRepository(database).initialize()
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM inventory").fetchone() == (1,)
+        assert connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inventory'"
+        ).fetchone() == original_sql
+        assert connection.execute("SELECT version FROM schema_versions").fetchall() == [
+            (2,)
+        ]
+
+
+def test_exact_legacy_shape_with_v2_marker_fails_closed_and_retains_data(
+    tmp_path: Path,
+) -> None:
+    """A v2 marker makes an otherwise exact legacy table contradictory, not migratable."""
+    database = tmp_path / "inventory.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE inventory (
+                name TEXT PRIMARY KEY,
+                quantity REAL NOT NULL CHECK (quantity >= 0),
+                unit TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("INSERT INTO inventory VALUES ('土豆', 2, '个')")
+        connection.execute(
+            "CREATE TABLE schema_versions(version INTEGER PRIMARY KEY)"
+        )
+        connection.execute("INSERT INTO schema_versions(version) VALUES (2)")
+
+    with pytest.raises(InventorySchemaError, match="contradictory schema state"):
+        InventoryRepository(database).initialize()
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT * FROM inventory").fetchall() == [
+            ("土豆", 2.0, "个")
+        ]
+        assert connection.execute("SELECT version FROM schema_versions").fetchall() == [
+            (2,)
+        ]
+
+
+@pytest.mark.parametrize("create_version_table", [False, True])
+def test_exact_v2_without_coherent_version_marker_fails_closed_and_retains_data(
+    tmp_path: Path, create_version_table: bool
+) -> None:
+    """An existing v2 table is valid only alongside its exact version-2 marker."""
+    database = tmp_path / "inventory.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE inventory (
+                instance_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                quantity_text TEXT NOT NULL,
+                stocked_at TEXT NOT NULL,
+                expires_at TEXT,
+                expiry_source TEXT NOT NULL,
+                last_confirmed_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO inventory VALUES (
+                'inv_11111111111111111111111111111111', '土豆', '2个',
+                '2026-08-07T00:00:00+00:00', NULL, 'unknown',
+                '2026-08-07T00:00:00+00:00'
+            )
+            """
+        )
+        if create_version_table:
+            connection.execute(
+                "CREATE TABLE schema_versions(version INTEGER PRIMARY KEY)"
+            )
+
+    with pytest.raises(InventorySchemaError, match="coherent version 2 marker"):
+        InventoryRepository(database).initialize()
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM inventory").fetchone() == (1,)
 
 
 def test_instance_updates_confirmation_and_removals_return_snapshots(tmp_path: Path) -> None:
