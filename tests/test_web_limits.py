@@ -2,7 +2,10 @@ from fastapi.testclient import TestClient
 
 from app.limits import MAX_IMAGE_BYTES, MAX_TEXT_CHARS
 from dataclasses import replace
+from datetime import UTC, datetime
+from html.parser import HTMLParser
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +15,58 @@ from PIL import Image
 
 
 client = TestClient(app)
+
+
+class _ElementCollector(HTMLParser):
+    """Collect the attributes of specifically identified HTTP-served elements."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.elements: dict[str, dict[str, str | None]] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if element_id := attributes.get("id"):
+            self.elements[element_id] = attributes
+
+
+def test_frontend_shell_serves_a_hidden_accessible_proactive_reminder() -> None:
+    """The page shell exposes a quiet live region before its startup request resolves."""
+    response = client.get("/")
+    document = _ElementCollector()
+    document.feed(response.text)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert document.elements["proactive-reminder"]["role"] == "status"
+    assert "hidden" in document.elements["proactive-reminder"]
+
+
+def test_inventory_api_serves_duplicate_instances_with_display_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The browser receives individual purchase instances, never an aggregated item."""
+    import app.web as web
+    from app.tools.inventory import InventoryRepository
+
+    settings = replace(get_settings(), inventory_db_path=tmp_path / "inventory.db")
+    monkeypatch.setattr(web, "get_settings", lambda: settings)
+    repository = InventoryRepository(settings.inventory_db_path)
+    repository.initialize()
+    stocked_at = datetime(2026, 8, 7, 9, 30, tzinfo=UTC)
+    first = repository.add_instance("番茄", "2 个（熟）", None, "unknown", now=stocked_at)
+    second = repository.add_instance(
+        "番茄",
+        "400g-500g",
+        datetime(2026, 8, 12, 18, 0, tzinfo=UTC),
+        "user",
+        now=stocked_at,
+    )
+
+    response = TestClient(app, raise_server_exceptions=False).get("/api/inventory")
+
+    assert response.status_code == 200
+    assert response.json()["items"] == [first, second]
 
 
 def test_status_exposes_request_limits() -> None:

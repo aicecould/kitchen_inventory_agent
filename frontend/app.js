@@ -13,6 +13,8 @@ const answerContent = document.querySelector("#answer-content");
 const toolTrace = document.querySelector("#tool-trace");
 const inventoryList = document.querySelector("#inventory-list");
 const globalStatus = document.querySelector("#global-status");
+const proactiveReminder = document.querySelector("#proactive-reminder");
+const proactiveReminderMessage = proactiveReminder.querySelector(".proactive-reminder-message");
 const confirmationSection = document.querySelector("#confirmation-section");
 const confirmationList = document.querySelector("#confirmation-list");
 const visionCheckpoint = document.querySelector("#vision-checkpoint");
@@ -45,6 +47,7 @@ const requestLimits = {
   maxTextChars: 2000,
   maxImageBytes: 3 * 1024 * 1024,
 };
+const maxProactiveReminderChars = 100;
 
 promptInput.addEventListener("input", () => {
   charCount.textContent = promptInput.value.length;
@@ -230,13 +233,36 @@ async function loadInventory() {
       return;
     }
     inventoryList.innerHTML = data.items.map((item) => `
-      <div class="inventory-item">
-        <strong>${escapeHtml(item.name)}</strong>
-        <span>${item.quantity} ${escapeHtml(item.unit)}</span>
-      </div>
+      <article class="inventory-item">
+        <header class="inventory-item-heading">
+          <strong>${escapeHtml(item.name)}</strong>
+          <span class="inventory-instance-id" title="${escapeHtml(item.instance_id)}">${escapeHtml(shortInstanceId(item.instance_id))}</span>
+        </header>
+        <p class="inventory-quantity">${escapeHtml(item.quantity_text)}</p>
+        <dl class="inventory-details">
+          <div><dt>入库</dt><dd>${formatLocalDateTime(item.stocked_at || item.created_at)}</dd></div>
+          <div><dt>过期</dt><dd>${formatLocalDateTime(item.expires_at, "过期未知")}</dd></div>
+          <div><dt>确认</dt><dd>${formatLocalDateTime(item.last_confirmed_at)}</dd></div>
+        </dl>
+      </article>
     `).join("");
   } catch {
     inventoryList.innerHTML = '<p class="empty-note">库存暂时打不开，请稍后再试。</p>';
+  }
+}
+
+async function loadProactiveReminder() {
+  proactiveReminder.hidden = true;
+  proactiveReminderMessage.textContent = "";
+  try {
+    const response = await fetch("/api/proactive-check", { method: "POST" });
+    const data = await response.json();
+    const message = typeof data.message === "string" ? data.message.trim() : "";
+    if (!response.ok || !message || message.length > maxProactiveReminderChars || /[\r\n]/.test(message)) return;
+    proactiveReminderMessage.textContent = message;
+    proactiveReminder.hidden = false;
+  } catch {
+    // A reminder must never block the independent pantry and status requests.
   }
 }
 
@@ -569,7 +595,26 @@ function formatTime(value) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
+function shortInstanceId(value) {
+  const instanceId = String(value || "");
+  return instanceId.length > 12 ? `${instanceId.slice(0, 12)}…` : instanceId || "编号未知";
+}
+
+function formatLocalDateTime(value, fallback = "时间未知") {
+  if (!value) return fallback;
+  const time = new Date(value);
+  if (Number.isNaN(time.getTime())) return fallback;
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(time);
+}
+
 document.querySelector("#refresh-inventory").addEventListener("click", loadInventory);
 loadStatus();
 loadInventory();
 loadPendingActions();
+loadProactiveReminder();

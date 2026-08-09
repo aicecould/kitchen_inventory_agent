@@ -126,7 +126,7 @@ def inventory_snapshot() -> dict[str, object]:
     settings = get_settings()
     repository = InventoryRepository(settings.inventory_db_path)
     repository.initialize()
-    return {"items": repository.list_items()}
+    return {"items": repository.list_instances()}
 
 
 @app.post("/api/proactive-check")
