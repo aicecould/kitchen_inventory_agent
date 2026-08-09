@@ -479,6 +479,13 @@ class KitchenPipeline:
                     ),
                     lambda value: f"{value.operation}; status={value.status}",
                 )
+                if action.arguments.get("expiry_source") == "unknown":
+                    trace.record(
+                        "model",
+                        "expiry_inference",
+                        "degraded",
+                        "unknown expiry; proposal remains pending",
+                    )
             else:
                 if simple_operation.operation in {
                     "inventory.replace",

@@ -186,6 +186,24 @@ def test_simple_write_preserves_quantity_text_without_deepseek(
         "expiry_source": "llm",
     }
     assert result.tool_history[0]["tool"] == "propose_add_inventory_instance"
+    assert all(
+        event.name != "expiry_inference" for event in result.execution_trace
+    )
+
+
+def test_direct_add_records_safe_unknown_expiry_degradation(tmp_path: Path) -> None:
+    """A no-provider add must disclose unknown inference without provider details."""
+    pipeline = build_test_pipeline(tmp_path)
+
+    result = pipeline.process_request(user_id="test", text="添加2个土豆到库存")
+
+    events = [
+        event for event in result.execution_trace if event.name == "expiry_inference"
+    ]
+    assert len(events) == 1
+    assert events[0].stage == "model"
+    assert events[0].status == "degraded"
+    assert events[0].detail == "unknown expiry; proposal remains pending"
 
 
 def test_missing_classifier_artifact_fails_open(tmp_path: Path) -> None:
@@ -562,6 +580,12 @@ def test_agent_inventory_proposal_replaces_english_execution_prose_with_canonica
     assert "status=pending（尚未执行）" in result.content
     assert "牛奶" in result.content and "一盒" in result.content
     assert pipeline.inventory.find_by_name("牛奶") == []
+    events = [
+        event for event in result.execution_trace if event.name == "expiry_inference"
+    ]
+    assert len(events) == 1
+    assert events[0].status == "degraded"
+    assert events[0].detail == "unknown expiry; proposal remains pending"
 
 
 def test_agent_mixed_inventory_recipe_response_is_canonical_and_useful(

@@ -238,7 +238,7 @@ class KitchenAgent:
             expires_at: datetime | None = None,
         ) -> dict[str, object]:
             """Propose one new instance using exact quantity text and optional user expiry."""
-            return trace.run(
+            action = trace.run(
                 "database",
                 "propose_add_inventory_instance",
                 lambda: action_service.propose_add(
@@ -249,6 +249,18 @@ class KitchenAgent:
                 ).model_dump(mode="json"),
                 lambda value: f"status={value['status']}",
             )
+            arguments = action.get("arguments")
+            if (
+                isinstance(arguments, dict)
+                and arguments.get("expiry_source") == "unknown"
+            ):
+                trace.record(
+                    "model",
+                    "expiry_inference",
+                    "degraded",
+                    "unknown expiry; proposal remains pending",
+                )
+            return action
 
         @tool
         def propose_replace_inventory_instance(
