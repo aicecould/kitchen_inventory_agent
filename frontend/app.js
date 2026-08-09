@@ -236,7 +236,7 @@ async function loadInventory() {
       <article class="inventory-item">
         <header class="inventory-item-heading">
           <strong>${escapeHtml(item.name)}</strong>
-          <span class="inventory-instance-id" title="${escapeHtml(item.instance_id)}">${escapeHtml(shortInstanceId(item.instance_id))}</span>
+          <span class="inventory-instance-id" title="完整库存实例 ID">${escapeHtml(item.instance_id)}</span>
         </header>
         <p class="inventory-quantity">${escapeHtml(item.quantity_text)}</p>
         <dl class="inventory-details">
@@ -278,6 +278,7 @@ async function loadPendingActions() {
         <div class="confirmation-copy">
           <span>${escapeHtml(operationLabel(action.operation))}</span>
           <h3>${escapeHtml(action.summary)}</h3>
+          ${renderActionPreview(action)}
           <small>${escapeHtml(action.action_id)} · 过期时间 ${formatTime(action.expires_at)}</small>
         </div>
         <div class="confirmation-actions">
@@ -583,21 +584,105 @@ function escapeHtml(value) {
   })[character]);
 }
 
+function previewField(label, value, className = "") {
+  const displayValue = value === null || value === undefined || value === ""
+    ? "未知"
+    : String(value);
+  return `
+    <div class="${escapeHtml(className)}">
+      <dt>${escapeHtml(label)}</dt>
+      <dd>${escapeHtml(displayValue)}</dd>
+    </div>
+  `;
+}
+
+function previewDate(value) {
+  return value ? formatLocalDateTime(value, "未知") : "未知";
+}
+
+function currentInstanceFields(current, { includeConfirmed = false } = {}) {
+  if (!current || typeof current !== "object") return [];
+  const fields = [
+    previewField("完整实例 ID", current.instance_id, "confirmation-preview-id"),
+    previewField("食材", current.name),
+    previewField("当前数量", current.quantity_text),
+    previewField("当前过期时间", previewDate(current.expires_at)),
+    previewField("日期来源", current.expiry_source),
+  ];
+  if (includeConfirmed) {
+    fields.push(previewField("上次确认时间", previewDate(current.last_confirmed_at)));
+  }
+  return fields;
+}
+
+function renderActionPreview(action) {
+  const preview = action.preview && typeof action.preview === "object"
+    ? action.preview
+    : {};
+  let fields = [];
+  let items = "";
+
+  if (action.operation === "inventory.add") {
+    const proposed = preview.proposed || {};
+    fields = [
+      previewField("食材", proposed.name),
+      previewField("拟新增数量", proposed.quantity_text),
+      previewField("拟定过期时间", previewDate(proposed.expires_at)),
+      previewField("日期来源", proposed.expiry_source),
+    ];
+  } else if (action.operation === "inventory.replace") {
+    const proposed = preview.proposed || {};
+    fields = [
+      ...currentInstanceFields(preview.current),
+      previewField("拟替换数量", proposed.quantity_text),
+      previewField("拟定过期时间", previewDate(proposed.expires_at)),
+      previewField("拟定日期来源", proposed.expiry_source),
+    ];
+  } else if (action.operation === "inventory.remove") {
+    fields = currentInstanceFields(preview.current);
+  } else if (action.operation === "inventory.confirm") {
+    fields = currentInstanceFields(preview.current, { includeConfirmed: true });
+  } else if (action.operation === "inventory.remove_all") {
+    fields = [
+      previewField("精确食材名称", preview.name),
+      previewField("预计删除数量", preview.expected_count),
+    ];
+    const previewItems = Array.isArray(preview.items) ? preview.items : [];
+    items = `
+      <ul class="confirmation-preview-items">
+        ${previewItems.map((item) => `
+          <li>
+            <code>${escapeHtml(item.instance_id)}</code>
+            <span>${escapeHtml(item.name)} · ${escapeHtml(item.quantity_text)} · 过期 ${escapeHtml(previewDate(item.expires_at))} · 日期来源 ${escapeHtml(item.expiry_source)}</span>
+          </li>
+        `).join("")}
+      </ul>
+    `;
+  }
+
+  if (!fields.length && !items) {
+    return '<p class="confirmation-preview-empty">暂无结构化预览，请取消并重新创建提案。</p>';
+  }
+  return `
+    <section class="confirmation-preview" data-preview-operation="${escapeHtml(action.operation)}" aria-label="操作预览">
+      <dl>${fields.join("")}</dl>
+      ${items}
+    </section>
+  `;
+}
+
 function operationLabel(operation) {
   return ({
     "inventory.add": "库存新增",
-    "inventory.update": "库存修改",
-    "inventory.remove": "库存删除",
+    "inventory.replace": "库存替换",
+    "inventory.remove": "单项删除",
+    "inventory.remove_all": "同名全部删除",
+    "inventory.confirm": "库存校准",
   })[operation] || operation;
 }
 
 function formatTime(value) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
-}
-
-function shortInstanceId(value) {
-  const instanceId = String(value || "");
-  return instanceId.length > 12 ? `${instanceId.slice(0, 12)}…` : instanceId || "编号未知";
 }
 
 function formatLocalDateTime(value, fallback = "时间未知") {

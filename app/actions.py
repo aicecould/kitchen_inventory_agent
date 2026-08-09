@@ -70,6 +70,7 @@ class PendingAction(BaseModel):
     operation: str
     arguments: dict[str, object]
     summary: str
+    preview: dict[str, object] = Field(default_factory=dict)
     status: ActionStatus
     created_at: datetime
     expires_at: datetime
@@ -100,13 +101,13 @@ def action_summary(operation: str, arguments: BaseModel) -> str:
     if operation == "inventory.add":
         return f"向库存添加 {values['quantity_text']} {values['name']}"
     if operation == "inventory.replace":
-        return f"更新库存项 {str(values['instance_id'])[:8]}"
+        return f"更新库存项 {values['instance_id']}"
     if operation == "inventory.remove":
-        return f"从库存删除库存项 {str(values['instance_id'])[:8]}"
+        return f"从库存删除库存项 {values['instance_id']}"
     if operation == "inventory.remove_all":
         return f"从库存删除所有 {values['name']}"
     if operation == "inventory.confirm":
-        return f"确认库存项 {str(values['instance_id'])[:8]}"
+        return f"确认库存项 {values['instance_id']}"
     raise ValueError(f"Operation is not allowlisted: {operation}")
 
 
@@ -129,10 +130,22 @@ class PendingActionRepository:
                     created_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     result_json TEXT,
-                    error TEXT
+                    error TEXT,
+                    preview_json TEXT NOT NULL DEFAULT '{}'
                 )
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(pending_actions)"
+                ).fetchall()
+            }
+            if "preview_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE pending_actions ADD COLUMN preview_json "
+                    "TEXT NOT NULL DEFAULT '{}'"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_pending_actions_user_status "
                 "ON pending_actions(user_id, status)"
@@ -158,6 +171,7 @@ class PendingActionRepository:
         operation: str,
         arguments: dict[str, object],
         summary: str,
+        preview: dict[str, object],
         ttl_minutes: int,
     ) -> PendingAction:
         now = datetime.now(timezone.utc)
@@ -167,6 +181,7 @@ class PendingActionRepository:
             operation=operation,
             arguments=arguments,
             summary=summary,
+            preview=preview,
             status="pending",
             created_at=now,
             expires_at=now + timedelta(minutes=ttl_minutes),
@@ -176,8 +191,8 @@ class PendingActionRepository:
                 """
                 INSERT INTO pending_actions(
                     action_id, user_id, operation, arguments_json, summary,
-                    status, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    status, created_at, expires_at, preview_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     action.action_id,
@@ -188,6 +203,7 @@ class PendingActionRepository:
                     action.status,
                     action.created_at.isoformat(),
                     action.expires_at.isoformat(),
+                    json.dumps(action.preview, ensure_ascii=False),
                 ),
             )
         return action
@@ -299,6 +315,7 @@ class PendingActionRepository:
             expires_at=datetime.fromisoformat(str(row[7])),
             result=json.loads(str(row[8])) if row[8] else None,
             error=str(row[9]) if row[9] else None,
+            preview=json.loads(str(row[10])) if len(row) > 10 and row[10] else {},
         )
 
 
@@ -364,11 +381,13 @@ class InventoryActionService:
         self, user_id: str, operation: str, arguments: dict[str, object]
     ) -> PendingAction:
         validated = validate_operation(operation, arguments)
+        preview = self._build_preview(operation, validated)
         return self.repository.create(
             user_id=user_id,
             operation=operation,
             arguments=validated.model_dump(mode="json"),
             summary=action_summary(operation, validated),
+            preview=preview,
             ttl_minutes=self.ttl_minutes,
         )
 
@@ -386,6 +405,41 @@ class InventoryActionService:
 
     def cancel(self, action_id: str, user_id: str) -> PendingAction:
         return self.repository.cancel(action_id, user_id)
+
+    def _build_preview(
+        self, operation: str, arguments: BaseModel
+    ) -> dict[str, object]:
+        values = arguments.model_dump(mode="json")
+        if operation == "inventory.add":
+            return {"proposed": values}
+        if operation in {
+            "inventory.replace",
+            "inventory.remove",
+            "inventory.confirm",
+        }:
+            instance_id = str(values["instance_id"])
+            current = self.inventory.get_instance(instance_id)
+            if current is None:
+                raise KeyError(f"inventory instance not found: {instance_id}")
+            if operation == "inventory.replace":
+                return {
+                    "current": current,
+                    "proposed": {
+                        "instance_id": instance_id,
+                        "name": current["name"],
+                        "quantity_text": values["quantity_text"],
+                        "expires_at": values["expires_at"],
+                        "expiry_source": values["expiry_source"],
+                    },
+                }
+            return {"current": current}
+        if operation == "inventory.remove_all":
+            name = str(values["name"])
+            items = self.inventory.find_by_name(name)
+            if not items:
+                raise KeyError(f"inventory instances not found: {name}")
+            return {"name": name, "items": items, "expected_count": len(items)}
+        raise ValueError(f"Operation is not allowlisted: {operation}")
 
     def _execute(self, operation: str, arguments: BaseModel) -> dict[str, object]:
         values = arguments.model_dump(mode="python")

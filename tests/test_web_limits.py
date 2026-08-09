@@ -80,6 +80,104 @@ def test_inventory_api_serves_duplicate_instances_with_display_metadata(
     }
 
 
+def test_actions_api_returns_structured_previews_for_all_inventory_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The HTTP confirmation boundary must serialize every operation's real preview."""
+    import app.web as web
+    from app.actions import InventoryActionService, PendingActionRepository
+    from app.tools.inventory import InventoryRepository
+
+    database = tmp_path / "inventory.db"
+    inventory = InventoryRepository(database)
+    inventory.initialize()
+    repository = PendingActionRepository(database)
+    repository.initialize()
+    service = InventoryActionService(repository, inventory)
+    first = inventory.add_instance("番茄", "2个", None, "unknown")
+    second = inventory.add_instance("番茄", "半盒", None, "unknown")
+    first_id = str(first["instance_id"])
+    actions = [
+        service.propose(
+            web.SHOWCASE_USER_ID,
+            "inventory.add",
+            {
+                "name": "牛奶",
+                "quantity_text": "一盒",
+                "expires_at": None,
+                "expiry_source": "unknown",
+            },
+        ),
+        service.propose(
+            web.SHOWCASE_USER_ID,
+            "inventory.replace",
+            {
+                "instance_id": first_id,
+                "quantity_text": "1个",
+                "expires_at": None,
+                "expiry_source": "unknown",
+            },
+        ),
+        service.propose(
+            web.SHOWCASE_USER_ID,
+            "inventory.remove",
+            {"instance_id": first_id},
+        ),
+        service.propose(
+            web.SHOWCASE_USER_ID,
+            "inventory.remove_all",
+            {"name": "番茄"},
+        ),
+        service.propose(
+            web.SHOWCASE_USER_ID,
+            "inventory.confirm",
+            {"instance_id": first_id},
+        ),
+    ]
+    monkeypatch.setattr(web, "get_action_service", lambda: service)
+
+    response = client.get("/api/actions")
+
+    assert response.status_code == 200
+    payloads = {action["operation"]: action for action in response.json()["actions"]}
+    assert set(payloads) == {
+        "inventory.add",
+        "inventory.replace",
+        "inventory.remove",
+        "inventory.remove_all",
+        "inventory.confirm",
+    }
+    assert payloads["inventory.add"]["preview"] == actions[0].preview
+    assert payloads["inventory.replace"]["preview"]["current"] == first
+    assert payloads["inventory.remove"]["preview"] == {"current": first}
+    assert payloads["inventory.remove_all"]["preview"] == {
+        "name": "番茄",
+        "items": [first, second],
+        "expected_count": 2,
+    }
+    assert payloads["inventory.confirm"]["preview"] == {"current": first}
+
+
+def test_frontend_script_exposes_full_ids_and_all_confirmation_preview_labels() -> None:
+    """The shipped browser code must render the authoritative preview contract."""
+    script = client.get("/static/app.js").text
+
+    assert "renderActionPreview(action)" in script
+    assert "action.preview" in script
+    assert "escapeHtml(item.instance_id)" in script
+    assert "shortInstanceId(item.instance_id)" not in script
+    for label in (
+        "库存新增",
+        "库存替换",
+        "单项删除",
+        "同名全部删除",
+        "库存校准",
+        "预计删除数量",
+        "日期来源",
+    ):
+        assert label in script
+
+
 def test_status_exposes_request_limits() -> None:
     response = client.get("/api/status")
 

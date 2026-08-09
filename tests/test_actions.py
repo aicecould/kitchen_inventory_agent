@@ -126,6 +126,32 @@ def test_add_is_delayed_and_idempotent_when_confirmed(tmp_path: Path) -> None:
     assert inventory.find_by_name("番茄")[0]["quantity_text"] == "2 个"
 
 
+def test_add_preview_persists_all_proposed_values(tmp_path: Path) -> None:
+    """The confirmation payload must expose every value the add will create."""
+    service, _ = build_service(tmp_path)
+
+    action = service.propose(
+        "user-1",
+        "inventory.add",
+        {
+            "name": "牛奶",
+            "quantity_text": "大约一盒",
+            "expires_at": "2026-08-12T09:00:00+00:00",
+            "expiry_source": "user",
+        },
+    )
+
+    assert action.preview == {
+        "proposed": {
+            "name": "牛奶",
+            "quantity_text": "大约一盒",
+            "expires_at": "2026-08-12T09:00:00Z",
+            "expiry_source": "user",
+        }
+    }
+    assert service.repository.get(action.action_id) == action
+
+
 def test_replace_replaces_the_identified_instance(tmp_path: Path) -> None:
     service, inventory = build_service(tmp_path)
     item = inventory.add_instance("牛奶", "1 盒", None, "unknown")
@@ -151,6 +177,38 @@ def test_replace_replaces_the_identified_instance(tmp_path: Path) -> None:
     assert inventory.get_instance(str(item["instance_id"]))["expiry_source"] == "llm"  # type: ignore[index]
 
 
+def test_replace_preview_has_full_id_and_current_and_proposed_values(
+    tmp_path: Path,
+) -> None:
+    """A replace approval must compare the actual row with the complete replacement."""
+    service, inventory = build_service(tmp_path)
+    item = inventory.add_instance("牛奶", "1盒", None, "unknown")
+    instance_id = str(item["instance_id"])
+
+    action = service.propose(
+        "user-1",
+        "inventory.replace",
+        {
+            "instance_id": instance_id,
+            "quantity_text": "半盒",
+            "expires_at": "2026-08-12T09:00:00+00:00",
+            "expiry_source": "user",
+        },
+    )
+
+    assert action.summary == f"更新库存项 {instance_id}"
+    assert action.preview == {
+        "current": item,
+        "proposed": {
+            "instance_id": instance_id,
+            "name": "牛奶",
+            "quantity_text": "半盒",
+            "expires_at": "2026-08-12T09:00:00Z",
+            "expiry_source": "user",
+        },
+    }
+
+
 def test_remove_deletes_the_identified_instance(tmp_path: Path) -> None:
     service, inventory = build_service(tmp_path)
     item = inventory.add_instance("鸡蛋", "6 个", None, "unknown")
@@ -164,6 +222,27 @@ def test_remove_deletes_the_identified_instance(tmp_path: Path) -> None:
     service.confirm(action.action_id, "user-1")
 
     assert inventory.get_instance(str(item["instance_id"])) is None
+
+
+@pytest.mark.parametrize(
+    ("operation", "summary_prefix"),
+    [
+        ("inventory.remove", "从库存删除库存项"),
+        ("inventory.confirm", "确认库存项"),
+    ],
+)
+def test_remove_and_confirm_previews_show_the_full_current_instance(
+    tmp_path: Path, operation: str, summary_prefix: str
+) -> None:
+    """Single-instance approvals must expose the full authoritative target."""
+    service, inventory = build_service(tmp_path)
+    item = inventory.add_instance("鸡蛋", "6个", None, "unknown")
+    instance_id = str(item["instance_id"])
+
+    action = service.propose("user-1", operation, {"instance_id": instance_id})
+
+    assert action.summary == f"{summary_prefix} {instance_id}"
+    assert action.preview == {"current": item}
 
 
 def test_remove_all_stays_pending_then_removes_exact_name(tmp_path: Path) -> None:
@@ -182,6 +261,38 @@ def test_remove_all_stays_pending_then_removes_exact_name(tmp_path: Path) -> Non
     assert executed.result == {"name": "番茄", "removed_count": 2, "items": items}
     assert inventory.find_by_name("番茄") == []
     assert len(inventory.find_by_name("小番茄")) == 1
+
+
+def test_remove_all_preview_has_exact_items_and_expected_count(tmp_path: Path) -> None:
+    """Bulk approval must disclose exactly which duplicate-name rows will be removed."""
+    service, inventory = build_service(tmp_path)
+    items = [
+        inventory.add_instance("番茄", "2个", None, "unknown"),
+        inventory.add_instance("番茄", "半盒", None, "unknown"),
+    ]
+
+    action = service.propose("user-1", "inventory.remove_all", {"name": "番茄"})
+
+    assert action.preview == {
+        "name": "番茄",
+        "items": inventory.find_by_name("番茄"),
+        "expected_count": 2,
+    }
+    assert {str(item["instance_id"]) for item in action.preview["items"]} == {
+        str(item["instance_id"]) for item in items
+    }
+
+
+def test_remove_all_without_matches_fails_before_creating_proposal(
+    tmp_path: Path,
+) -> None:
+    """An empty bulk target must never produce a misleading confirmable action."""
+    service, _ = build_service(tmp_path)
+
+    with pytest.raises(KeyError, match="inventory instances not found: 番茄"):
+        service.propose("user-1", "inventory.remove_all", {"name": "番茄"})
+
+    assert service.repository.list_pending("user-1") == []
 
 
 def test_confirm_only_calibrates_the_identified_instance(tmp_path: Path) -> None:
@@ -265,14 +376,15 @@ def test_add_rejects_naive_expiry_and_unknown_source(
         ("inventory.confirm", {"instance_id": "inv_missing"}),
     ],
 )
-def test_unknown_instance_id_fails_when_confirmed(
+def test_unknown_instance_id_fails_before_proposal(
     tmp_path: Path, operation: str, arguments: dict[str, object]
 ) -> None:
     service, _ = build_service(tmp_path)
-    action = service.propose("user-1", operation, arguments)
 
     with pytest.raises(KeyError, match="inventory instance not found"):
-        service.confirm(action.action_id, "user-1")
+        service.propose("user-1", operation, arguments)
+
+    assert service.repository.list_pending("user-1") == []
 
 
 def test_non_allowlisted_operation_is_rejected() -> None:
@@ -307,3 +419,58 @@ def test_initialize_discards_legacy_pending_inventory_actions(tmp_path: Path) ->
     pending.initialize()
 
     assert pending.get("act_legacy") is None
+
+
+def test_initialize_safely_adds_preview_to_existing_pending_action_table(
+    tmp_path: Path,
+) -> None:
+    """Existing action data must survive the additive preview-column migration."""
+    database = tmp_path / "inventory.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE pending_actions (
+                action_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                arguments_json TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                result_json TEXT,
+                error TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO pending_actions(
+                action_id, user_id, operation, arguments_json, summary,
+                status, created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "act_existing",
+                "user-1",
+                "inventory.remove_all",
+                '{"name": "番茄"}',
+                "已有提案",
+                "pending",
+                "2026-08-07T00:00:00+00:00",
+                "2099-08-08T00:00:00+00:00",
+            ),
+        )
+
+    repository = PendingActionRepository(database)
+    repository.initialize()
+
+    existing = repository.get("act_existing")
+    assert existing is not None
+    assert existing.preview == {}
+    with sqlite3.connect(database) as connection:
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(pending_actions)")
+        }
+    assert "preview_json" in columns
