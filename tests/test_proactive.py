@@ -93,8 +93,7 @@ def candidate(name: str) -> dict[str, object]:
         "quantity_text": "1盒",
         "expires_at": "2026-08-07T08:59:59+00:00",
         "expiry_source": "user",
-        "created_at": "2026-08-01T09:00:00+00:00",
-        "updated_at": "2026-08-01T09:00:00+00:00",
+        "stocked_at": "2026-08-01T09:00:00+00:00",
         "last_confirmed_at": "2026-08-01T09:00:00+00:00",
     }
 

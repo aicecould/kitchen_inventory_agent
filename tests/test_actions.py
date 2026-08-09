@@ -167,7 +167,7 @@ def test_replace_replaces_the_identified_instance(tmp_path: Path) -> None:
         },
     )
 
-    assert str(item["instance_id"])[:8] in action.summary
+    assert str(item["instance_id"]) in action.summary
     assert inventory.get_instance(str(item["instance_id"]))["quantity_text"] == "1 盒"  # type: ignore[index]
 
     executed = service.confirm(action.action_id, "user-1")
@@ -216,7 +216,7 @@ def test_remove_deletes_the_identified_instance(tmp_path: Path) -> None:
         "user-1", "inventory.remove", {"instance_id": item["instance_id"]}
     )
 
-    assert str(item["instance_id"])[:8] in action.summary
+    assert str(item["instance_id"]) in action.summary
     assert inventory.get_instance(str(item["instance_id"])) is not None
 
     service.confirm(action.action_id, "user-1")
@@ -307,7 +307,7 @@ def test_confirm_only_calibrates_the_identified_instance(tmp_path: Path) -> None
     assert executed.result is not None
     assert executed.result["quantity_text"] == "1 根"
     assert executed.result["last_confirmed_at"] >= item["last_confirmed_at"]
-    assert str(item["instance_id"])[:8] in action.summary
+    assert str(item["instance_id"]) in action.summary
 
 
 @pytest.mark.parametrize(

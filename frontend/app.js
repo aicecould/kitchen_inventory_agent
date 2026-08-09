@@ -240,7 +240,7 @@ async function loadInventory() {
         </header>
         <p class="inventory-quantity">${escapeHtml(item.quantity_text)}</p>
         <dl class="inventory-details">
-          <div><dt>入库</dt><dd>${formatLocalDateTime(item.stocked_at || item.created_at)}</dd></div>
+          <div><dt>入库</dt><dd>${formatLocalDateTime(item.stocked_at)}</dd></div>
           <div><dt>过期</dt><dd>${formatLocalDateTime(item.expires_at, "过期未知")}</dd></div>
           <div><dt>确认</dt><dd>${formatLocalDateTime(item.last_confirmed_at)}</dd></div>
         </dl>
