@@ -168,6 +168,8 @@ def test_frontend_script_exposes_full_ids_and_all_confirmation_preview_labels() 
     assert "shortInstanceId(item.instance_id)" not in script
     assert "formatLocalDateTime(item.stocked_at)" in script
     assert "item.stocked_at || item.created_at" not in script
+    assert 'data-preview-ready="${previewReady}"' in script
+    assert 'previewReady ? "" : "disabled hidden aria-disabled=\\"true\\""' in script
     for label in (
         "库存新增",
         "库存替换",

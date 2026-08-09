@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +19,18 @@ ActionStatus = Literal[
     "pending", "executing", "executed", "cancelled", "expired", "failed"
 ]
 _INSTANCE_ID_PATTERN = r"^inv_[0-9a-f]{32}$"
+_INVENTORY_SNAPSHOT_FIELDS = {
+    "instance_id",
+    "name",
+    "quantity_text",
+    "stocked_at",
+    "expires_at",
+    "expiry_source",
+    "last_confirmed_at",
+}
+_UNSAFE_PREVIEW_ERROR = (
+    "Structured confirmation preview unavailable; recreate this proposal."
+)
 
 
 class AddInventoryArguments(BaseModel):
@@ -112,6 +125,117 @@ def action_summary(operation: str, arguments: BaseModel) -> str:
     raise ValueError(f"Operation is not allowlisted: {operation}")
 
 
+def preview_validation_error(
+    operation: str,
+    arguments: dict[str, object],
+    preview: dict[str, object],
+) -> str | None:
+    """Return a safe error when a persisted mutation preview is not authoritative."""
+
+    try:
+        validated = validate_operation(operation, arguments)
+    except (TypeError, ValueError):
+        return _UNSAFE_PREVIEW_ERROR
+    values = validated.model_dump(mode="json")
+    if not preview:
+        return _UNSAFE_PREVIEW_ERROR
+
+    if operation == "inventory.add":
+        if set(preview) != {"proposed"} or preview.get("proposed") != values:
+            return _UNSAFE_PREVIEW_ERROR
+        return None
+
+    if operation in {"inventory.replace", "inventory.remove", "inventory.confirm"}:
+        expected_keys = {"current", "proposed"} if operation == "inventory.replace" else {"current"}
+        current = preview.get("current")
+        if set(preview) != expected_keys or not _valid_inventory_snapshot(current):
+            return _UNSAFE_PREVIEW_ERROR
+        assert isinstance(current, dict)
+        if current.get("instance_id") != values.get("instance_id"):
+            return _UNSAFE_PREVIEW_ERROR
+        if operation == "inventory.replace":
+            expected_proposed = {
+                "instance_id": values.get("instance_id"),
+                "name": current.get("name"),
+                "quantity_text": values.get("quantity_text"),
+                "expires_at": values.get("expires_at"),
+                "expiry_source": values.get("expiry_source"),
+            }
+            if preview.get("proposed") != expected_proposed:
+                return _UNSAFE_PREVIEW_ERROR
+        return None
+
+    if operation == "inventory.remove_all":
+        if set(preview) != {"name", "items", "expected_count"}:
+            return _UNSAFE_PREVIEW_ERROR
+        name = values.get("name")
+        items = preview.get("items")
+        expected_count = preview.get("expected_count")
+        if (
+            preview.get("name") != name
+            or not isinstance(items, list)
+            or not items
+            or not isinstance(expected_count, int)
+            or isinstance(expected_count, bool)
+            or expected_count != len(items)
+            or any(not _valid_inventory_snapshot(item) for item in items)
+            or any(item.get("name") != name for item in items if isinstance(item, dict))
+        ):
+            return _UNSAFE_PREVIEW_ERROR
+        instance_ids = [
+            str(item["instance_id"]) for item in items if isinstance(item, dict)
+        ]
+        if len(instance_ids) != len(set(instance_ids)):
+            return _UNSAFE_PREVIEW_ERROR
+        return None
+
+    return _UNSAFE_PREVIEW_ERROR
+
+
+def _valid_inventory_snapshot(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != _INVENTORY_SNAPSHOT_FIELDS:
+        return False
+    instance_id = value.get("instance_id")
+    if not isinstance(instance_id, str) or re.fullmatch(_INSTANCE_ID_PATTERN, instance_id) is None:
+        return False
+    if (
+        not isinstance(value.get("name"), str)
+        or not str(value["name"]).strip()
+        or not isinstance(value.get("quantity_text"), str)
+        or not str(value["quantity_text"]).strip()
+        or value.get("expiry_source") not in {"llm", "user", "unknown"}
+    ):
+        return False
+    if not _is_utc_iso(value.get("stocked_at")) or not _is_utc_iso(
+        value.get("last_confirmed_at")
+    ):
+        return False
+    expires_at = value.get("expires_at")
+    return expires_at is None or _is_utc_iso(expires_at)
+
+
+def _is_utc_iso(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return (
+        parsed.tzinfo is not None
+        and parsed.utcoffset() is not None
+        and parsed.utcoffset() == timedelta(0)
+    )
+
+
+def _decode_json_object(value: object) -> dict[str, object] | None:
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 class PendingActionRepository:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -151,18 +275,26 @@ class PendingActionRepository:
                 "CREATE INDEX IF NOT EXISTS idx_pending_actions_user_status "
                 "ON pending_actions(user_id, status)"
             )
-            legacy_rows = connection.execute(
-                "SELECT action_id, arguments_json FROM pending_actions "
+            pending_inventory_rows = connection.execute(
+                "SELECT action_id, operation, arguments_json, preview_json "
+                "FROM pending_actions "
                 "WHERE operation LIKE 'inventory.%' AND status = 'pending'"
             ).fetchall()
-            legacy_action_ids = [
-                str(action_id)
-                for action_id, arguments_json in legacy_rows
-                if {"quantity", "unit"} & set(json.loads(str(arguments_json)))
-            ]
+            unsafe_action_ids: list[str] = []
+            for action_id, operation, arguments_json, preview_json in pending_inventory_rows:
+                arguments = _decode_json_object(arguments_json)
+                preview = _decode_json_object(preview_json)
+                if (
+                    arguments is None
+                    or preview is None
+                    or preview_validation_error(str(operation), arguments, preview)
+                    is not None
+                ):
+                    unsafe_action_ids.append(str(action_id))
             connection.executemany(
-                "DELETE FROM pending_actions WHERE action_id = ?",
-                [(action_id,) for action_id in legacy_action_ids],
+                "UPDATE pending_actions SET status = 'failed', error = ? "
+                "WHERE action_id = ? AND status = 'pending'",
+                [(_UNSAFE_PREVIEW_ERROR, action_id) for action_id in unsafe_action_ids],
             )
 
     def create(
@@ -241,6 +373,16 @@ class PendingActionRepository:
                 return action, False
             if action.status != "pending":
                 raise ValueError(f"Action cannot be confirmed from status: {action.status}")
+            if preview_validation_error(
+                action.operation, action.arguments, action.preview
+            ) is not None:
+                connection.execute(
+                    "UPDATE pending_actions SET status = 'failed', error = ? "
+                    "WHERE action_id = ? AND status = 'pending'",
+                    (_UNSAFE_PREVIEW_ERROR, action_id),
+                )
+                connection.commit()
+                raise ValueError(_UNSAFE_PREVIEW_ERROR)
             if action.expires_at <= datetime.now(timezone.utc):
                 connection.execute(
                     "UPDATE pending_actions SET status = 'expired' WHERE action_id = ?",
@@ -316,7 +458,11 @@ class PendingActionRepository:
             expires_at=datetime.fromisoformat(str(row[7])),
             result=json.loads(str(row[8])) if row[8] else None,
             error=str(row[9]) if row[9] else None,
-            preview=json.loads(str(row[10])) if len(row) > 10 and row[10] else {},
+            preview=(
+                _decode_json_object(row[10]) or {}
+                if len(row) > 10 and row[10]
+                else {}
+            ),
         )
 
 

@@ -422,7 +422,7 @@ def test_non_allowlisted_operation_is_rejected() -> None:
         validate_operation("database.execute_sql", {"sql": "DROP TABLE inventory"})
 
 
-def test_initialize_discards_legacy_pending_inventory_actions(tmp_path: Path) -> None:
+def test_initialize_fails_legacy_pending_inventory_actions(tmp_path: Path) -> None:
     database = tmp_path / "inventory.db"
     pending = PendingActionRepository(database)
     pending.initialize()
@@ -448,13 +448,18 @@ def test_initialize_discards_legacy_pending_inventory_actions(tmp_path: Path) ->
 
     pending.initialize()
 
-    assert pending.get("act_legacy") is None
+    legacy = pending.get("act_legacy")
+    assert legacy is not None
+    assert legacy.status == "failed"
+    assert legacy.error == (
+        "Structured confirmation preview unavailable; recreate this proposal."
+    )
 
 
-def test_initialize_safely_adds_preview_to_existing_pending_action_table(
+def test_initialize_fails_pre_preview_pending_actions_and_preserves_executed_history(
     tmp_path: Path,
 ) -> None:
-    """Existing action data must survive the additive preview-column migration."""
+    """Migration must block undisclosed writes without rewriting executed history."""
     database = tmp_path / "inventory.db"
     with sqlite3.connect(database) as connection:
         connection.execute(
@@ -491,6 +496,25 @@ def test_initialize_safely_adds_preview_to_existing_pending_action_table(
                 "2099-08-08T00:00:00+00:00",
             ),
         )
+        connection.execute(
+            """
+            INSERT INTO pending_actions(
+                action_id, user_id, operation, arguments_json, summary,
+                status, created_at, expires_at, result_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "act_executed",
+                "user-1",
+                "inventory.remove_all",
+                '{"name": "番茄"}',
+                "历史操作",
+                "executed",
+                "2026-08-06T00:00:00+00:00",
+                "2026-08-06T00:15:00+00:00",
+                '{"removed_count": 1}',
+            ),
+        )
 
     repository = PendingActionRepository(database)
     repository.initialize()
@@ -498,9 +522,84 @@ def test_initialize_safely_adds_preview_to_existing_pending_action_table(
     existing = repository.get("act_existing")
     assert existing is not None
     assert existing.preview == {}
+    assert existing.status == "failed"
+    assert existing.error == (
+        "Structured confirmation preview unavailable; recreate this proposal."
+    )
+    assert repository.list_pending("user-1") == []
+    executed = repository.get("act_executed")
+    assert executed is not None
+    assert executed.status == "executed"
+    assert executed.result == {"removed_count": 1}
+    assert executed.error is None
     with sqlite3.connect(database) as connection:
         columns = {
             str(row[1])
             for row in connection.execute("PRAGMA table_info(pending_actions)")
         }
     assert "preview_json" in columns
+
+
+def test_confirm_rejects_a_pending_inventory_action_with_tampered_empty_preview(
+    tmp_path: Path,
+) -> None:
+    """Server confirmation must revalidate the persisted preview before mutation."""
+    service, inventory = build_service(tmp_path)
+    item = inventory.add_instance("番茄", "2个", None, "unknown")
+    action = service.propose(
+        "user-1",
+        "inventory.remove",
+        {"instance_id": item["instance_id"]},
+    )
+    with sqlite3.connect(service.repository.db_path) as connection:
+        connection.execute(
+            "UPDATE pending_actions SET preview_json = '{}' WHERE action_id = ?",
+            (action.action_id,),
+        )
+
+    with pytest.raises(ValueError, match="Structured confirmation preview unavailable"):
+        service.confirm(action.action_id, "user-1")
+
+    rejected = service.repository.get(action.action_id)
+    assert rejected is not None
+    assert rejected.status == "failed"
+    assert rejected.error == (
+        "Structured confirmation preview unavailable; recreate this proposal."
+    )
+    assert inventory.get_instance(str(item["instance_id"])) == item
+
+
+def test_initialize_fails_a_pending_action_with_nonempty_invalid_preview(
+    tmp_path: Path,
+) -> None:
+    """A nonempty preview is unsafe when its count and disclosed targets are invalid."""
+    service, _ = build_service(tmp_path)
+    with sqlite3.connect(service.repository.db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO pending_actions(
+                action_id, user_id, operation, arguments_json, summary,
+                status, created_at, expires_at, preview_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "act_invalid_preview",
+                "user-1",
+                "inventory.remove_all",
+                '{"name": "番茄"}',
+                "不完整预览",
+                "pending",
+                "2026-08-07T00:00:00+00:00",
+                "2099-08-08T00:00:00+00:00",
+                '{"name": "番茄", "items": [], "expected_count": 0}',
+            ),
+        )
+
+    service.repository.initialize()
+
+    rejected = service.repository.get("act_invalid_preview")
+    assert rejected is not None
+    assert rejected.status == "failed"
+    assert rejected.error == (
+        "Structured confirmation preview unavailable; recreate this proposal."
+    )

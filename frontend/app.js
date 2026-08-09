@@ -272,8 +272,13 @@ async function loadPendingActions() {
     const data = await response.json();
     const actions = data.actions || [];
     confirmationSection.hidden = actions.length === 0;
-    confirmationList.innerHTML = actions.map((action) => `
-      <article class="confirmation-card" data-action-id="${escapeHtml(action.action_id)}">
+    confirmationList.innerHTML = actions.map((action) => {
+      const previewReady = action.preview
+        && typeof action.preview === "object"
+        && Object.keys(action.preview).length > 0;
+      const confirmAttributes = previewReady ? "" : "disabled hidden aria-disabled=\"true\"";
+      return `
+      <article class="confirmation-card" data-action-id="${escapeHtml(action.action_id)}" data-preview-ready="${previewReady}">
         <div class="confirmation-seal">待<br>确认</div>
         <div class="confirmation-copy">
           <span>${escapeHtml(operationLabel(action.operation))}</span>
@@ -283,10 +288,11 @@ async function loadPendingActions() {
         </div>
         <div class="confirmation-actions">
           <button type="button" class="cancel-action" data-action="cancel">取消</button>
-          <button type="button" class="confirm-action" data-action="confirm">确认执行</button>
+          <button type="button" class="confirm-action" data-action="confirm" ${confirmAttributes}>确认执行</button>
         </div>
       </article>
-    `).join("");
+    `;
+    }).join("");
   } catch {
     confirmationSection.hidden = true;
   }
