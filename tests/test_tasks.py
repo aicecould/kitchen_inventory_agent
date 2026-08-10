@@ -262,3 +262,28 @@ def test_switch_is_versioned_and_cooked_retry_is_idempotent(stack: TaskStack) ->
     )
     assert closed.reconciliation_open is False
 
+
+def test_clear_context_atomically_resets_window_and_completes_active_task(
+    stack: TaskStack,
+) -> None:
+    task = stack.confirm()
+    stack.history.append(user_id="u", request="before", response="before")
+
+    cleared = stack.service.clear_context("u", request_id="clear-1")
+
+    assert cleared is not None
+    assert cleared.task_id == task.task_id
+    assert cleared.status == TaskStatus.COMPLETED
+    assert cleared.completion_reason == CompletionReason.CONTEXT_CLEARED
+    assert cleared.reconciliation_open is False
+    assert stack.repository.get_active("u") is None
+    assert stack.history.list_context_window("u") == []
+    assert len(stack.history.list_records("u")) == 2
+
+
+def test_clear_context_without_active_task_is_idempotent(stack: TaskStack) -> None:
+    stack.history.append(user_id="u", request="before", response="before")
+
+    assert stack.service.clear_context("u", request_id="clear-1") is None
+    assert stack.service.clear_context("u", request_id="clear-1") is None
+    assert stack.history.list_context_window("u") == []

@@ -122,6 +122,15 @@ class ConversationHistoryRepository:
                 "CREATE INDEX IF NOT EXISTS idx_history_user_relevant_created "
                 "ON conversation_history(user_id, is_relevant, created_at DESC)"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversation_context_state (
+                    user_id TEXT PRIMARY KEY,
+                    reset_after_rowid INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
 
     def append(
         self,
@@ -289,10 +298,18 @@ class ConversationHistoryRepository:
                 SELECT request_text, response_text
                 FROM conversation_history
                 WHERE user_id = ? AND is_relevant = 1
+                  AND rowid > COALESCE(
+                      (
+                          SELECT reset_after_rowid
+                          FROM conversation_context_state
+                          WHERE user_id = ?
+                      ),
+                      0
+                  )
                 ORDER BY created_at DESC, rowid DESC
                 LIMIT ?
                 """,
-                (user_id, limit),
+                (user_id, user_id, limit),
             ).fetchall()
         rows.reverse()
         return [
@@ -302,6 +319,41 @@ class ConversationHistoryRepository:
             )
             for row in rows
         ]
+
+    def advance_context_cursor(
+        self,
+        user_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> int:
+        if connection is not None:
+            return self._advance_context_cursor_in(connection, user_id)
+        with sqlite3.connect(self.db_path) as owned_connection:
+            owned_connection.execute("BEGIN IMMEDIATE")
+            return self._advance_context_cursor_in(owned_connection, user_id)
+
+    @staticmethod
+    def _advance_context_cursor_in(
+        connection: sqlite3.Connection, user_id: str
+    ) -> int:
+        row = connection.execute(
+            "SELECT COALESCE(MAX(rowid), 0) FROM conversation_history "
+            "WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        cursor = int(row[0]) if row is not None else 0
+        connection.execute(
+            """
+            INSERT INTO conversation_context_state(
+                user_id, reset_after_rowid, updated_at
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                reset_after_rowid = excluded.reset_after_rowid,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, cursor, datetime.now(UTC).isoformat()),
+        )
+        return cursor
 
     def search_by_time(
         self,

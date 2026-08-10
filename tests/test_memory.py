@@ -146,6 +146,51 @@ def test_context_window_rejects_non_positive_limit(tmp_path: Path) -> None:
         repository.list_context_window("u", limit=0)
 
 
+def test_context_reset_hides_only_the_short_window(tmp_path: Path) -> None:
+    repository = ConversationHistoryRepository(tmp_path / "history.db")
+    repository.initialize()
+    created_at = datetime(2026, 8, 10, 1, 0, tzinfo=UTC)
+    first = repository.append(
+        user_id="u",
+        request="旧输入",
+        response="旧输出",
+        created_at=created_at,
+    )
+    repository.append(
+        user_id="other",
+        request="其他用户",
+        response="其他输出",
+        created_at=created_at,
+    )
+
+    cursor = repository.advance_context_cursor("u")
+
+    assert cursor > 0
+    assert repository.list_context_window("u") == []
+    assert repository.list_context_window("other")[0].request == "其他用户"
+    assert repository.get_evidence("u", [first.segment_id])[0] == first
+    assert repository.search_by_time(
+        "u", created_at - timedelta(minutes=1), created_at + timedelta(minutes=1)
+    )[0].request == "旧输入"
+    assert repository.list_completed_after("u", None, limit=10)[0].request == "旧输入"
+
+
+def test_context_reset_is_idempotent_and_future_rows_reenter_window(
+    tmp_path: Path,
+) -> None:
+    repository = ConversationHistoryRepository(tmp_path / "history.db")
+    repository.initialize()
+    repository.append(user_id="u", request="旧输入", response="旧输出")
+    first_cursor = repository.advance_context_cursor("u")
+    second_cursor = repository.advance_context_cursor("u")
+    repository.append(user_id="u", request="新输入", response="新输出")
+
+    assert second_cursor == first_cursor
+    assert [item.request for item in repository.list_context_window("u")] == [
+        "新输入"
+    ]
+
+
 def test_search_by_time_uses_aware_half_open_utc_range(tmp_path: Path) -> None:
     repository = ConversationHistoryRepository(tmp_path / "history.db")
     repository.initialize()

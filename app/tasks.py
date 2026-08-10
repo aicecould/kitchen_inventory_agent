@@ -463,6 +463,31 @@ class CookingTaskService:
             raise ValueError("task has no open inventory reconciliation")
         return task
 
+    def clear_context(
+        self, user_id: str, *, request_id: str
+    ) -> CookingTask | None:
+        request_id = _request_id(request_id)
+        with sqlite3.connect(self.repository.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self.history.advance_context_cursor(user_id, connection=connection)
+            active = self.repository._get_active_in(connection, user_id)
+            if active is None:
+                return None
+            now = datetime.now(UTC).isoformat()
+            connection.execute(
+                """
+                UPDATE cooking_tasks
+                SET status = 'completed', completion_reason = 'context_cleared',
+                    reconciliation_open = 0, version = version + 1,
+                    last_request_id = ?, updated_at = ?, completed_at = ?
+                WHERE task_id = ?
+                """,
+                (request_id, now, now, active.task_id),
+            )
+            cleared = self.repository._get_in(connection, active.task_id)
+            assert cleared is not None
+            return cleared
+
     def _update_active(
         self,
         user_id: str,
