@@ -50,6 +50,12 @@ class ConversationRecord(BaseModel):
     created_at: datetime
 
 
+class HistoryRecall(BaseModel):
+    created_at: datetime
+    request: str
+    response: str
+
+
 class ConversationHistoryRepository:
     """Persist complete flat turns without coupling storage to context limits.
 
@@ -228,6 +234,45 @@ class ConversationHistoryRepository:
             for row in rows
         ]
 
+    def search_by_time(
+        self,
+        user_id: str,
+        start_at: datetime,
+        end_at: datetime,
+        *,
+        limit: int = 20,
+    ) -> list[HistoryRecall]:
+        if not 1 <= limit <= 100:
+            raise ValueError("history recall limit must be between 1 and 100")
+        start_utc = _as_utc_bound(start_at)
+        end_utc = _as_utc_bound(end_at)
+        if start_utc >= end_utc:
+            raise ValueError("start_at must be earlier than end_at")
+        with sqlite3.connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT created_at, request_text, response_text
+                FROM conversation_history
+                WHERE user_id = ? AND created_at >= ? AND created_at < ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (
+                    user_id,
+                    start_utc.isoformat(),
+                    end_utc.isoformat(),
+                    limit,
+                ),
+            ).fetchall()
+        return [
+            HistoryRecall(
+                created_at=datetime.fromisoformat(str(row[0])),
+                request=str(row[1]),
+                response=str(row[2]),
+            )
+            for row in rows
+        ]
+
 
 def _conversation_record(row: tuple[object, ...]) -> ConversationRecord:
     return ConversationRecord(
@@ -251,6 +296,12 @@ def _conversation_record(row: tuple[object, ...]) -> ConversationRecord:
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("conversation timestamps must be timezone-aware")
+    return value.astimezone(UTC)
+
+
+def _as_utc_bound(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("history time bounds must be timezone-aware")
     return value.astimezone(UTC)
 
 

@@ -1,6 +1,7 @@
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -143,6 +144,119 @@ def test_context_window_rejects_non_positive_limit(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="positive"):
         repository.list_context_window("u", limit=0)
+
+
+def test_search_by_time_uses_aware_half_open_utc_range(tmp_path: Path) -> None:
+    repository = ConversationHistoryRepository(tmp_path / "history.db")
+    repository.initialize()
+    for minute in range(4):
+        repository.append(
+            user_id="u",
+            request=f"q{minute}",
+            response=f"a{minute}",
+            is_relevant=minute != 2,
+            created_at=datetime(2026, 8, 10, 0, minute, tzinfo=UTC),
+        )
+    repository.append(
+        user_id="other",
+        request="private",
+        response="private",
+        created_at=datetime(2026, 8, 10, 0, 1, tzinfo=UTC),
+    )
+
+    results = repository.search_by_time(
+        "u",
+        datetime(2026, 8, 10, 8, 1, tzinfo=ZoneInfo("Asia/Shanghai")),
+        datetime(2026, 8, 10, 8, 3, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert [item.request for item in results] == ["q2", "q1"]
+    assert all(
+        set(item.model_dump()) == {"created_at", "request", "response"}
+        for item in results
+    )
+
+
+def test_search_by_time_defaults_to_twenty_and_allows_one_hundred(
+    tmp_path: Path,
+) -> None:
+    repository = ConversationHistoryRepository(tmp_path / "history.db")
+    repository.initialize()
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    for index in range(105):
+        repository.append(
+            user_id="u",
+            request=f"q{index}",
+            response=f"a{index}",
+            created_at=base + timedelta(minutes=index),
+        )
+
+    default_results = repository.search_by_time(
+        "u", base, base + timedelta(days=1)
+    )
+    capped_results = repository.search_by_time(
+        "u", base, base + timedelta(days=1), limit=100
+    )
+
+    assert len(default_results) == 20
+    assert default_results[0].request == "q104"
+    assert len(capped_results) == 100
+    assert capped_results[-1].request == "q5"
+
+
+@pytest.mark.parametrize(
+    ("start_at", "end_at", "limit", "message"),
+    [
+        (
+            datetime(2026, 8, 1),
+            datetime(2026, 8, 2, tzinfo=UTC),
+            20,
+            "timezone-aware",
+        ),
+        (
+            datetime(2026, 8, 1, tzinfo=UTC),
+            datetime(2026, 8, 2),
+            20,
+            "timezone-aware",
+        ),
+        (
+            datetime(2026, 8, 2, tzinfo=UTC),
+            datetime(2026, 8, 2, tzinfo=UTC),
+            20,
+            "earlier",
+        ),
+        (
+            datetime(2026, 8, 3, tzinfo=UTC),
+            datetime(2026, 8, 2, tzinfo=UTC),
+            20,
+            "earlier",
+        ),
+        (
+            datetime(2026, 8, 1, tzinfo=UTC),
+            datetime(2026, 8, 2, tzinfo=UTC),
+            0,
+            "between 1 and 100",
+        ),
+        (
+            datetime(2026, 8, 1, tzinfo=UTC),
+            datetime(2026, 8, 2, tzinfo=UTC),
+            101,
+            "between 1 and 100",
+        ),
+    ],
+)
+def test_search_by_time_rejects_invalid_bounds_and_limits(
+    tmp_path: Path,
+    start_at: datetime,
+    end_at: datetime,
+    limit: int,
+    message: str,
+) -> None:
+    repository = ConversationHistoryRepository(tmp_path / "history.db")
+    repository.initialize()
+
+    with pytest.raises(ValueError, match=message):
+        repository.search_by_time("u", start_at, end_at, limit=limit)
 
 
 def test_conversation_history_round_trips_final_audit_reason(tmp_path: Path) -> None:
