@@ -38,3 +38,56 @@ def test_non_http_markdown_url_never_renders_as_an_anchor() -> None:
 
     assert "<a " not in rendered
     assert rendered == "<p>[unsafe &lt;link&gt;](javascript:alert(1))</p>"
+
+
+def render_profile_cards(payload: str) -> str:
+    script = """
+const cards = require('./frontend/profile-proposals.js');
+const proposals = JSON.parse(process.argv[1]);
+process.stdout.write(cards.renderProfileProposalCards(proposals));
+"""
+    completed = subprocess.run(
+        ["node", "-e", script, payload],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout
+
+
+def test_profile_card_escapes_values_and_exposes_two_decisions() -> None:
+    rendered = render_profile_cards(
+        """[{"proposal_id":"prof_11111111111111111111111111111111",
+        "category":"preference","key":"ingredient.cilantro",
+        "value":"<不喜欢香菜>","reason":"用户说 & 永久避免",
+        "evidence_ids":["hist_22222222222222222222222222222222"],
+        "preview":{"current":null}}]"""
+    )
+
+    assert "&lt;不喜欢香菜&gt;" in rendered
+    assert "用户说 &amp; 永久避免" in rendered
+    assert "hist_22222222222222222222222222222222" in rendered
+    assert 'data-decision="confirm"' in rendered
+    assert 'data-decision="reject"' in rendered
+    assert "<不喜欢香菜>" not in rendered
+
+
+def test_empty_profile_proposals_render_no_card_markup() -> None:
+    assert render_profile_cards("[]") == ""
+
+
+def test_profile_card_endpoint_encodes_id_and_allowlists_decision() -> None:
+    script = """
+const cards = require('./frontend/profile-proposals.js');
+process.stdout.write(cards.profileProposalEndpoint(process.argv[1], process.argv[2]));
+"""
+    completed = subprocess.run(
+        ["node", "-e", script, "prof_/unsafe", "confirm"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout == "/api/profile-proposals/prof_%2Funsafe/confirm"

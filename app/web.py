@@ -15,7 +15,7 @@ from app.allergens import OFFICIAL_INTOLERANCES, OFFICIAL_INTOLERANCE_SET
 from app.config import get_settings
 from app.context import ExecutionTraceEvent
 from app.limits import MAX_IMAGE_BYTES, MAX_TEXT_CHARS
-from app.memory import read_user_profile, write_user_allergens
+from app.memory import ConversationOutcome, read_user_profile
 from app.pipeline import KitchenPipeline, build_pipeline, build_proactive_service
 from app.proactive import ProactiveService
 from app.actions import InventoryActionService, PendingActionRepository
@@ -167,18 +167,71 @@ def allergen_settings() -> dict[str, object]:
 def update_allergen_settings(payload: AllergenSettings) -> dict[str, object]:
     global _pipeline
     settings = get_settings()
-    profile = write_user_allergens(
-        settings.user_profile_path,
+    if _pipeline is None:
+        with _pipeline_lock:
+            if _pipeline is None:
+                _pipeline = build_pipeline(settings)
+    pipeline = _pipeline
+    assert pipeline is not None
+    evidence = pipeline.history.append(
+        user_id=SHOWCASE_USER_ID,
+        request="确认更新过敏原设置",
+        response="过敏原设置已保存。",
+        confirmation_result={
+            "type": "profile_allergens",
+            "decision": "confirm",
+            "broad": payload.broad,
+            "custom": payload.custom,
+        },
+        outcome_type=ConversationOutcome.CONFIRMATION,
+    )
+    profile = pipeline.profile_actions.replace_confirmed_allergens(
+        SHOWCASE_USER_ID,
         payload.broad,
         payload.custom,
+        evidence_id=evidence.segment_id,
     )
     with _pipeline_lock:
-        if _pipeline is not None:
-            _pipeline.profile = profile
+        pipeline.profile = profile  # type: ignore[assignment]
     return {
         "broad": profile.allergen_intolerances,
         "custom": profile.custom_allergens,
     }
+
+
+def _resolve_profile_proposal(proposal_id: str, decision: str) -> dict[str, object]:
+    request_text = f"{'确认' if decision == 'confirm' else '拒绝'}画像变更：{proposal_id}"
+    try:
+        proposal = get_pipeline().resolve_profile_proposal(
+            user_id=SHOWCASE_USER_ID,
+            proposal_id=proposal_id,
+            decision=decision,
+        )
+    except KeyError as exc:
+        detail = str(exc)
+        _record_failure(request_text=request_text, detail=detail)
+        raise HTTPException(status_code=404, detail=detail) from exc
+    except PermissionError as exc:
+        detail = str(exc)
+        _record_failure(request_text=request_text, detail=detail)
+        raise HTTPException(status_code=403, detail=detail) from exc
+    except ValueError as exc:
+        detail = str(exc)
+        _record_failure(request_text=request_text, detail=detail)
+        raise HTTPException(status_code=409, detail=detail) from exc
+    return {"proposal": proposal.model_dump(mode="json")}
+
+
+@app.post("/api/profile-proposals/{proposal_id}/confirm")
+def confirm_profile_proposal(proposal_id: str) -> dict[str, object]:
+    return _resolve_profile_proposal(proposal_id, "confirm")
+
+
+@app.post("/api/profile-proposals/{proposal_id}/reject")
+def reject_profile_proposal(proposal_id: str) -> dict[str, object]:
+    result = _resolve_profile_proposal(proposal_id, "reject")
+    result["message"] = "画像变更已拒绝，长期画像未改变。"
+    return result
 
 
 def get_action_service() -> InventoryActionService:

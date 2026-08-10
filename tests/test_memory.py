@@ -304,7 +304,77 @@ def test_conversation_history_adds_audit_column_to_existing_database(
     assert repository.list_records("u")[0].audit_reason == "user_cancelled"
 
 
-def test_read_user_profile_initializes_missing_file_from_template(
+def test_history_accepts_one_reserved_segment_id(tmp_path: Path) -> None:
+    repository = ConversationHistoryRepository(tmp_path / "history.db")
+    repository.initialize()
+    reserved = repository.reserve_segment_id()
+
+    saved = repository.append(
+        user_id="u", request="问题", response="回答", segment_id=reserved
+    )
+
+    assert saved.segment_id == reserved
+    with pytest.raises(sqlite3.IntegrityError):
+        repository.append(
+            user_id="u", request="重复", response="重复", segment_id=reserved
+        )
+
+
+def test_history_evidence_is_ordered_and_user_scoped(tmp_path: Path) -> None:
+    repository = ConversationHistoryRepository(tmp_path / "history.db")
+    repository.initialize()
+    first = repository.append(user_id="u", request="q1", response="a1")
+    second = repository.append(user_id="u", request="q2", response="a2")
+    foreign = repository.append(user_id="other", request="private", response="private")
+
+    evidence = repository.get_evidence(
+        "u", [second.segment_id, foreign.segment_id, first.segment_id]
+    )
+
+    assert [record.segment_id for record in evidence] == [
+        second.segment_id,
+        first.segment_id,
+    ]
+
+
+def test_completed_cursor_query_excludes_ineligible_records(tmp_path: Path) -> None:
+    repository = ConversationHistoryRepository(tmp_path / "history.db")
+    repository.initialize()
+    base = datetime(2026, 8, 10, tzinfo=UTC)
+    cursor = repository.append(
+        user_id="u", request="old", response="old", created_at=base
+    )
+    expected: list[str] = []
+    for index, values in enumerate(
+        [
+            (True, ConversationOutcome.COMPLETED, False),
+            (False, ConversationOutcome.COMPLETED, False),
+            (True, ConversationOutcome.BLOCKED, True),
+            (True, ConversationOutcome.FAILED, False),
+            (True, ConversationOutcome.CONFIRMATION, False),
+            (True, ConversationOutcome.COMPLETED, False),
+        ],
+        start=1,
+    ):
+        relevant, outcome, blocked = values
+        record = repository.append(
+            user_id="u",
+            request=f"q{index}",
+            response=f"a{index}",
+            is_relevant=relevant,
+            outcome_type=outcome,
+            blocked=blocked,
+            created_at=base + timedelta(minutes=index),
+        )
+        if relevant and outcome == ConversationOutcome.COMPLETED and not blocked:
+            expected.append(record.segment_id)
+
+    records = repository.list_completed_after("u", cursor.segment_id, limit=10)
+
+    assert [record.segment_id for record in records] == expected
+
+
+def test_read_user_profile_returns_virtual_template_without_silent_write(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "nested" / "profile.md"
@@ -312,7 +382,7 @@ def test_read_user_profile_initializes_missing_file_from_template(
     profile = read_user_profile(path)
 
     expected = DEFAULT_USER_PROFILE_TEMPLATE.read_text(encoding="utf-8")
-    assert path.read_text(encoding="utf-8") == expected
+    assert path.exists() is False
     assert profile.markdown == expected
     assert profile.allergens == []
     assert profile.preferences == []
@@ -337,7 +407,7 @@ def test_parse_markdown_profile() -> None:
     assert profile.preferences == ["少辣"]
 
 
-def test_write_user_allergens_separates_api_categories_and_custom_foods(
+def test_legacy_allergen_writer_cannot_bypass_profile_audit(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "profile.md"
@@ -346,12 +416,9 @@ def test_write_user_allergens_separates_api_categories_and_custom_foods(
         encoding="utf-8",
     )
 
-    profile = write_user_allergens(path, ["Dairy", "Peanut"], ["腰果", "虾皮"])
+    before = path.read_text(encoding="utf-8")
 
-    assert profile.allergen_intolerances == ["Dairy", "Peanut"]
-    assert profile.custom_allergens == ["腰果", "虾皮"]
-    assert profile.preferences == ["少辣"]
-    saved = path.read_text(encoding="utf-8")
-    assert "## 广义过敏原" in saved
-    assert "## 自定义过敏食材" in saved
-    assert "## 过敏原" not in saved
+    with pytest.raises(RuntimeError, match="audited profile action"):
+        write_user_allergens(path, ["Dairy", "Peanut"], ["腰果", "虾皮"])
+
+    assert path.read_text(encoding="utf-8") == before

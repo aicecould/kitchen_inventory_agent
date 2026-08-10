@@ -21,6 +21,8 @@ BLOCK_PATTERNS = (
 _MARKDOWN_URL = re.compile(r"\[[^\]]+\]\((https?://[^)\s]+)\)")
 _INSTANCE_ID = re.compile(r"^inv_[0-9a-f]{32}$")
 _ACTION_ID = re.compile(r"^act_[0-9a-f]{32}$")
+_PROFILE_ID = re.compile(r"^prof_[0-9a-f]{32}$")
+_HISTORY_ID = re.compile(r"^hist_[0-9a-f]{32}$")
 _INVENTORY_READ_TOOLS = frozenset(
     {
         "list_inventory_instances",
@@ -38,6 +40,7 @@ _INVENTORY_PROPOSAL_OPERATIONS = {
 _INVENTORY_TOOLS = _INVENTORY_READ_TOOLS | frozenset(
     _INVENTORY_PROPOSAL_OPERATIONS
 )
+_PROFILE_PROPOSAL_TOOLS = frozenset({"propose_profile_change"})
 _OPERATION_LABELS = {
     "zh": {
         "inventory.add": "库存新增",
@@ -204,7 +207,22 @@ def review_tool_calls(
             and isinstance(result_arguments, dict)
             and not _arguments_match(arguments, result_arguments)
         ):
-            return audit_failure("Inventory proposal arguments differ from tool result")
+                return audit_failure("Inventory proposal arguments differ from tool result")
+    profile_proposals = [
+        entry for entry in parsed_calls if entry.get("tool") in _PROFILE_PROPOSAL_TOOLS
+    ]
+    for entry in profile_proposals:
+        result = entry["result"]
+        arguments = entry["arguments"]
+        if not isinstance(result, dict):
+            return audit_failure("Profile proposal has no structured result")
+        if result.get("status") != "pending":
+            return audit_failure("Profile proposal result is not pending")
+        if (
+            isinstance(arguments, dict)
+            and not _arguments_match(arguments, result)
+        ):
+            return audit_failure("Profile proposal arguments differ from tool result")
     canonical = _canonical_response_from_calls(parsed_calls, target_language)
     if canonical is not None:
         expected = canonical if notice is None else f"{canonical}\n\n> {notice}"
@@ -387,6 +405,18 @@ def _validate_tool_record(entry: dict[str, object]) -> str | None:
         )
         if preview_error:
             return preview_error
+    if tool_name in _PROFILE_PROPOSAL_TOOLS:
+        if not isinstance(result, dict):
+            return "Profile proposal has no structured result"
+        proposal_id = result.get("proposal_id")
+        if not isinstance(proposal_id, str) or _PROFILE_ID.fullmatch(proposal_id) is None:
+            return "Profile proposal has an invalid ID"
+        preview = result.get("preview")
+        if not isinstance(preview, dict):
+            return "Profile proposal preview is invalid"
+        preview_error = validate_profile_mutation_preview(arguments, preview)
+        if preview_error:
+            return preview_error
     if tool_name == "search_recipes":
         requested_ingredients = arguments.get("ingredients")
         if not isinstance(requested_ingredients, list) or not requested_ingredients:
@@ -488,11 +518,152 @@ def _validate_proposal_preview(
     return "Inventory proposal operation is not supported"
 
 
+def validate_profile_mutation_preview(
+    arguments: dict[str, object], preview: dict[str, object]
+) -> str | None:
+    """Validate a profile before/after preview before and after persistence."""
+
+    before_revision = preview.get("before_revision")
+    after_revision = preview.get("after_revision")
+    if (
+        not isinstance(before_revision, int)
+        or isinstance(before_revision, bool)
+        or not isinstance(after_revision, int)
+        or isinstance(after_revision, bool)
+        or after_revision != before_revision + 1
+    ):
+        return "Profile preview revision is invalid"
+    operation = arguments.get("operation")
+    if operation not in {"upsert", "replace", "delete"}:
+        return "Profile operation is invalid"
+    category = arguments.get("category")
+    if category not in {
+        "kitchen_setup",
+        "preference",
+        "requirement",
+        "default_context",
+    }:
+        return "Profile category is invalid"
+    key = arguments.get("key")
+    if not isinstance(key, str) or not key.strip() or "\n" in key or "\r" in key:
+        return "Profile key is invalid"
+    value = arguments.get("value")
+    if operation != "delete" and (
+        not isinstance(value, str) or not value.strip() or "\n" in value or "\r" in value
+    ):
+        return "Profile value is invalid"
+    evidence = preview.get("evidence_ids")
+    if (
+        not isinstance(evidence, list)
+        or not 1 <= len(evidence) <= 5
+        or len(evidence) != len(set(evidence))
+        or any(not isinstance(item, str) or _HISTORY_ID.fullmatch(item) is None for item in evidence)
+    ):
+        return "Profile evidence is invalid"
+    proposal_id = preview.get("proposal_id")
+    if proposal_id is not None and (
+        not isinstance(proposal_id, str) or _PROFILE_ID.fullmatch(proposal_id) is None
+    ):
+        return "Profile proposal ID is invalid"
+    source = preview.get("source")
+    if source == "autonomous_summary" and category == "requirement" and proposal_id is None:
+        return "Mandatory profile requirements cannot be inferred silently"
+    return None
+
+
+def validate_profile_state_transition(
+    before: dict[str, object],
+    after: dict[str, object],
+    operation: str,
+) -> str | None:
+    """Apply the existing deterministic audit contract to every profile write."""
+
+    allowed_operations = {
+        "initialize_profile_v2",
+        "propose_profile_change",
+        "confirm_profile_change",
+        "reject_profile_change",
+        "expire_profile_proposals",
+        "apply_inferred_profile_change",
+        "replace_confirmed_allergens",
+        "prune_profile_state",
+    }
+    if operation not in allowed_operations:
+        return "Profile mutation operation is not allowlisted"
+    before_revision = before.get("revision")
+    after_revision = after.get("revision")
+    if (
+        not isinstance(before_revision, int)
+        or isinstance(before_revision, bool)
+        or not isinstance(after_revision, int)
+        or isinstance(after_revision, bool)
+        or after_revision != before_revision + 1
+    ):
+        return "Profile state revision is invalid"
+    if after.get("schema_version") != 2:
+        return "Profile state schema version is invalid"
+    audit_events = after.get("audit_events")
+    if not isinstance(audit_events, list) or not audit_events:
+        return "Profile mutation has no audit event"
+    event = audit_events[-1]
+    if (
+        not isinstance(event, dict)
+        or event.get("operation") != operation
+        or event.get("status") != "passed"
+    ):
+        return "Profile audit event does not match the mutation"
+    before_facts = {
+        str(item.get("fact_id")): item
+        for item in before.get("facts", [])
+        if isinstance(item, dict)
+    } if isinstance(before.get("facts"), list) else {}
+    after_facts = after.get("facts")
+    if not isinstance(after_facts, list):
+        return "Profile facts are not structured"
+    for item in after_facts:
+        if not isinstance(item, dict):
+            return "Profile fact is not structured"
+        fact_id = str(item.get("fact_id", ""))
+        evidence = item.get("evidence_ids")
+        if fact_id not in before_facts and (
+            not isinstance(evidence, list)
+            or not evidence
+            or any(not isinstance(value, str) or _HISTORY_ID.fullmatch(value) is None for value in evidence)
+        ):
+            return "New profile fact has no valid evidence"
+        if (
+            operation == "apply_inferred_profile_change"
+            and item.get("category") == "requirement"
+            and item.get("origin") == "inferred"
+            and fact_id not in before_facts
+        ):
+            return "Mandatory profile requirements cannot be inferred silently"
+    if operation == "apply_inferred_profile_change":
+        after_by_id = {
+            str(item.get("fact_id")): item
+            for item in after_facts
+            if isinstance(item, dict)
+        }
+        for fact_id, old in before_facts.items():
+            current = after_by_id.get(fact_id)
+            if (
+                old.get("origin") == "user_confirmed"
+                and old.get("status") == "active"
+                and isinstance(current, dict)
+                and current.get("status") != "active"
+            ):
+                return "Confirmed profile fact cannot be silently replaced"
+    return None
+
+
 def _canonical_response_from_calls(
     parsed_calls: list[dict[str, object]],
     target_language: str = "zh",
 ) -> str | None:
-    if not any(entry.get("tool") in _INVENTORY_TOOLS for entry in parsed_calls):
+    if not any(
+        entry.get("tool") in _INVENTORY_TOOLS | _PROFILE_PROPOSAL_TOOLS
+        for entry in parsed_calls
+    ):
         return None
 
     language = _canonical_language(target_language)
@@ -515,11 +686,50 @@ def _canonical_response_from_calls(
         )
         sections.append(heading + "\n" + "\n".join(proposal_lines))
 
+    profile_lines = _canonical_profile_proposal_lines(parsed_calls, language)
+    if profile_lines:
+        heading = (
+            "待确认画像变更（尚未写入）："
+            if language == "zh"
+            else "Pending profile changes (not saved):"
+        )
+        sections.append(heading + "\n" + "\n".join(profile_lines))
+
     recipe_lines = _canonical_recipe_lines(parsed_calls, language)
     if recipe_lines is not None:
         heading = "菜谱工具结果：" if language == "zh" else "Recipe tool results:"
         sections.append(heading + "\n" + "\n".join(recipe_lines))
     return "\n\n".join(sections)
+
+
+def _canonical_profile_proposal_lines(
+    parsed_calls: list[dict[str, object]], language: str
+) -> list[str]:
+    lines: list[str] = []
+    for entry in parsed_calls:
+        if entry.get("tool") not in _PROFILE_PROPOSAL_TOOLS:
+            continue
+        result = entry.get("result")
+        if not isinstance(result, dict):
+            continue
+        operation = result.get("operation", "")
+        category = result.get("category", "")
+        key = result.get("key", "")
+        value = result.get("value")
+        proposal_id = result.get("proposal_id", "")
+        if language == "zh":
+            target = "删除" if operation == "delete" else str(value or "")
+            lines.append(
+                f"- 画像变更 | proposal_id={proposal_id} | status=pending（尚未写入）"
+            )
+            lines.append(f"  - {category} / {key}：{target}")
+        else:
+            target = "delete" if operation == "delete" else str(value or "")
+            lines.append(
+                f"- Profile change | proposal_id={proposal_id} | status=pending (not saved)"
+            )
+            lines.append(f"  - {category} / {key}: {target}")
+    return lines
 
 
 def _canonical_read_lines(

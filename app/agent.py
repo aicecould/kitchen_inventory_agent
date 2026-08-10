@@ -31,6 +31,12 @@ from app.audit import (
 from app.config import Settings
 from app.context import AgentContext, AgentResult
 from app.memory import ConversationHistoryRepository
+from app.profile import ProfileCategory, ProfileProposal
+from app.profile_actions import (
+    ProfileActionService,
+    ProfileChangeOperation,
+    ProfileChangeRequest,
+)
 from app.prompts import (
     ANSWER_REWRITE_SYSTEM_PROMPT,
     RECIPE_RECOVERY_SYSTEM_PROMPT,
@@ -93,6 +99,7 @@ class KitchenAgent:
     recipes: RecipeRouter
     actions: InventoryActionService
     history: ConversationHistoryRepository | None = None
+    profile_actions: ProfileActionService | None = None
     application_timezone: str = "Asia/Shanghai"
     recursion_limit: int = 10
     max_input_chars: int = 12000
@@ -239,6 +246,7 @@ class KitchenAgent:
             content=content,
             tool_history=history,
             execution_trace=trace.events,
+            profile_proposals=_profile_proposals(history),
         )
 
     def _run_repair_subagent(
@@ -321,6 +329,7 @@ class KitchenAgent:
         repository = self.inventory
         recipe_router = self.recipes
         action_service = self.actions
+        profile_action_service = self.profile_actions
         resolved_instance_ids: set[str] = set()
         ambiguous_instance_ids: set[str] = set()
         looked_up_names: set[str] = set()
@@ -569,6 +578,37 @@ class KitchenAgent:
             propose_confirm_inventory_instance,
             search_recipes,
         ]
+        if profile_action_service is not None and context.segment_id:
+
+            @tool
+            def propose_profile_change(
+                category: ProfileCategory,
+                key: str,
+                operation: ProfileChangeOperation,
+                value: str | None,
+                reason: str,
+            ) -> dict[str, object]:
+                """Propose a durable profile change; it remains inactive until clicked."""
+                proposal = trace.run(
+                    "profile",
+                    "propose_profile_change",
+                    lambda: profile_action_service.propose(
+                        context.user_id,
+                        ProfileChangeRequest(
+                            category=category,
+                            key=key,
+                            operation=operation,
+                            value=value,
+                            reason=reason,
+                        ),
+                        [context.segment_id],
+                        trusted_current_segment_id=context.segment_id,
+                    ),
+                    lambda result: f"status={result.status}",
+                )
+                return proposal.model_dump(mode="json")
+
+            tools.append(propose_profile_change)
         if self.history is not None:
             history_repository = self.history
 
@@ -715,6 +755,7 @@ def build_agent(
     recipes: RecipeRouter,
     actions: InventoryActionService,
     history: ConversationHistoryRepository,
+    profile_actions: ProfileActionService | None = None,
 ) -> KitchenAgent:
     settings.require("deepseek_api_key", "deepseek_model", "deepseek_base_url")
     model = ChatOpenAI(
@@ -732,10 +773,32 @@ def build_agent(
         recipes=recipes,
         actions=actions,
         history=history,
+        profile_actions=profile_actions,
         application_timezone=settings.application_timezone,
         recursion_limit=settings.agent_recursion_limit,
         max_input_chars=settings.deepseek_max_input_chars,
     )
+
+
+def _profile_proposals(
+    history: list[dict[str, object]],
+) -> list[ProfileProposal]:
+    proposals: list[ProfileProposal] = []
+    for entry in history:
+        if entry.get("tool") != "propose_profile_change":
+            continue
+        value = entry.get("result")
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(value, dict):
+            try:
+                proposals.append(ProfileProposal.model_validate(value))
+            except ValidationError:
+                continue
+    return proposals
 
 
 def run_agent(

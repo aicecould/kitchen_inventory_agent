@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -12,19 +13,14 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from app.context import ExecutionTraceEvent, HistoryExcerpt
-
-DEFAULT_USER_PROFILE_TEMPLATE = (
-    Path(__file__).resolve().parent / "templates" / "user_profile.md"
+from app.profile import (
+    DEFAULT_USER_PROFILE_TEMPLATE,
+    UserProfile,
+    load_user_profile,
+    parse_user_profile,
+    profile_without_legacy_history,
+    read_user_profile,
 )
-
-
-class UserProfile(BaseModel):
-    markdown: str
-    allergens: list[str] = Field(default_factory=list)
-    allergen_intolerances: list[str] = Field(default_factory=list)
-    custom_allergens: list[str] = Field(default_factory=list)
-    preferences: list[str] = Field(default_factory=list)
-    history: list[str] = Field(default_factory=list)
 
 
 class ConversationOutcome(StrEnum):
@@ -141,9 +137,12 @@ class ConversationHistoryRepository:
         blocked: bool = False,
         execution_trace: list[ExecutionTraceEvent] | None = None,
         created_at: datetime | None = None,
+        segment_id: str | None = None,
     ) -> ConversationRecord:
         timestamp = _as_utc(created_at or datetime.now(UTC))
-        segment_id = f"hist_{uuid4().hex}"
+        segment_id = segment_id or self.reserve_segment_id()
+        if re.fullmatch(r"hist_[0-9a-f]{32}", segment_id) is None:
+            raise ValueError("conversation segment_id is invalid")
         trace = execution_trace or []
         with sqlite3.connect(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -192,6 +191,76 @@ class ConversationHistoryRepository:
             execution_trace=trace,
             created_at=timestamp,
         )
+
+    @staticmethod
+    def reserve_segment_id() -> str:
+        return f"hist_{uuid4().hex}"
+
+    def get_evidence(
+        self, user_id: str, segment_ids: list[str]
+    ) -> list[ConversationRecord]:
+        if not segment_ids:
+            return []
+        unique_ids = list(dict.fromkeys(segment_ids))
+        placeholders = ",".join("?" for _ in unique_ids)
+        with sqlite3.connect(self.db_path) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT segment_id, user_id, request_text, response_text,
+                       tool_history_json, confirmation_result_json, audit_reason,
+                       is_relevant, outcome_type, blocked, execution_trace_json,
+                       created_at
+                FROM conversation_history
+                WHERE user_id = ? AND segment_id IN ({placeholders})
+                """,
+                (user_id, *unique_ids),
+            ).fetchall()
+        by_id = {
+            record.segment_id: record
+            for record in (_conversation_record(row) for row in rows)
+        }
+        return [by_id[value] for value in unique_ids if value in by_id]
+
+    def list_completed_after(
+        self,
+        user_id: str,
+        segment_id: str | None,
+        *,
+        limit: int,
+    ) -> list[ConversationRecord]:
+        if limit <= 0:
+            raise ValueError("completed history limit must be positive")
+        cursor_created = ""
+        cursor_rowid = 0
+        with sqlite3.connect(self.db_path) as connection:
+            if segment_id is not None:
+                cursor = connection.execute(
+                    "SELECT created_at, rowid FROM conversation_history "
+                    "WHERE user_id = ? AND segment_id = ?",
+                    (user_id, segment_id),
+                ).fetchone()
+                if cursor is None:
+                    raise KeyError("conversation summary cursor not found")
+                cursor_created = str(cursor[0])
+                cursor_rowid = int(cursor[1])
+            rows = connection.execute(
+                """
+                SELECT segment_id, user_id, request_text, response_text,
+                       tool_history_json, confirmation_result_json, audit_reason,
+                       is_relevant, outcome_type, blocked, execution_trace_json,
+                       created_at
+                FROM conversation_history
+                WHERE user_id = ?
+                  AND is_relevant = 1
+                  AND outcome_type = 'completed'
+                  AND blocked = 0
+                  AND (created_at > ? OR (created_at = ? AND rowid > ?))
+                ORDER BY created_at ASC, rowid ASC
+                LIMIT ?
+                """,
+                (user_id, cursor_created, cursor_created, cursor_rowid, limit),
+            ).fetchall()
+        return [_conversation_record(row) for row in rows]
 
     def list_records(self, user_id: str) -> list[ConversationRecord]:
         with sqlite3.connect(self.db_path) as connection:
@@ -305,83 +374,10 @@ def _as_utc_bound(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def load_user_profile(path: Path) -> str:
-    if not path.exists():
-        template = DEFAULT_USER_PROFILE_TEMPLATE.read_text(encoding="utf-8")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with path.open("x", encoding="utf-8", newline="\n") as handle:
-                handle.write(template)
-        except FileExistsError:
-            pass
-    return path.read_text(encoding="utf-8")
-
-
-def parse_user_profile(markdown: str) -> UserProfile:
-    sections: dict[str, list[str]] = {}
-    current = ""
-    for raw_line in markdown.splitlines():
-        line = raw_line.strip()
-        if line.startswith("## "):
-            current = line[3:].strip()
-            sections.setdefault(current, [])
-        elif current and line.startswith("- "):
-            value = line[2:].strip()
-            if value and value not in {"待填写", "暂无"}:
-                sections[current].append(value)
-
-    broad = sections.get("广义过敏原", [])
-    custom = [*sections.get("自定义过敏食材", []), *sections.get("过敏原", [])]
-    return UserProfile(
-        markdown=markdown,
-        allergens=list(dict.fromkeys([*broad, *custom])),
-        allergen_intolerances=broad,
-        custom_allergens=list(dict.fromkeys(custom)),
-        preferences=sections.get("饮食偏好", []),
-        history=sections.get("历史摘要", []),
-    )
-
-
-def read_user_profile(path: Path) -> UserProfile:
-    return parse_user_profile(load_user_profile(path))
-
-
-def profile_without_legacy_history(markdown: str) -> str:
-    """Remove the old Markdown history section before building Agent context."""
-    retained: list[str] = []
-    skipping = False
-    for line in markdown.splitlines():
-        if line.startswith("## "):
-            skipping = line[3:].strip() == "历史摘要"
-        if not skipping:
-            retained.append(line)
-    return "\n".join(retained).rstrip()
-
-
 def write_user_allergens(
     path: Path,
     allergen_intolerances: list[str],
     custom_allergens: list[str],
 ) -> UserProfile:
-    markdown = load_user_profile(path)
-    target_sections = {"过敏原", "广义过敏原", "自定义过敏食材"}
-    retained: list[str] = []
-    skipping = False
-    for line in markdown.splitlines():
-        if line.startswith("## "):
-            skipping = line[3:].strip() in target_sections
-        if not skipping:
-            retained.append(line)
-
-    cleaned = "\n".join(retained).rstrip()
-    broad_lines = [f"- {value}" for value in allergen_intolerances] or ["- 暂无"]
-    custom_lines = [f"- {value}" for value in custom_allergens] or ["- 暂无"]
-    updated = (
-        f"{cleaned}\n\n## 广义过敏原\n\n"
-        + "\n".join(broad_lines)
-        + "\n\n## 自定义过敏食材\n\n"
-        + "\n".join(custom_lines)
-        + "\n"
-    )
-    path.write_text(updated, encoding="utf-8")
-    return parse_user_profile(updated)
+    del path, allergen_intolerances, custom_allergens
+    raise RuntimeError("Use an audited profile action to update allergens")

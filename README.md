@@ -2,7 +2,7 @@
 
 Kitchen Inventory Agent 解决的不是“把食材名称存进数据库”这么简单的问题，而是家庭库存里更真实、也更容易被 Agent 误处理的状态：同名食材可能来自不同批次，“半袋”“约 400g–500g”不能安全换算，删除与修改不能在模型猜测后立即生效，临期提醒也不应偷偷替用户执行操作。
 
-当前版本已经形成一条可运行、可确认、可审查的请求链路：库存以独立实例保存原始数量文本；新增、整项替换、单实例删除、同名批量删除和“我刚确认过”校准全部先生成持久化提案；确定性与上下文路由先于未改动的 FastText 二分类器；用户再次访问页面且距上次访问严格超过 24 小时时，系统最多展示一句 100 个 Unicode 字符以内的只读库存建议。
+当前版本已经形成一条可运行、可确认、可审查的请求链路：库存以独立实例保存原始数量文本；新增、整项替换、单实例删除、同名批量删除和“我刚确认过”校准全部先生成持久化提案；长期画像以版本化 Markdown 保存事实、证据与冲突状态；确定性与上下文路由先于未改动的 FastText 二分类器；用户再次访问页面且距上次访问严格超过 24 小时时，系统最多展示一句 100 个 Unicode 字符以内的只读库存建议。
 
 安全边界同样明确：语言模型不能直接写 SQLite，主动建议不会创建提案、删除食材、补充库存或发送后台通知。模型负责理解、选择受约束的工具和辅助判断保质期；代码负责完整实例身份、原文保持、确认预览、确认门、优先级、固定提醒模板，以及从结构化工具结果生成可审计回答。
 
@@ -19,6 +19,7 @@ Kitchen Inventory Agent 解决的不是“把食材名称存进数据库”这�
 | 图片识别 | 接入百度果蔬识别 API，校验图片格式、尺寸和长宽比，并按置信度分层处理结果 |
 | 菜谱检索 | Spoonacular 主检索、TheMealDB 回退、DeepSeek 官方 Web Search 最终兜底，统一结果并执行过敏原过滤 |
 | 对话记忆 | 完整交互永久追加到 SQLite；Agent 自动上下文仅注入最近 10 段相关对话的输入与输出，并支持按时间范围显式召回 |
+| 长期用户画像 | Markdown v2 保存厨房情况、偏好、必须要求和默认情景；明确陈述二次点击确认，十段历史总结携带证据并只静默替换推断事实 |
 | 输出审核与轨迹 | 工具快照生成固定库存回答；受限子 Agent 可修复一次表达问题，主 Agent 最多重试一次，随后固定安全兜底 |
 
 ## 系统架构
@@ -167,7 +168,7 @@ FastText 的模型、数据、训练与推理文件没有因这套路由调整�
 
 ### 6. LangChain Agent 与实例工具边界
 
-复杂请求由基于 `ChatOpenAI` 兼容接口的 DeepSeek 模型处理，并通过 LangChain `create_agent` 组织以下 10 个工具：
+复杂请求由基于 `ChatOpenAI` 兼容接口的 DeepSeek 模型处理，并通过 LangChain `create_agent` 组织以下 11 个工具：
 
 ```text
 list_inventory_instances
@@ -180,6 +181,7 @@ propose_remove_all_inventory_instances
 propose_confirm_inventory_instance
 search_recipes
 search_conversation_history_by_time
+propose_profile_change
 ```
 
 实例写工具还有一层调用期约束：替换、删除和校准前必须读取真实实例。同名查询只有一个结果时可以确定目标；存在多个同名实例时会标记歧义，必须由用户提供完整实例 ID 后才能提出单实例变更。即使两个 UUID 共享旧版显示前缀，短前缀也不会解除歧义。按名称删除全部实例也要求先查到该名称。
@@ -223,7 +225,17 @@ Agent 自动上下文先过滤 `food_query_irrelevant`，再取最近 10 段相�
 
 `search_conversation_history_by_time` 接收带时区的起止时间，按半开区间查询当前用户的完整历史，默认返回最新 20 段、最多 100 段。显式召回可以包含被标记为无关的历史，但只向 Agent 返回 `created_at`、输入和输出；`user_id` 由当前上下文绑定，模型不能指定其他用户。相对日期依据带时区的当前时间和 `APP_TIMEZONE`（默认 `Asia/Shanghai`）转换。
 
-### 11. 规范化库存回答与实例级工具审核
+### 11. 带确认、证据与冲突更新的长期画像
+
+`user_profile.md` 仍是唯一画像状态源。文件前半部分只展示当前生效的厨房情况、饮食偏好、必须要求和默认情景；末尾隐藏的 `kitchen-profile-state:v2` JSON 注释保存 revision、事实来源、提案、最多五个历史 `segment_id` 证据、总结游标和最近 200 条画像审核事件。旧 Markdown 在读取时只做虚拟迁移，不静默改文件；首次实际写入时才生成 v2。
+
+用户明确表达“以后”“永久”或“默认”时，Agent 只能调用 `propose_profile_change` 创建 30 天有效的 pending 提案。`/api/process` 将提案作为结构化 `profile_proposals` 返回，页面在当前回答下方显示“确认写入／拒绝”卡片；对应接口为 `POST /api/profile-proposals/{proposal_id}/confirm` 和 `/reject`。确认、拒绝、过期、过敏原设置和自动推断全部形成审核事件与执行轨迹，确认点击还会写入追加式对话历史。
+
+每累计十段新的、相关且成功完成的历史，结构化总结器读取完整输入输出并把历史当作不可信数据。普通厨房情况、偏好和默认情景可凭至少两个真实证据自动写入；自动更新只能替换旧的 `inferred` 事实。必须要求以及与 `user_confirmed` 事实冲突的候选只生成提案，原确认事实继续生效。每类最多 20 条生效事实，证据最多 5 条，待确认提案 30 天过期，审核记录最多 200 条；完整对话证据不受画像裁剪影响。
+
+所有画像写入复用 `app/audit.py` 的确定性工具与状态迁移审核。写入前校验 revision、证据格式、状态变化、确认事实优先级、安全类别和对应 passed 审核事件；Markdown 在同目录临时写入、刷新后原子替换。损坏的 v2 状态会阻止写入，不会被默认模板覆盖。Agent Prompt 只接收生效事实的可读投影，不接收待确认、已替代、审计或游标数据。
+
+### 12. 规范化库存回答与实例级工具审核
 
 审核不再尝试用单一正则从任意模型文案中“猜”库存事实。只要 Agent 工具历史包含任一库存读取或提案，程序会丢弃模型撰写的库存／待确认段落，并从结构化结果生成固定 Markdown：
 
@@ -237,13 +249,13 @@ Agent 自动上下文先过滤 `food_query_irrelevant`，再取最近 10 段相�
 
 没有库存工具历史时，普通回答仍经过空输出、提示注入式语句和不支持付款／下单声明的正则检查，以及菜谱来源和图片记录审核。菜谱意图出现推荐但没有 `search_recipes` 工具记录时会被标记为工具缺失；菜谱标题或链接超出工具结果时会被标记为结果不一致。库存提案之后的确认／取消接口仍受用户归属、状态转换、允许列表和历史记录约束。
 
-### 12. 有界回答监督与纠错子 Agent
+### 13. 有界回答监督与纠错子 Agent
 
 审核失败不再一律立即返回 blocked。确定性 `ResponseSupervisor` 持有请求级重试状态：事实受工具记录支持但表达违规时，无工具的纠错子 Agent 可重写一次；重写仍失败时，主 Agent 在 `answer_rewrite` 模式下无工具重写一次。菜谱缺少工具调用或与工具结果不一致时，纠错子 Agent只生成错误反馈，主 Agent 在 `recipe_recovery` 模式下仅能调用 `search_recipes` 一次。任何路径都不能进行第三次生成、创建重复库存提案或修改既有工具记录。
 
 用户明确输入“取消”“不要了”等表达时走确定性取消响应；确认卡片点击取消仍由 HTTP 状态转换处理，不调用模型。首次 Agent调用无法完成、纠错输出结构无效或最终重试仍不通过时，系统返回固定安全文案。中间草稿和模型推理不写入历史。
 
-### 13. 可视化执行轨迹
+### 14. 可视化执行轨迹
 
 `/api/process` 请求以 `stage / name / status / detail / duration_ms` 记录实际执行阶段。轨迹显示 `deterministic_route` 是否命中，以及未决文本的 FastText 调用、`unavailable` 或 `fail-open`；确定性／上下文文本路径没有单独的 classifier-skipped 事件，其绕过行为由 `deterministic_route` 推断，图片请求才显式记录分类器 `skipped`。进入相应链路后，轨迹还包含实例读取、提案创建、外部 API、DeepSeek Agent、正则审核和工具调用审核；触发恢复时额外记录 `response_audit`、`supervisor_classification`、`subagent_rewrite`、`subagent_reaudit`、`main_agent_retry` 和 `final_fallback`。新增日期无法推断时记录安全的 `expiry_inference / degraded / unknown expiry` 事件。
 
@@ -267,10 +279,10 @@ Agent 自动上下文先过滤 `food_query_irrelevant`，再取最近 10 段相�
 
 ### 自动化测试
 
-当前完整测试套件为 **260 项通过测试**。更新后的全量验证使用：
+当前完整测试套件为 **323 项通过测试**。更新后的全量验证使用：
 
 ```bash
-TMPDIR=/tmp TMP=/tmp TEMP=/tmp .venv/bin/python -m pytest -q
+pytest -s -q
 ```
 
 pytest 自动化覆盖重点包括：

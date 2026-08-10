@@ -1,4 +1,5 @@
 const { escapeHtml, renderSafeMarkdown } = globalThis.KitchenMarkdown;
+const { renderProfileProposalCards, profileProposalEndpoint } = globalThis.KitchenProfileProposals;
 const form = document.querySelector("#agent-form");
 const promptInput = document.querySelector("#prompt");
 const charCount = document.querySelector("#char-count");
@@ -11,6 +12,7 @@ const submitButton = document.querySelector("#submit-button");
 const resultSection = document.querySelector("#result-section");
 const resultState = document.querySelector("#result-state");
 const answerContent = document.querySelector("#answer-content");
+const profileProposalList = document.querySelector("#profile-proposal-list");
 const toolTrace = document.querySelector("#tool-trace");
 const inventoryList = document.querySelector("#inventory-list");
 const globalStatus = document.querySelector("#global-status");
@@ -415,10 +417,36 @@ discardVisionCandidates.addEventListener("click", async () => {
 
 function renderAgentResult(data) {
   answerContent.innerHTML = renderSafeMarkdown(data.content);
+  profileProposalList.innerHTML = renderProfileProposalCards(data.profile_proposals || []);
+  profileProposalList.hidden = !(data.profile_proposals || []).length;
   resultState.textContent = data.blocked ? "已拦截" : "完成";
   resultState.classList.toggle("blocked", data.blocked);
   renderExecutionTrace(data.execution_trace || []);
 }
+
+profileProposalList.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-decision]");
+  if (!button) return;
+  const card = button.closest(".profile-proposal-card");
+  const decision = button.dataset.decision;
+  const proposalId = card.dataset.proposalId;
+  const buttons = Array.from(card.querySelectorAll("button"));
+  const status = card.querySelector(".profile-proposal-status");
+  buttons.forEach((item) => { item.disabled = true; });
+  status.textContent = "正在处理…";
+  try {
+    const response = await fetch(profileProposalEndpoint(proposalId, decision), {
+      method: "POST",
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "画像变更处理失败");
+    card.classList.add(decision === "confirm" ? "confirmed" : "rejected");
+    status.textContent = decision === "confirm" ? "已写入长期画像" : "已拒绝，画像未改变";
+  } catch (error) {
+    status.textContent = error.message;
+    buttons.forEach((item) => { item.disabled = false; });
+  }
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();

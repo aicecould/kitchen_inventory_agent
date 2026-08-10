@@ -49,6 +49,9 @@ from app.memory import (
     profile_without_legacy_history,
     read_user_profile,
 )
+from app.profile import ProfileProposal, ProfileRepository
+from app.profile_actions import ProfileActionService
+from app.profile_summary import ProfileSummarizer
 from app.proactive import ProactiveService, ReminderGenerator, VisitRepository
 from app.supervisor import fixed_response
 from app.tools.inventory import InventoryRepository
@@ -65,6 +68,8 @@ class KitchenPipeline:
     inventory: InventoryRepository
     actions: InventoryActionService
     history: ConversationHistoryRepository
+    profile_actions: ProfileActionService
+    profile_summarizer: ProfileSummarizer | None
     vision_confirmations: VisionConfirmationRepository
     agent: KitchenAgent | None
     vision: VisionApiClient | None
@@ -80,19 +85,27 @@ class KitchenPipeline:
         target_language: str = "zh",
         initial_trace: list[ExecutionTraceEvent] | None = None,
     ) -> AgentResult:
+        segment_id = self.history.reserve_segment_id()
         result = self._process_request(
             user_id=user_id,
             text=text,
             image_bytes=image_bytes,
             target_language=target_language,
             initial_trace=initial_trace,
+            segment_id=segment_id,
         )
         self._record_result(
             user_id=user_id,
             request_text=text,
             result=result,
             confirmation_result=None,
+            segment_id=segment_id,
         )
+        if self.profile_summarizer is not None:
+            result.profile_proposals.extend(
+                self.profile_summarizer.run_if_due(user_id)
+            )
+            self.profile = self.profile_actions.repository.read()
         return result
 
     def _process_request(
@@ -103,6 +116,7 @@ class KitchenPipeline:
         image_bytes: bytes | None = None,
         target_language: str = "zh",
         initial_trace: list[ExecutionTraceEvent] | None = None,
+        segment_id: str,
     ) -> AgentResult:
         trace = TraceRecorder()
         trace.events.extend(initial_trace or [])
@@ -254,6 +268,7 @@ class KitchenPipeline:
             prior_tool_history=prior_tool_history,
             route_decision=route_decision,
             force_agent=force_agent,
+            segment_id=segment_id,
         )
 
     def resolve_vision_confirmation(
@@ -342,6 +357,7 @@ class KitchenPipeline:
             "resolved",
             f"selected={len(selected_records)}; dropped={len(dropped)}",
         )
+        segment_id = self.history.reserve_segment_id()
         result = self._continue_request(
             user_id=user_id,
             text=pending.request_text,
@@ -363,6 +379,7 @@ class KitchenPipeline:
                     "result": resolution,
                 },
             ],
+            segment_id=segment_id,
         )
         completed = self.vision_confirmations.complete(
             confirmation_id,
@@ -377,8 +394,56 @@ class KitchenPipeline:
             result=completed.result,
             confirmation_result=resolution,
             outcome_type=ConversationOutcome.CONFIRMATION,
+            segment_id=segment_id,
         )
         return completed.result
+
+    def resolve_profile_proposal(
+        self,
+        *,
+        user_id: str,
+        proposal_id: str,
+        decision: str,
+    ) -> ProfileProposal:
+        if decision == "confirm":
+            proposal = self.profile_actions.confirm(proposal_id, user_id)
+            response = "用户画像变更已确认并写入。"
+            status = "executed"
+        elif decision == "reject":
+            proposal = self.profile_actions.reject(proposal_id, user_id)
+            response = "用户画像变更已拒绝，画像未改变。"
+            status = "cancelled"
+        else:
+            raise ValueError("Unknown profile confirmation decision")
+        self.profile = self.profile_actions.repository.read()
+        self.history.append(
+            user_id=user_id,
+            request=f"{'确认' if decision == 'confirm' else '拒绝'}画像变更：{proposal_id}",
+            response=response,
+            tool_history=[
+                {
+                    "tool": f"{decision}_profile_change",
+                    "arguments": {"proposal_id": proposal_id},
+                    "result": proposal.model_dump(mode="json"),
+                }
+            ],
+            confirmation_result={
+                "type": "profile",
+                "decision": decision,
+                "proposal_id": proposal_id,
+                "status": proposal.status.value,
+            },
+            outcome_type=ConversationOutcome.CONFIRMATION,
+            execution_trace=[
+                ExecutionTraceEvent(
+                    stage="human_checkpoint",
+                    name="profile_confirmation",
+                    status=status,
+                    detail=f"{decision}; {proposal.category.value}; {proposal.key}",
+                )
+            ],
+        )
+        return proposal
 
     def record_inventory_confirmation(
         self,
@@ -432,6 +497,7 @@ class KitchenPipeline:
         prior_tool_history: list[dict[str, object]] | None = None,
         route_decision: RouteDecision | None = None,
         force_agent: bool = False,
+        segment_id: str | None = None,
     ) -> AgentResult:
         prior_tool_history = prior_tool_history or []
         operation = route_decision.operation if route_decision is not None else None
@@ -622,6 +688,7 @@ class KitchenPipeline:
 
         context = AgentContext(
             user_id=user_id,
+            segment_id=segment_id or self.history.reserve_segment_id(),
             request_text=text,
             intent=match_intent(text),
             ingredients=ingredients,
@@ -701,6 +768,7 @@ class KitchenPipeline:
         result: AgentResult,
         confirmation_result: dict[str, object] | None,
         outcome_type: ConversationOutcome | None = None,
+        segment_id: str | None = None,
     ) -> ConversationRecord:
         if outcome_type is None:
             if result.awaiting_vision_confirmation:
@@ -720,6 +788,7 @@ class KitchenPipeline:
             outcome_type=outcome_type,
             blocked=result.blocked,
             execution_trace=result.execution_trace,
+            segment_id=segment_id,
         )
 
     def record_failure(
@@ -742,7 +811,8 @@ class KitchenPipeline:
 def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
     settings = settings or get_settings()
     ZoneInfo(settings.application_timezone)
-    profile = read_user_profile(settings.user_profile_path)
+    profile_repository = ProfileRepository(settings.user_profile_path)
+    profile = profile_repository.read()
 
     inventory = InventoryRepository(settings.inventory_db_path)
     inventory.initialize()
@@ -759,6 +829,12 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
     )
     history = ConversationHistoryRepository(settings.inventory_db_path)
     history.initialize()
+    profile_actions = ProfileActionService(
+        profile_repository,
+        evidence_exists=lambda user_id, segment_id: bool(
+            history.get_evidence(user_id, [segment_id])
+        ),
+    )
     vision_confirmations = VisionConfirmationRepository(
         settings.inventory_db_path,
         ttl_minutes=settings.pending_action_ttl_minutes,
@@ -790,8 +866,13 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
     )
     recipes = RecipeRouter(spoonacular, themealdb, web_search)
     agent = (
-        build_agent(settings, inventory, recipes, actions, history)
+        build_agent(settings, inventory, recipes, actions, history, profile_actions)
         if settings.deepseek_api_key
+        else None
+    )
+    profile_summarizer = (
+        ProfileSummarizer(agent.model, history, profile_actions)
+        if agent is not None
         else None
     )
 
@@ -821,6 +902,8 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
         inventory,
         actions,
         history,
+        profile_actions,
+        profile_summarizer,
         vision_confirmations,
         agent,
         vision,
