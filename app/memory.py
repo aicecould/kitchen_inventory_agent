@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from app.context import HistorySegment
+from app.context import ExecutionTraceEvent, HistorySegment
 
 DEFAULT_USER_PROFILE_TEMPLATE = (
     Path(__file__).resolve().parent / "templates" / "user_profile.md"
@@ -26,18 +27,38 @@ class UserProfile(BaseModel):
     history: list[str] = Field(default_factory=list)
 
 
+class ConversationOutcome(StrEnum):
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    FAILED = "failed"
+    CONFIRMATION = "confirmation"
+
+
+class ConversationRecord(BaseModel):
+    segment_id: str
+    user_id: str
+    request: str
+    response: str
+    tool_history: list[dict[str, object]] = Field(default_factory=list)
+    confirmation_result: dict[str, object] | None = None
+    audit_reason: str | None = None
+    is_relevant: bool = True
+    outcome_type: ConversationOutcome = ConversationOutcome.COMPLETED
+    blocked: bool = False
+    execution_trace: list[ExecutionTraceEvent] = Field(default_factory=list)
+    created_at: datetime
+
+
 class ConversationHistoryRepository:
-    """Persist flat turns and expose only the latest bounded window.
+    """Persist complete flat turns without coupling storage to context limits.
 
     A row never contains the history that was supplied to its Agent call. This
     prevents old windows from being recursively copied into newer history rows.
     """
 
-    def __init__(self, db_path: Path, max_segments: int = 5) -> None:
-        if max_segments <= 0:
-            raise ValueError("max_segments must be positive")
+    def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
-        self.max_segments = max_segments
 
     def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -52,6 +73,10 @@ class ConversationHistoryRepository:
                     tool_history_json TEXT NOT NULL,
                     confirmation_result_json TEXT,
                     audit_reason TEXT,
+                    is_relevant INTEGER NOT NULL DEFAULT 1,
+                    outcome_type TEXT NOT NULL DEFAULT 'completed',
+                    blocked INTEGER NOT NULL DEFAULT 0,
+                    execution_trace_json TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL
                 )
                 """
@@ -66,9 +91,34 @@ class ConversationHistoryRepository:
                 connection.execute(
                     "ALTER TABLE conversation_history ADD COLUMN audit_reason TEXT"
                 )
+            migrations = {
+                "is_relevant": (
+                    "ALTER TABLE conversation_history "
+                    "ADD COLUMN is_relevant INTEGER NOT NULL DEFAULT 1"
+                ),
+                "outcome_type": (
+                    "ALTER TABLE conversation_history "
+                    "ADD COLUMN outcome_type TEXT NOT NULL DEFAULT 'completed'"
+                ),
+                "blocked": (
+                    "ALTER TABLE conversation_history "
+                    "ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0"
+                ),
+                "execution_trace_json": (
+                    "ALTER TABLE conversation_history "
+                    "ADD COLUMN execution_trace_json TEXT NOT NULL DEFAULT '[]'"
+                ),
+            }
+            for column, statement in migrations.items():
+                if column not in columns:
+                    connection.execute(statement)
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_history_user_created "
                 "ON conversation_history(user_id, created_at DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_history_user_relevant_created "
+                "ON conversation_history(user_id, is_relevant, created_at DESC)"
             )
 
     def append(
@@ -80,8 +130,15 @@ class ConversationHistoryRepository:
         tool_history: list[dict[str, object]] | None = None,
         confirmation_result: dict[str, object] | None = None,
         audit_reason: str | None = None,
-    ) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        is_relevant: bool = True,
+        outcome_type: ConversationOutcome = ConversationOutcome.COMPLETED,
+        blocked: bool = False,
+        execution_trace: list[ExecutionTraceEvent] | None = None,
+        created_at: datetime | None = None,
+    ) -> ConversationRecord:
+        timestamp = _as_utc(created_at or datetime.now(UTC))
+        segment_id = f"hist_{uuid4().hex}"
+        trace = execution_trace or []
         with sqlite3.connect(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -89,11 +146,12 @@ class ConversationHistoryRepository:
                 INSERT INTO conversation_history(
                     segment_id, user_id, request_text, response_text,
                     tool_history_json, confirmation_result_json, audit_reason,
+                    is_relevant, outcome_type, blocked, execution_trace_json,
                     created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    f"hist_{uuid4().hex}",
+                    segment_id,
                     user_id,
                     request.strip(),
                     response.strip(),
@@ -104,22 +162,46 @@ class ConversationHistoryRepository:
                         else None
                     ),
                     audit_reason,
-                    now,
+                    int(is_relevant),
+                    outcome_type.value,
+                    int(blocked),
+                    json.dumps(
+                        [event.model_dump(mode="json") for event in trace],
+                        ensure_ascii=False,
+                    ),
+                    timestamp.isoformat(),
                 ),
             )
-            connection.execute(
+        return ConversationRecord(
+            segment_id=segment_id,
+            user_id=user_id,
+            request=request.strip(),
+            response=response.strip(),
+            tool_history=tool_history or [],
+            confirmation_result=confirmation_result,
+            audit_reason=audit_reason,
+            is_relevant=is_relevant,
+            outcome_type=outcome_type,
+            blocked=blocked,
+            execution_trace=trace,
+            created_at=timestamp,
+        )
+
+    def list_records(self, user_id: str) -> list[ConversationRecord]:
+        with sqlite3.connect(self.db_path) as connection:
+            rows = connection.execute(
                 """
-                DELETE FROM conversation_history
-                WHERE user_id = ? AND segment_id NOT IN (
-                    SELECT segment_id
-                    FROM conversation_history
-                    WHERE user_id = ?
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                )
+                SELECT segment_id, user_id, request_text, response_text,
+                       tool_history_json, confirmation_result_json, audit_reason,
+                       is_relevant, outcome_type, blocked, execution_trace_json,
+                       created_at
+                FROM conversation_history
+                WHERE user_id = ?
+                ORDER BY created_at ASC, rowid ASC
                 """,
-                (user_id, user_id, self.max_segments),
-            )
+                (user_id,),
+            ).fetchall()
+        return [_conversation_record(row) for row in rows]
 
     def list_recent(self, user_id: str) -> list[HistorySegment]:
         with sqlite3.connect(self.db_path) as connection:
@@ -130,9 +212,9 @@ class ConversationHistoryRepository:
                 FROM conversation_history
                 WHERE user_id = ?
                 ORDER BY created_at DESC
-                LIMIT ?
+                LIMIT 5
                 """,
-                (user_id, self.max_segments),
+                (user_id,),
             ).fetchall()
         rows.reverse()
         return [
@@ -147,6 +229,31 @@ class ConversationHistoryRepository:
             )
             for row in rows
         ]
+
+
+def _conversation_record(row: tuple[object, ...]) -> ConversationRecord:
+    return ConversationRecord(
+        segment_id=str(row[0]),
+        user_id=str(row[1]),
+        request=str(row[2]),
+        response=str(row[3]),
+        tool_history=json.loads(str(row[4])),
+        confirmation_result=(
+            json.loads(str(row[5])) if row[5] is not None else None
+        ),
+        audit_reason=str(row[6]) if row[6] is not None else None,
+        is_relevant=bool(row[7]),
+        outcome_type=ConversationOutcome(str(row[8])),
+        blocked=bool(row[9]),
+        execution_trace=json.loads(str(row[10])),
+        created_at=datetime.fromisoformat(str(row[11])),
+    )
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("conversation timestamps must be timezone-aware")
+    return value.astimezone(UTC)
 
 
 def load_user_profile(path: Path) -> str:
