@@ -17,7 +17,7 @@ Kitchen Inventory Agent 解决的不是“把食材名称存进数据库”这�
 | 主动库存建议 | 页面访问触发检查；距该用户上次访问严格超过 24 小时才扫描过期、3 天内临期、超过 14 天未确认和可能缺货线索，只展示一句固定安全文案 |
 | 请求路由 | 问候、明确库存指令和依赖上文的追问先走确定性／上下文规则；仍未决的文本才交给原有 FastText 二分类器 |
 | 图片识别 | 接入百度果蔬识别 API，校验图片格式、尺寸和长宽比，并按置信度分层处理结果 |
-| 菜谱检索 | Spoonacular 作为主检索源、TheMealDB 作为回退源，统一结果并执行过敏原过滤 |
+| 菜谱检索 | Spoonacular 主检索、TheMealDB 回退、DeepSeek 官方 Web Search 最终兜底，统一结果并执行过敏原过滤 |
 | 对话记忆 | 请求、最终回答、工具记录和确认结果写入 SQLite，每个用户保留最近 5 段非递归历史 |
 | 输出审核与轨迹 | 只要 Agent 读取库存或创建提案，就从工具快照生成固定结构回答；核对完整 ID、数量原文、待确认预览、菜谱来源和图片确认记录 |
 
@@ -30,7 +30,7 @@ flowchart TD
     B -->|纯文本| C["确定性与上下文路由"]
     C -->|问候 / 明确领域外边界| C1["返回边界提示"]
     C -->|库存列表 / 按名称查询| D["实例级 SQLite 只读"]
-    C -->|新增 / 删除全部同名实例 / 完整 ID 替换、删除、校准| E["创建待确认提案 + 结构化预览"]
+    C -->|删除全部同名实例 / 完整 ID 替换、删除、校准| E["创建待确认提案 + 结构化预览"]
     C -->|依赖上文| F["携带最近历史进入 Agent"]
     C -->|仍未决| G["未改动的 FastText 二分类器"]
     G -->|领域外| C1
@@ -47,7 +47,7 @@ flowchart TD
     H --> M
     M --> N["实例读取 / 库存提案 / 菜谱搜索"]
     N --> E
-    N --> O["Spoonacular → TheMealDB"]
+    N --> O["Spoonacular → TheMealDB → DeepSeek Web Search"]
 
     D --> S["工具结果规范化渲染 + 正则与结构审核"]
     E --> S
@@ -187,11 +187,11 @@ Agent 负责理解请求、形成完整的新数量文本、生成英文菜谱 A
 
 当前 Agent 仍由工具调用过程隐式编排，没有独立的结构化 Plan、任务依赖图或前端步骤状态模型。
 
-### 7. Spoonacular 与 TheMealDB 菜谱路由
+### 7. Spoonacular、TheMealDB 与 DeepSeek Web Search 菜谱路由
 
-菜谱工具至少要求一个英文食材参数。配置 Spoonacular 密钥时先调用 `/recipes/complexSearch`，映射食材、饮食、菜系、餐型、最大制作时间、排序和过敏原；结果统一为标题、步骤、原料、来源链接和图片链接，并执行去重与过敏原字符串过滤。Spoonacular 失败或没有安全结果时，系统使用 TheMealDB 搜索第一个食材并读取详情，再执行相同过滤。
+菜谱工具至少要求一个英文食材参数。配置 Spoonacular 密钥时先调用 `/recipes/complexSearch`，映射食材、饮食、菜系、餐型、最大制作时间、排序和过敏原；结果统一为标题、步骤、原料、来源链接和图片链接，并执行去重与过敏原字符串过滤。Spoonacular 失败或没有安全结果时，系统使用 TheMealDB 搜索第一个食材并读取详情。两者均无安全结果且已配置 `DEEPSEEK_API_KEY` 时，系统通过 DeepSeek 官方 Anthropic 兼容端点调用服务端 Web Search；网页召回结果必须带有效 HTTP(S) 来源链接，并再次执行相同的去重和过敏原过滤。
 
-Spoonacular 当前支持 `max-used-ingredients` 和 `min-missing-ingredients` 两种 API 排序方式。系统没有本地菜谱数据集、向量召回或多因素融合排序，候选质量仍主要依赖外部 API。
+Spoonacular 当前支持 `max-used-ingredients` 和 `min-missing-ingredients` 两种 API 排序方式。DeepSeek Web Search 每次兜底最多发起一次搜索，并会产生额外模型与搜索费用。系统没有本地菜谱数据集、向量召回或多因素融合排序，候选质量仍主要依赖外部 API。
 
 ### 8. 结构化过敏原约束
 
@@ -252,7 +252,7 @@ Spoonacular 当前支持 `max-used-ingredients` 和 `min-missing-ingredients` �
 
 ### 外部服务安全降级
 
-分类器不可用时 fail-open；保质期推断失败时保存 `unknown` 并留下无供应商详情的降级轨迹；Spoonacular 失败时回退 TheMealDB；主动建议选择失败时使用固定模板或返回空。降级不会绕过库存确认，也不会把外部异常变成隐式写操作。
+分类器不可用时 fail-open；保质期推断失败时保存 `unknown` 并留下无供应商详情的降级轨迹；Spoonacular 失败时回退 TheMealDB，两者无安全结果时再回退 DeepSeek Web Search；主动建议选择失败时使用固定模板或返回空。降级不会绕过库存确认，也不会把外部异常变成隐式写操作。
 
 ## 验证与指标
 
@@ -318,7 +318,7 @@ pytest 自动化覆盖重点包括：
 app/
 ├── actions.py                # 实例变更提案、确认状态与允许列表执行
 ├── adapters/
-│   ├── recipe_api.py         # Spoonacular / TheMealDB 适配器
+│   ├── recipe_api.py         # Spoonacular / TheMealDB / DeepSeek Web Search 适配器
 │   └── vision_api.py         # 百度果蔬识别适配器
 ├── agent.py                  # LangChain Agent 与 9 个工具
 ├── audit.py                  # 正则与实例级工具调用审核
@@ -362,7 +362,7 @@ cp .env.example .env
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `DEEPSEEK_API_KEY` | 空 | 复杂 Agent、可选保质期推断和可选主动候选选择所需；确定性库存路由不依赖模型 |
+| `DEEPSEEK_API_KEY` | 空 | Agent、保质期推断、主动候选选择与最终菜谱 Web Search 兜底所需 |
 | `DEEPSEEK_MODEL` | `deepseek-v4-flash` | OpenAI 兼容模型名称 |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | 模型 API 地址 |
 | `DEEPSEEK_MAX_OUTPUT_TOKENS` | `800` | 单次模型最大输出 Token |

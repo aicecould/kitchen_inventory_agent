@@ -5,7 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from time import perf_counter
 
-from app.adapters.recipe_api import Recipe, SpoonacularClient, TheMealDbClient
+from app.adapters.recipe_api import (
+    DeepSeekWebSearchClient,
+    Recipe,
+    SpoonacularClient,
+    TheMealDbClient,
+)
 
 TraceCallback = Callable[[str, str, str, str, int], None]
 
@@ -15,9 +20,11 @@ class RecipeRouter:
         self,
         spoonacular: SpoonacularClient | None,
         themealdb: TheMealDbClient,
+        web_search: DeepSeekWebSearchClient | None = None,
     ) -> None:
         self.spoonacular = spoonacular
         self.themealdb = themealdb
+        self.web_search = web_search
 
     def search(
         self,
@@ -99,15 +106,13 @@ class RecipeRouter:
                 "external_api",
                 "themealdb",
                 "failed",
-                type(exc).__name__,
+                f"{type(exc).__name__}; using fallback",
                 started,
             )
-            if spoonacular_error is not None:
-                raise RuntimeError(
-                    f"Both recipe routes failed: spoonacular: {spoonacular_error} | "
-                    f"themealdb: {exc}"
-                ) from exc
-            raise RuntimeError(f"TheMealDB fallback failed: {exc}") from exc
+            themealdb_error: Exception | None = exc
+            safe_fallback = []
+        else:
+            themealdb_error = None
 
         if safe_fallback:
             self._trace(
@@ -119,14 +124,70 @@ class RecipeRouter:
                 started,
             )
             return [recipe.as_dict() for recipe in safe_fallback]
-        self._trace(
-            trace,
-            "external_api",
-            "themealdb",
-            "empty",
-            "no safe recipes",
-            started,
-        )
+        if themealdb_error is None:
+            self._trace(
+                trace,
+                "external_api",
+                "themealdb",
+                "empty",
+                (
+                    "no safe recipes; using fallback"
+                    if self.web_search
+                    else "no safe recipes"
+                ),
+                started,
+            )
+
+        if self.web_search is not None:
+            started = perf_counter()
+            try:
+                web_results = self.web_search.search(
+                    ingredients=ingredients,
+                    intolerances=intolerances,
+                    exclude_ingredients=exclude_ingredients,
+                    diet=diet,
+                    cuisine=cuisine,
+                    meal_type=meal_type,
+                    max_ready_time=max_ready_time,
+                    ranking=ranking,
+                    limit=limit,
+                )
+                safe_web_results = self._safe_unique(
+                    web_results, allergen_terms, limit
+                )
+            except Exception as exc:
+                self._trace(
+                    trace,
+                    "external_api",
+                    "deepseek_web_search",
+                    "failed",
+                    type(exc).__name__,
+                    started,
+                )
+                raise RuntimeError("DeepSeek web search fallback failed") from exc
+            if safe_web_results:
+                self._trace(
+                    trace,
+                    "external_api",
+                    "deepseek_web_search",
+                    "success",
+                    f"{len(safe_web_results)} safe recipe(s)",
+                    started,
+                )
+                return [recipe.as_dict() for recipe in safe_web_results]
+            self._trace(
+                trace,
+                "external_api",
+                "deepseek_web_search",
+                "empty",
+                "no safe recipes",
+                started,
+            )
+
+        if themealdb_error is not None:
+            if spoonacular_error is not None:
+                raise RuntimeError("Both recipe API routes failed") from themealdb_error
+            raise RuntimeError("TheMealDB fallback failed") from themealdb_error
         if spoonacular_error is not None:
             raise RuntimeError(
                 f"Spoonacular failed and TheMealDB returned no safe recipes: "

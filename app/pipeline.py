@@ -10,7 +10,11 @@ from app.actions import (
     PendingAction,
     PendingActionRepository,
 )
-from app.adapters.recipe_api import SpoonacularClient, TheMealDbClient
+from app.adapters.recipe_api import (
+    DeepSeekWebSearchClient,
+    SpoonacularClient,
+    TheMealDbClient,
+)
 from app.adapters.vision_api import VisionApiClient
 from app.agent import KitchenAgent, build_agent
 from app.audit import (
@@ -686,7 +690,17 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
         api_key=settings.themealdb_api_key,
         timeout=settings.http_timeout_seconds,
     )
-    recipes = RecipeRouter(spoonacular, themealdb)
+    web_search = (
+        DeepSeekWebSearchClient(
+            base_url=settings.deepseek_base_url,
+            api_key=settings.deepseek_api_key,
+            model=settings.deepseek_model,
+            timeout=settings.http_timeout_seconds,
+        )
+        if settings.deepseek_api_key
+        else None
+    )
+    recipes = RecipeRouter(spoonacular, themealdb, web_search)
     agent = (
         build_agent(settings, inventory, recipes, actions)
         if settings.deepseek_api_key

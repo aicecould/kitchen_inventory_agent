@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import httpx
 
@@ -27,6 +30,168 @@ class Recipe:
             "source_url": self.source_url,
             "image_url": self.image_url,
         }
+
+
+class DeepSeekWebSearchClient:
+    """Recipe recall through DeepSeek's Anthropic-compatible server web search."""
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: float = 20,
+    ) -> None:
+        root = base_url.rstrip("/")
+        if root.endswith("/v1"):
+            root = root[:-3]
+        if not root.endswith("/anthropic"):
+            root += "/anthropic"
+        self.endpoint = f"{root}/v1/messages"
+        self.api_key = api_key
+        self.model = model
+        self.timeout = timeout
+
+    def search(
+        self,
+        *,
+        ingredients: list[str],
+        intolerances: list[str],
+        exclude_ingredients: list[str],
+        diet: str | None = None,
+        cuisine: str | None = None,
+        meal_type: str | None = None,
+        max_ready_time: int | None = None,
+        ranking: str = "max-used-ingredients",
+        limit: int = 3,
+    ) -> list[Recipe]:
+        request = {
+            "ingredients": ingredients,
+            "intolerances": intolerances,
+            "exclude_ingredients": exclude_ingredients,
+            "diet": diet,
+            "cuisine": cuisine,
+            "meal_type": meal_type,
+            "max_ready_time": max_ready_time,
+            "ranking": ranking,
+            "limit": limit,
+        }
+        payload: dict[str, object] = {
+            "model": self.model,
+            "max_tokens": 2000,
+            "system": (
+                "Use web search to find real recipe pages matching the request. "
+                "Return only one JSON object with a recipes array. Each recipe must "
+                "contain title, instructions, ingredients, source_url, and image_url. "
+                "Never invent URLs. Exclude every listed intolerance and ingredient."
+            ),
+            "messages": [
+                {
+                    "role": "user",
+                    "content": json.dumps(request, ensure_ascii=False),
+                }
+            ],
+            "tools": [
+                {
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                    "max_uses": 1,
+                }
+            ],
+        }
+        response_payload = self._post(payload)
+        if response_payload.get("stop_reason") == "pause_turn":
+            messages = payload["messages"]
+            assert isinstance(messages, list)
+            messages.append(
+                {"role": "assistant", "content": response_payload.get("content", [])}
+            )
+            response_payload = self._post(payload)
+        return self._recipes_from_response(response_payload, limit)
+
+    def _post(self, payload: dict[str, object]) -> dict[str, object]:
+        response = httpx.post(
+            self.endpoint,
+            headers={
+                "content-type": "application/json",
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict):
+            raise ValueError("DeepSeek web search returned a non-object response")
+        return result
+
+    @classmethod
+    def _recipes_from_response(
+        cls, response: dict[str, object], limit: int
+    ) -> list[Recipe]:
+        content = response.get("content")
+        if not isinstance(content, list):
+            raise ValueError("DeepSeek web search response has no content")
+        text = "\n".join(
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+        if text.startswith("```") and text.endswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        decoded = json.loads(text)
+        payloads = decoded.get("recipes") if isinstance(decoded, dict) else None
+        if not isinstance(payloads, list):
+            raise ValueError("DeepSeek web search response has no recipes array")
+
+        recipes: list[Recipe] = []
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            title = str(payload.get("title") or "").strip()
+            instructions = str(payload.get("instructions") or "").strip()
+            source_url = cls._safe_url(payload.get("source_url"))
+            raw_ingredients = payload.get("ingredients")
+            if (
+                not title
+                or not instructions
+                or source_url is None
+                or not isinstance(raw_ingredients, list)
+            ):
+                continue
+            ingredients = [
+                value.strip()
+                for item in raw_ingredients
+                if (value := str(item).strip())
+            ]
+            if not ingredients:
+                continue
+            recipe_id = hashlib.sha256(
+                f"{source_url}\n{title}".encode("utf-8")
+            ).hexdigest()[:24]
+            recipes.append(
+                Recipe(
+                    id=f"web_{recipe_id}",
+                    title=title,
+                    instructions=instructions,
+                    ingredients=ingredients,
+                    source="deepseek_web_search",
+                    source_url=source_url,
+                    image_url=cls._safe_url(payload.get("image_url")),
+                )
+            )
+        return recipes[:limit]
+
+    @staticmethod
+    def _safe_url(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        candidate = value.strip()
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return None
+        return candidate
 
 
 class SpoonacularClient:

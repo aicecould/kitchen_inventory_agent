@@ -98,6 +98,29 @@ def build_test_pipeline(tmp_path: Path):
     return build_pipeline(settings)
 
 
+def test_pipeline_enables_deepseek_web_search_fallback_with_api_key(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "profile.md"
+    profile_path.write_text("# 用户画像\n", encoding="utf-8")
+    settings = replace(
+        get_settings(),
+        deepseek_api_key="test-key",
+        deepseek_base_url="https://api.deepseek.com",
+        inventory_db_path=tmp_path / "inventory.db",
+        user_profile_path=profile_path,
+    )
+
+    pipeline = build_pipeline(settings)
+
+    assert pipeline.agent is not None
+    assert pipeline.agent.recipes.web_search is not None
+    assert (
+        pipeline.agent.recipes.web_search.endpoint
+        == "https://api.deepseek.com/anthropic/v1/messages"
+    )
+
+
 def install_scripted_agent(
     pipeline: Any,
     responses: list[AIMessage],
