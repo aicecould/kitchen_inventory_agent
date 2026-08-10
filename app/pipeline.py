@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from classifier.model import FoodQueryClassifier
 from app.actions import (
@@ -29,6 +30,7 @@ from app.context import (
     AgentContext,
     AgentResult,
     ConfidenceStatus,
+    ExecutionTraceEvent,
     Ingredient,
     VisionConfirmationPrompt,
 )
@@ -40,6 +42,8 @@ from app.intent import (
     route_deterministically,
 )
 from app.memory import (
+    ConversationOutcome,
+    ConversationRecord,
     ConversationHistoryRepository,
     UserProfile,
     profile_without_legacy_history,
@@ -74,8 +78,34 @@ class KitchenPipeline:
         text: str,
         image_bytes: bytes | None = None,
         target_language: str = "zh",
+        initial_trace: list[ExecutionTraceEvent] | None = None,
+    ) -> AgentResult:
+        result = self._process_request(
+            user_id=user_id,
+            text=text,
+            image_bytes=image_bytes,
+            target_language=target_language,
+            initial_trace=initial_trace,
+        )
+        self._record_result(
+            user_id=user_id,
+            request_text=text,
+            result=result,
+            confirmation_result=None,
+        )
+        return result
+
+    def _process_request(
+        self,
+        *,
+        user_id: str,
+        text: str,
+        image_bytes: bytes | None = None,
+        target_language: str = "zh",
+        initial_trace: list[ExecutionTraceEvent] | None = None,
     ) -> AgentResult:
         trace = TraceRecorder()
+        trace.events.extend(initial_trace or [])
         route_decision: RouteDecision | None = None
         force_agent = False
         if image_bytes is not None:
@@ -237,6 +267,13 @@ class KitchenPipeline:
         if pending.status == "resolved":
             if pending.result is None:
                 raise RuntimeError("Resolved vision confirmation has no stored result")
+            self._record_result(
+                user_id=user_id,
+                request_text=f"图片确认：{confirmation_id}",
+                result=pending.result,
+                confirmation_result=pending.resolution,
+                outcome_type=ConversationOutcome.CONFIRMATION,
+            )
             return pending.result
         if pending.status != "pending":
             raise ValueError(
@@ -334,6 +371,13 @@ class KitchenPipeline:
             result=result,
         )
         assert completed.result is not None
+        self._record_result(
+            user_id=user_id,
+            request_text=f"图片确认：{confirmation_id}",
+            result=completed.result,
+            confirmation_result=resolution,
+            outcome_type=ConversationOutcome.CONFIRMATION,
+        )
         return completed.result
 
     def record_inventory_confirmation(
@@ -365,6 +409,15 @@ class KitchenPipeline:
                 "status": action.status,
                 "result": action.result,
             },
+            outcome_type=ConversationOutcome.CONFIRMATION,
+            execution_trace=[
+                ExecutionTraceEvent(
+                    stage="human_checkpoint",
+                    name="inventory_confirmation",
+                    status="executed" if executed else "cancelled",
+                    detail=f"{decision}; {action.operation}",
+                )
+            ],
         )
 
     def _continue_request(
@@ -576,18 +629,12 @@ class KitchenPipeline:
             allergen_intolerances=self.profile.allergen_intolerances,
             custom_allergens=self.profile.custom_allergens,
             profile_markdown=profile_without_legacy_history(self.profile.markdown),
-            history_segments=self.history.list_recent(user_id),
+            history_segments=self.history.list_context_window(user_id),
             vision_confirmation_result=confirmation_result,
         )
         result = self.agent.run(context, target_language=target_language)
         result.tool_history = [*prior_tool_history, *result.tool_history]
         result.execution_trace = [*trace.events, *result.execution_trace]
-        self._remember(
-            user_id=user_id,
-            request_text=text,
-            result=result,
-            confirmation_result=confirmation_result,
-        )
         return result
 
     def _finish_direct(
@@ -634,7 +681,7 @@ class KitchenPipeline:
             audit_reason_override or regex_result.reason or tool_result.reason
         )
         blocked = not regex_result.passed or not tool_result.passed
-        result = AgentResult(
+        return AgentResult(
             content=(
                 content
                 if not blocked
@@ -645,34 +692,56 @@ class KitchenPipeline:
             tool_history=tool_history,
             execution_trace=trace.events,
         )
-        self._remember(
-            user_id=user_id,
-            request_text=request_text,
-            result=result,
-            confirmation_result=confirmation_result,
-        )
-        return result
 
-    def _remember(
+    def _record_result(
         self,
         *,
         user_id: str,
         request_text: str,
         result: AgentResult,
         confirmation_result: dict[str, object] | None,
-    ) -> None:
-        self.history.append(
+        outcome_type: ConversationOutcome | None = None,
+    ) -> ConversationRecord:
+        if outcome_type is None:
+            if result.awaiting_vision_confirmation:
+                outcome_type = ConversationOutcome.AWAITING_CONFIRMATION
+            elif result.blocked:
+                outcome_type = ConversationOutcome.BLOCKED
+            else:
+                outcome_type = ConversationOutcome.COMPLETED
+        return self.history.append(
             user_id=user_id,
             request=request_text,
             response=result.content,
             tool_history=result.tool_history,
             confirmation_result=confirmation_result,
             audit_reason=result.audit_reason,
+            is_relevant=result.audit_reason != "food_query_irrelevant",
+            outcome_type=outcome_type,
+            blocked=result.blocked,
+            execution_trace=result.execution_trace,
+        )
+
+    def record_failure(
+        self,
+        *,
+        user_id: str,
+        request_text: str,
+        response_text: str,
+        execution_trace: list[ExecutionTraceEvent] | None = None,
+    ) -> ConversationRecord:
+        return self.history.append(
+            user_id=user_id,
+            request=request_text,
+            response=response_text,
+            outcome_type=ConversationOutcome.FAILED,
+            execution_trace=execution_trace or [],
         )
 
 
 def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
     settings = settings or get_settings()
+    ZoneInfo(settings.application_timezone)
     profile = read_user_profile(settings.user_profile_path)
 
     inventory = InventoryRepository(settings.inventory_db_path)
@@ -688,7 +757,7 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
         ttl_minutes=settings.pending_action_ttl_minutes,
         expiry_inferer=expiry_inferer,
     )
-    history = ConversationHistoryRepository(settings.inventory_db_path, max_segments=5)
+    history = ConversationHistoryRepository(settings.inventory_db_path)
     history.initialize()
     vision_confirmations = VisionConfirmationRepository(
         settings.inventory_db_path,
@@ -721,7 +790,7 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
     )
     recipes = RecipeRouter(spoonacular, themealdb, web_search)
     agent = (
-        build_agent(settings, inventory, recipes, actions)
+        build_agent(settings, inventory, recipes, actions, history)
         if settings.deepseek_api_key
         else None
     )

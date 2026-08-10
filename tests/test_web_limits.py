@@ -292,8 +292,9 @@ def test_process_response_includes_backend_execution_trace(
         inventory_db_path=tmp_path / "inventory.db",
         user_profile_path=profile,
     )
+    pipeline = web.build_pipeline(settings)
     monkeypatch.setattr(web, "get_settings", lambda: settings)
-    monkeypatch.setattr(web, "_pipeline", web.build_pipeline(settings))
+    monkeypatch.setattr(web, "_pipeline", pipeline)
     response = client.post(
         "/api/process",
         data={"text": "查询一下当前库存", "language": "zh"},
@@ -306,6 +307,109 @@ def test_process_response_includes_backend_execution_trace(
     assert trace[0]["duration_ms"] >= 0
     assert any(event["name"] == "list_inventory" for event in trace)
     assert any(event["name"] == "regex_audit" for event in trace)
+    stored_trace = [
+        event.model_dump(mode="json")
+        for event in pipeline.history.list_records(web.SHOWCASE_USER_ID)[0].execution_trace
+    ]
+    assert stored_trace == trace
+
+
+class FailureRecordingPipeline:
+    def __init__(self) -> None:
+        self.failures: list[dict[str, object]] = []
+
+    def process_request(self, **kwargs: object) -> object:
+        raise RuntimeError("provider secret must not leak")
+
+    def resolve_vision_confirmation(self, **kwargs: object) -> object:
+        raise RuntimeError("provider secret must not leak")
+
+    def record_failure(self, **kwargs: object) -> None:
+        self.failures.append(kwargs)
+
+
+def test_process_provider_failure_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.web as web
+
+    pipeline = FailureRecordingPipeline()
+    monkeypatch.setattr(web, "get_pipeline", lambda: pipeline)
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/api/process",
+        data={"text": "推荐番茄菜谱", "language": "zh"},
+    )
+
+    assert response.status_code == 502
+    assert len(pipeline.failures) == 1
+    assert pipeline.failures[0]["request_text"] == "推荐番茄菜谱"
+    assert pipeline.failures[0]["response_text"] == response.json()["detail"]
+    assert "secret" not in response.json()["detail"]
+
+
+def test_oversized_text_failure_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.web as web
+
+    pipeline = FailureRecordingPipeline()
+    monkeypatch.setattr(web, "get_pipeline", lambda: pipeline)
+    text = "番" * (MAX_TEXT_CHARS + 1)
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/api/process",
+        data={"text": text, "language": "zh"},
+    )
+
+    assert response.status_code == 400
+    assert len(pipeline.failures) == 1
+    assert pipeline.failures[0]["request_text"] == text
+    assert pipeline.failures[0]["response_text"] == response.json()["detail"]
+
+
+def test_vision_resolution_failure_uses_confirmation_request_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.web as web
+
+    pipeline = FailureRecordingPipeline()
+    monkeypatch.setattr(web, "get_pipeline", lambda: pipeline)
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/api/vision-confirmations/vision_123/resolve",
+        json={"selections": []},
+    )
+
+    assert response.status_code == 502
+    assert len(pipeline.failures) == 1
+    assert pipeline.failures[0]["request_text"] == "图片确认：vision_123"
+    assert pipeline.failures[0]["response_text"] == response.json()["detail"]
+
+
+def test_missing_inventory_confirmation_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.web as web
+
+    class MissingActionService:
+        def confirm(self, action_id: str, user_id: str) -> object:
+            raise KeyError("Pending action not found")
+
+    pipeline = FailureRecordingPipeline()
+    monkeypatch.setattr(web, "get_pipeline", lambda: pipeline)
+    monkeypatch.setattr(web, "get_action_service", lambda: MissingActionService())
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/api/actions/action_missing/confirm"
+    )
+
+    assert response.status_code == 404
+    assert len(pipeline.failures) == 1
+    assert pipeline.failures[0]["request_text"] == (
+        "确认库存操作：action_missing"
+    )
+    assert pipeline.failures[0]["response_text"] == response.json()["detail"]
 
 
 def test_process_rejects_empty_bulk_delete_before_creating_action(

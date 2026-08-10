@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Sequence
@@ -10,12 +11,15 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
 from pydantic import Field
+from PIL import Image
 
+from app.adapters.vision_api import Detection
 from app.adapters.recipe_api import TheMealDbClient
 from app.agent import KitchenAgent
 from app.audit import AuditCode, AuditResult
 from app.config import get_settings
 from app.context import AgentContext, AgentResult
+from app.memory import ConversationOutcome
 from app.pipeline import build_pipeline
 from app.tools.recipe import RecipeRouter
 from app.supervisor import RepairAction, RepairDecision
@@ -234,6 +238,7 @@ def test_failed_subagent_rewrite_uses_one_toolless_main_retry(
     assert result.blocked is False
     assert len(model.bound_tool_names_by_call) == 1
     assert pipeline.actions.repository.list_pending("test") == []
+    assert len(pipeline.history.list_records("test")) == 1
 
 
 def test_missing_recipe_tool_retries_main_with_search_recipes_only(
@@ -327,6 +332,87 @@ def test_non_food_query_is_blocked_before_deepseek(
     assert result.blocked is True
     assert result.audit_reason == "food_query_irrelevant"
     assert "仅支持食谱和食材" in result.content
+    records = pipeline.history.list_records("test")
+    assert len(records) == 1
+    assert records[0].response == result.content
+    assert records[0].is_relevant is False
+    assert records[0].outcome_type == ConversationOutcome.BLOCKED
+    assert records[0].blocked is True
+    assert records[0].execution_trace == result.execution_trace
+    assert pipeline.history.list_context_window("test") == []
+
+
+class LowConfidenceVision:
+    def recognize(self, image_bytes: bytes) -> list[Detection]:
+        assert image_bytes
+        return [Detection(name="土豆", confidence=0.2)]
+
+
+def _valid_png() -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (20, 20), color="white").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_waiting_image_confirmation_and_resolution_are_distinct_records(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    pipeline.vision = LowConfidenceVision()  # type: ignore[assignment]
+    pipeline.agent = CapturingAgent()  # type: ignore[assignment]
+
+    waiting = pipeline.process_request(
+        user_id="test",
+        text="识别后推荐菜谱",
+        image_bytes=_valid_png(),
+    )
+
+    assert waiting.awaiting_vision_confirmation is True
+    confirmation_id = waiting.vision_confirmation.confirmation_id  # type: ignore[union-attr]
+    first = pipeline.history.list_records("test")
+    assert len(first) == 1
+    assert first[0].outcome_type == ConversationOutcome.AWAITING_CONFIRMATION
+    assert first[0].request == "识别后推荐菜谱"
+
+    resolved = pipeline.resolve_vision_confirmation(
+        user_id="test",
+        confirmation_id=confirmation_id,
+        selections=[],
+    )
+
+    assert resolved.content == "已根据上文继续处理。"
+    records = pipeline.history.list_records("test")
+    assert len(records) == 2
+    assert records[1].outcome_type == ConversationOutcome.CONFIRMATION
+    assert records[1].request == f"图片确认：{confirmation_id}"
+    assert records[1].confirmation_result == {
+        "type": "vision",
+        "confirmation_id": confirmation_id,
+        "selected": [],
+        "dropped": [
+            {
+                "candidate_index": 0,
+                "name": "土豆",
+                "confidence": 0.2,
+            }
+        ],
+    }
+
+
+def test_inventory_confirmation_is_recorded_as_confirmation(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    action = pipeline.actions.propose_add("test", "牛奶", "一盒")
+    executed = pipeline.actions.confirm(action.action_id, "test")
+
+    pipeline.record_inventory_confirmation(action=executed, decision="confirm")
+
+    records = pipeline.history.list_records("test")
+    assert len(records) == 1
+    assert records[0].outcome_type == ConversationOutcome.CONFIRMATION
+    assert records[0].is_relevant is True
+    assert records[0].confirmation_result["decision"] == "confirm"  # type: ignore[index]
 
 
 def test_simple_write_reaches_agent_and_preserves_quantity_text(
@@ -510,7 +596,7 @@ def test_explicit_text_cancellation_bypasses_models_with_fixed_response(
     assert result.content == "已停止处理；没有执行新的库存变更。"
     assert result.blocked is False
     assert result.audit_reason == AuditCode.USER_CANCELLED.value
-    assert pipeline.history.list_recent("test")[0].audit_reason == (
+    assert pipeline.history.list_records("test")[0].audit_reason == (
         AuditCode.USER_CANCELLED.value
     )
     assert classifier.calls == 0
@@ -699,11 +785,17 @@ def test_contextual_route_bypasses_classifier_and_supplies_recent_history(
     agent = CapturingAgent()
     pipeline.food_classifier = classifier  # type: ignore[assignment]
     pipeline.agent = agent  # type: ignore[assignment]
-    pipeline.history.append(
-        user_id="test",
-        request="土豆怎么处理",
-        response="可以先清洗土豆。",
-    )
+    for index in range(14):
+        pipeline.history.append(
+            user_id="test",
+            request=f"土豆步骤 {index}",
+            response=f"回答 {index}",
+            is_relevant=index not in {11, 13},
+            audit_reason=(
+                "food_query_irrelevant" if index in {11, 13} else None
+            ),
+            created_at=datetime(2026, 8, 10, 0, index, tzinfo=UTC),
+        )
 
     result = pipeline.process_request(user_id="test", text="下一步呢")
 
@@ -711,8 +803,21 @@ def test_contextual_route_bypasses_classifier_and_supplies_recent_history(
     assert classifier.calls == 0
     assert len(agent.contexts) == 1
     assert [segment.request for segment in agent.contexts[0].history_segments] == [
-        "土豆怎么处理"
+        "土豆步骤 2",
+        "土豆步骤 3",
+        "土豆步骤 4",
+        "土豆步骤 5",
+        "土豆步骤 6",
+        "土豆步骤 7",
+        "土豆步骤 8",
+        "土豆步骤 9",
+        "土豆步骤 10",
+        "土豆步骤 12",
     ]
+    assert all(
+        set(segment.model_dump()) == {"request", "response"}
+        for segment in agent.contexts[0].history_segments
+    )
     assert result.execution_trace[0].name == "deterministic_route"
     assert result.execution_trace[0].detail == "contextual"
 

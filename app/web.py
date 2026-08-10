@@ -94,6 +94,20 @@ def get_proactive_service() -> ProactiveService:
     return _proactive_service
 
 
+def _record_failure(
+    *,
+    request_text: str,
+    detail: str,
+    trace: list[ExecutionTraceEvent] | None = None,
+) -> None:
+    get_pipeline().record_failure(
+        user_id=SHOWCASE_USER_ID,
+        request_text=request_text,
+        response_text=detail,
+        execution_trace=trace,
+    )
+
+
 @app.get("/api/status")
 def service_status() -> dict[str, object]:
     settings = get_settings()
@@ -189,28 +203,42 @@ def pending_actions() -> dict[str, object]:
 
 @app.post("/api/actions/{action_id}/confirm")
 def confirm_action(action_id: str) -> dict[str, object]:
+    request_text = f"确认库存操作：{action_id}"
     try:
         action = get_action_service().confirm(action_id, SHOWCASE_USER_ID)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        detail = str(exc)
+        _record_failure(request_text=request_text, detail=detail)
+        raise HTTPException(status_code=404, detail=detail) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        detail = str(exc)
+        _record_failure(request_text=request_text, detail=detail)
+        raise HTTPException(status_code=403, detail=detail) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        detail = str(exc)
+        _record_failure(request_text=request_text, detail=detail)
+        raise HTTPException(status_code=409, detail=detail) from exc
     get_pipeline().record_inventory_confirmation(action=action, decision="confirm")
     return {"action": action.model_dump(mode="json")}
 
 
 @app.post("/api/actions/{action_id}/cancel")
 def cancel_action(action_id: str) -> dict[str, object]:
+    request_text = f"取消库存操作：{action_id}"
     try:
         action = get_action_service().cancel(action_id, SHOWCASE_USER_ID)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        detail = str(exc)
+        _record_failure(request_text=request_text, detail=detail)
+        raise HTTPException(status_code=404, detail=detail) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        detail = str(exc)
+        _record_failure(request_text=request_text, detail=detail)
+        raise HTTPException(status_code=403, detail=detail) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        detail = str(exc)
+        _record_failure(request_text=request_text, detail=detail)
+        raise HTTPException(status_code=409, detail=detail) from exc
     get_pipeline().record_inventory_confirmation(action=action, decision="cancel")
     return {
         "action": action.model_dump(mode="json"),
@@ -223,6 +251,7 @@ def resolve_vision_confirmation(
     confirmation_id: str,
     payload: VisionResolution,
 ) -> dict[str, object]:
+    request_text = f"图片确认：{confirmation_id}"
     try:
         result = get_pipeline().resolve_vision_confirmation(
             user_id=SHOWCASE_USER_ID,
@@ -233,18 +262,26 @@ def resolve_vision_confirmation(
             ],
         )
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        detail = str(exc)
+        _record_failure(request_text=request_text, detail=detail)
+        raise HTTPException(status_code=404, detail=detail) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        detail = str(exc)
+        _record_failure(request_text=request_text, detail=detail)
+        raise HTTPException(status_code=403, detail=detail) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        detail = str(exc)
+        _record_failure(request_text=request_text, detail=detail)
+        raise HTTPException(status_code=409, detail=detail) from exc
     except Exception as exc:
+        detail = (
+            f"继续处理请求失败：{type(exc).__name__}。"
+            "请检查本地 API 配置与服务状态。"
+        )
+        _record_failure(request_text=request_text, detail=detail)
         raise HTTPException(
             status_code=502,
-            detail=(
-                f"继续处理请求失败：{type(exc).__name__}。"
-                "请检查本地 API 配置与服务状态。"
-            ),
+            detail=detail,
         ) from exc
     return result.model_dump(mode="json")
 
@@ -257,59 +294,105 @@ async def process_request(
 ) -> dict[str, object]:
     validation_started = perf_counter()
     if len(text) > MAX_TEXT_CHARS:
+        detail = f"文字输入不能超过 {MAX_TEXT_CHARS} 个字符。"
+        trace = [
+            ExecutionTraceEvent(
+                stage="request",
+                name="input_validation",
+                status="failed",
+                detail="text too long",
+                duration_ms=round((perf_counter() - validation_started) * 1000),
+            )
+        ]
+        _record_failure(request_text=text, detail=detail, trace=trace)
         raise HTTPException(
             status_code=400,
-            detail=f"文字输入不能超过 {MAX_TEXT_CHARS} 个字符。",
+            detail=detail,
         )
 
     image_bytes: bytes | None = None
     if image is not None:
         image_bytes = await image.read(MAX_IMAGE_BYTES + 1)
         if len(image_bytes) > MAX_IMAGE_BYTES:
+            detail = f"图片不能超过 {MAX_IMAGE_BYTES // 1024 // 1024} MiB。"
+            trace = [
+                ExecutionTraceEvent(
+                    stage="request",
+                    name="input_validation",
+                    status="failed",
+                    detail="image too large",
+                    duration_ms=round(
+                        (perf_counter() - validation_started) * 1000
+                    ),
+                )
+            ]
+            _record_failure(request_text=text, detail=detail, trace=trace)
             raise HTTPException(
                 status_code=413,
-                detail=f"图片不能超过 {MAX_IMAGE_BYTES // 1024 // 1024} MiB。",
+                detail=detail,
             )
         try:
             validate_image(image_bytes)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            detail = str(exc)
+            trace = [
+                ExecutionTraceEvent(
+                    stage="request",
+                    name="input_validation",
+                    status="failed",
+                    detail="invalid image",
+                    duration_ms=round(
+                        (perf_counter() - validation_started) * 1000
+                    ),
+                )
+            ]
+            _record_failure(request_text=text, detail=detail, trace=trace)
+            raise HTTPException(status_code=400, detail=detail) from exc
     validation_duration_ms = round((perf_counter() - validation_started) * 1000)
+    validation_trace = ExecutionTraceEvent(
+        stage="request",
+        name="input_validation",
+        status="passed",
+        detail=(
+            f"text={len(text)} character(s); "
+            f"image={len(image_bytes) if image_bytes is not None else 0} byte(s)"
+        ),
+        duration_ms=validation_duration_ms,
+    )
     try:
         result = get_pipeline().process_request(
             user_id=SHOWCASE_USER_ID,
             text=text,
             image_bytes=image_bytes,
             target_language=language,
+            initial_trace=[validation_trace],
         )
     except VisionApiError as exc:
+        detail = f"百度果蔬识别失败（错误码 {exc.code}）：{exc.user_message}"
+        _record_failure(request_text=text, detail=detail, trace=[validation_trace])
         raise HTTPException(
             status_code=502,
-            detail=f"百度果蔬识别失败（错误码 {exc.code}）：{exc.user_message}",
+            detail=detail,
         ) from exc
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        detail = str(exc)
+        _record_failure(request_text=text, detail=detail, trace=[validation_trace])
+        raise HTTPException(status_code=404, detail=detail) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail = str(exc)
+        _record_failure(request_text=text, detail=detail, trace=[validation_trace])
+        raise HTTPException(status_code=400, detail=detail) from exc
     except Exception as exc:
         # Keep credentials and raw provider responses out of the browser.
+        detail = (
+            f"处理请求失败：{type(exc).__name__}。"
+            "请检查本地 API 配置与服务状态。"
+        )
+        _record_failure(request_text=text, detail=detail, trace=[validation_trace])
         raise HTTPException(
             status_code=502,
-            detail=f"处理请求失败：{type(exc).__name__}。请检查本地 API 配置与服务状态。",
+            detail=detail,
         ) from exc
-    result.execution_trace.insert(
-        0,
-        ExecutionTraceEvent(
-            stage="request",
-            name="input_validation",
-            status="passed",
-            detail=(
-                f"text={len(text)} character(s); "
-                f"image={len(image_bytes) if image_bytes is not None else 0} byte(s)"
-            ),
-            duration_ms=validation_duration_ms,
-        ),
-    )
     return result.model_dump(mode="json")
 
 

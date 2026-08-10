@@ -18,7 +18,7 @@ Kitchen Inventory Agent 解决的不是“把食材名称存进数据库”这�
 | 请求路由 | 问候、明确库存指令和依赖上文的追问先走确定性／上下文规则；仍未决的文本才交给原有 FastText 二分类器 |
 | 图片识别 | 接入百度果蔬识别 API，校验图片格式、尺寸和长宽比，并按置信度分层处理结果 |
 | 菜谱检索 | Spoonacular 主检索、TheMealDB 回退、DeepSeek 官方 Web Search 最终兜底，统一结果并执行过敏原过滤 |
-| 对话记忆 | 请求、最终回答、工具记录和确认结果写入 SQLite，每个用户保留最近 5 段非递归历史 |
+| 对话记忆 | 完整交互永久追加到 SQLite；Agent 自动上下文仅注入最近 10 段相关对话的输入与输出，并支持按时间范围显式召回 |
 | 输出审核与轨迹 | 工具快照生成固定库存回答；受限子 Agent 可修复一次表达问题，主 Agent 最多重试一次，随后固定安全兜底 |
 
 ## 系统架构
@@ -43,9 +43,9 @@ flowchart TD
     J -->|无需低置信度确认| H
     L --> H
 
-    F --> M["9 个受约束工具"]
+    F --> M["10 个受约束工具"]
     H --> M
-    M --> N["实例读取 / 库存提案 / 菜谱搜索"]
+    M --> N["实例读取 / 库存提案 / 菜谱搜索 / 历史召回"]
     N --> E
     N --> O["Spoonacular → TheMealDB → DeepSeek Web Search"]
 
@@ -167,7 +167,7 @@ FastText 的模型、数据、训练与推理文件没有因这套路由调整�
 
 ### 6. LangChain Agent 与实例工具边界
 
-复杂请求由基于 `ChatOpenAI` 兼容接口的 DeepSeek 模型处理，并通过 LangChain `create_agent` 组织以下 9 个工具：
+复杂请求由基于 `ChatOpenAI` 兼容接口的 DeepSeek 模型处理，并通过 LangChain `create_agent` 组织以下 10 个工具：
 
 ```text
 list_inventory_instances
@@ -179,6 +179,7 @@ propose_remove_inventory_instance
 propose_remove_all_inventory_instances
 propose_confirm_inventory_instance
 search_recipes
+search_conversation_history_by_time
 ```
 
 实例写工具还有一层调用期约束：替换、删除和校准前必须读取真实实例。同名查询只有一个结果时可以确定目标；存在多个同名实例时会标记歧义，必须由用户提供完整实例 ID 后才能提出单实例变更。即使两个 UUID 共享旧版显示前缀，短前缀也不会解除歧义。按名称删除全部实例也要求先查到该名称。
@@ -214,11 +215,13 @@ Spoonacular 当前支持 `max-used-ingredients` 和 `min-missing-ingredients` �
 
 这不是常驻调度器：没有定时后台任务、浏览器推送、邮件或移动通知，也不会因建议而修改库存、生成待确认操作、改写对话历史、丢弃过期食材或代为采购。
 
-### 10. 五段对话记忆
+### 10. 追加式对话历史与十段短期上下文
 
-长期用户画像保存在 Markdown 中；对话历史使用 SQLite 保存当前轮请求、最终回答、工具记录和确认结果。每个用户最多保留最近 5 段，构建上下文时不会把旧历史再次写入新记录，旧版 Markdown 的静态历史摘要也会剔除。
+长期用户画像保存在 Markdown 中；完整对话使用 SQLite 按用户和 UTC 时间永久追加，不会因上下文窗口而删除。每条内部记录保存请求、最终回答、工具记录、确认结果、审核原因、结果类型、相关性、拦截状态和最终执行轨迹。旧版本已经裁剪掉的记录无法通过迁移恢复，仍存在的旧记录会以增量加列方式保留。
 
-库存确认结果和完成后的图片确认结果会进入历史。领域分类直接拦截和等待图片确认的中间响应还没有统一为完整历史段。主动检查只读取近期历史，不追加或修改历史。
+Agent 自动上下文先过滤 `food_query_irrelevant`，再取最近 10 段相关记录并按时间正序注入；每段只有用户输入和最终输出，不含工具、审核或确认结构。领域外响应本身仍会永久保存。库存确认／取消、图片等待与恢复、安全兜底以及应用可控失败也统一形成独立历史记录；内部重试草稿不会单独写入。
+
+`search_conversation_history_by_time` 接收带时区的起止时间，按半开区间查询当前用户的完整历史，默认返回最新 20 段、最多 100 段。显式召回可以包含被标记为无关的历史，但只向 Agent 返回 `created_at`、输入和输出；`user_id` 由当前上下文绑定，模型不能指定其他用户。相对日期依据带时区的当前时间和 `APP_TIMEZONE`（默认 `Asia/Shanghai`）转换。
 
 ### 11. 规范化库存回答与实例级工具审核
 
@@ -244,7 +247,7 @@ Spoonacular 当前支持 `max-used-ingredients` 和 `min-missing-ingredients` �
 
 `/api/process` 请求以 `stage / name / status / detail / duration_ms` 记录实际执行阶段。轨迹显示 `deterministic_route` 是否命中，以及未决文本的 FastText 调用、`unavailable` 或 `fail-open`；确定性／上下文文本路径没有单独的 classifier-skipped 事件，其绕过行为由 `deterministic_route` 推断，图片请求才显式记录分类器 `skipped`。进入相应链路后，轨迹还包含实例读取、提案创建、外部 API、DeepSeek Agent、正则审核和工具调用审核；触发恢复时额外记录 `response_audit`、`supervisor_classification`、`subagent_rewrite`、`subagent_reaudit`、`main_agent_retry` 和 `final_fallback`。新增日期无法推断时记录安全的 `expiry_inference / degraded / unknown expiry` 事件。
 
-异常轨迹只保存异常类型和安全摘要，避免把密钥或原始服务响应返回浏览器。轨迹仍随单次响应返回，没有跨请求统计存储，也没有 Token、费用或首字延迟指标。
+异常轨迹只保存异常类型和安全摘要，避免把密钥或原始服务响应返回浏览器。最终轨迹既随单次响应返回，也随该次完整历史记录写入 SQLite；系统仍没有跨请求统计聚合，也没有 Token、费用或首字延迟指标。
 
 ## 关键设计取舍
 
@@ -279,9 +282,9 @@ pytest 自动化覆盖重点包括：
 - 确定性／上下文路由绕过分类器，完整 ID 替换／删除／校准直接创建 pending，未决领域请求进入未改动的 FastText；
 - 共享短前缀歧义、Agent 完整 ID 授权、相对用量整项替换，以及规范化审核拒绝散文、表格、引用、省略 ID、篡改数量和中英文执行声明；
 - 严格 24 小时访问边界、并发抑制、候选优先级、100 字符单句模板和只读副作用检查；
-- 图片格式与置信度、过敏原参数、菜谱主备路由、混合结果的中英文原料／步骤／来源与空结果、用户画像初始化与过敏原读写、近期历史传入上下文及主动检查的只读性、HTTP 输入限制、前端静态壳与实例 API 响应、Node 执行的安全 Markdown 链接渲染，以及 Linux 脚本契约。
+- 图片格式与置信度、过敏原参数、菜谱主备路由、混合结果的中英文原料／步骤／来源与空结果、用户画像初始化与过敏原读写、十段相关输入／输出上下文、按时间召回、完整交互持久化及主动检查的只读性、HTTP 输入限制、前端静态壳与实例 API 响应、Node 执行的安全 Markdown 链接渲染，以及 Linux 脚本契约。
 
-当前 pytest 已直接覆盖文本取消、确认区取消和最终审核码历史持久化；尚未直接覆盖提案到期、跨用户确认／取消或对话历史保留最近 5 段时的裁剪／顺序边界。它会在 Node 中执行独立 Markdown 渲染器并验证 action JSON 和前端静态契约，但仍不会执行整个 `frontend/app.js` 观察真实 DOM。
+当前 pytest 已直接覆盖文本取消、确认区取消、最终审核码、永久追加迁移、同时间稳定顺序、十段相关窗口、时区与半开时间边界、用户隔离、等待确认、恢复请求和应用可控失败的持久化；尚未直接覆盖提案到期或跨用户确认／取消。它会在 Node 中执行独立 Markdown 渲染器并验证 action JSON 和前端静态契约，但仍不会执行整个 `frontend/app.js` 观察真实 DOM。
 
 本轮另用隔离数据库启动 Uvicorn，并以真实 headless Chromium 执行页面脚本。渲染后的 DOM 同时出现 `inventory.add`、`replace`、`remove`、`remove_all`、`confirm` 五类有效预览，包含两个同名实例、两个完整可见 ID、拟新增／拟替换数量、日期来源、上次确认时间和预计删除数量。追加的异常场景通过 API 注入一个空预览：对应卡片呈现 `data-preview-ready=false`，确认按钮同时带 `disabled`、`hidden` 和 `aria-disabled=true`；自动提交的混合结果把审核过的 `https://recipes.example/tomato-soup` 渲染为带 `_blank` 和 `noopener noreferrer` 的真实锚点，并保留英文原料和步骤。页面加载日志只有一次 `POST /api/proactive-check`，`markdown.js`、`app.js` 和自动提交均返回 200，Chromium 输出没有 JavaScript `SyntaxError`、`ReferenceError`、`TypeError` 或 `Uncaught`。这是真实运行烟雾证据，但完整 `frontend/app.js` 场景尚未纳入可重复的 CI 浏览器测试，仍是已知覆盖缺口。
 
@@ -314,7 +317,7 @@ pytest 自动化覆盖重点包括：
 | 路由 | 确定性／上下文优先，未决请求使用 FastText，分类失败时 fail-open | 规则语言覆盖有限，二分类数据规模与边界精度仍需提升 |
 | 图片确认 | 持久化候选、编辑／放弃、原请求恢复和结果保存 | 恢复执行尚缺原子领取与更完整的并发保护 |
 | 菜谱检索 | 两个外部源、过敏原工具校验、结果过滤，以及规范化中英文详情／空结果和安全来源链接 | 没有本地检索、向量召回、营养求解或多日菜单规划 |
-| 对话与审计 | 五段历史、实例工具记录和关键事实一致性审核 | 早期返回未完全统一持久化，审核不覆盖任意自然语言事实 |
+| 对话与审计 | 永久追加完整历史、十段相关输入／输出窗口、时间范围召回、实例工具记录和关键事实一致性审核 | 没有关键词／语义检索、历史压缩或用户可操作的删除策略；审核不覆盖任意自然语言事实 |
 
 此外，当前仍没有独立结构化 Plan、食材／营养标准化 API、通用网页搜索、根据菜谱份数生成成组扣减提案、经确认写回饮食偏好候选或账户登录与多租户鉴权。
 
@@ -326,13 +329,13 @@ app/
 ├── adapters/
 │   ├── recipe_api.py         # Spoonacular / TheMealDB / DeepSeek Web Search 适配器
 │   └── vision_api.py         # 百度果蔬识别适配器
-├── agent.py                  # LangChain Agent 与 9 个工具
+├── agent.py                  # LangChain Agent 与 10 个工具
 ├── audit.py                  # 正则与实例级工具调用审核
 ├── config.py                 # 环境变量配置
 ├── context.py                # Agent 上下文和响应模型
 ├── expiry.py                 # 结构化保质期推断
 ├── intent.py                 # 确定性／上下文路由与意图匹配
-├── memory.py                 # 用户画像和五段对话历史
+├── memory.py                 # 用户画像、追加式对话历史与时间召回
 ├── pipeline.py               # 顶层请求编排
 ├── proactive.py              # 访问节流、候选选择与固定提醒模板
 ├── prompts.py                # Agent 实例语义约束
@@ -349,7 +352,7 @@ app/
 classifier/                   # 未改动的 FastText 数据、训练、评估与运行时
 frontend/                     # 页面、实例库存、主动便笺和执行轨迹
 scripts/                      # Linux Bash 启停脚本
-tests/                        # 260 项 pytest 测试
+tests/                        # pytest 自动化测试
 main.py                       # CLI 入口
 ```
 
@@ -383,6 +386,7 @@ cp .env.example .env
 | `THEMEALDB_API_KEY` | `1` | TheMealDB API 路径密钥 |
 | `THEMEALDB_BASE_URL` | `https://www.themealdb.com/api/json/v1` | TheMealDB API 地址 |
 | `HTTP_TIMEOUT_SECONDS` | `20` | 外部 HTTP 与模型请求超时 |
+| `APP_TIMEZONE` | `Asia/Shanghai` | 解释相对历史时间时使用的 IANA 时区；历史仍统一保存为 UTC |
 
 ### 本地状态与分类器
 

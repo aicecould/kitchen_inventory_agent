@@ -6,15 +6,16 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from time import perf_counter
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from langchain.agents import create_agent
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from app.actions import InventoryActionService
 from app.allergens import AllergenIntolerance
@@ -29,6 +30,7 @@ from app.audit import (
 )
 from app.config import Settings
 from app.context import AgentContext, AgentResult
+from app.memory import ConversationHistoryRepository
 from app.prompts import (
     ANSWER_REWRITE_SYSTEM_PROMPT,
     RECIPE_RECOVERY_SYSTEM_PROMPT,
@@ -58,6 +60,22 @@ class AllergenTranslation(BaseModel):
         return value.strip()
 
 
+class HistoryTimeRangeInput(BaseModel):
+    start_at: datetime
+    end_at: datetime
+    limit: int = Field(default=20, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "HistoryTimeRangeInput":
+        if self.start_at.tzinfo is None or self.start_at.utcoffset() is None:
+            raise ValueError("start_at must include a timezone")
+        if self.end_at.tzinfo is None or self.end_at.utcoffset() is None:
+            raise ValueError("end_at must include a timezone")
+        if self.start_at >= self.end_at:
+            raise ValueError("start_at must be earlier than end_at")
+        return self
+
+
 _ENGLISH_API_TERM = re.compile(r"^[A-Za-z][A-Za-z0-9 '&()/.+-]*$")
 _ALLERGEN_TOOL_ERRORS = frozenset(
     {
@@ -74,6 +92,8 @@ class KitchenAgent:
     inventory: InventoryRepository
     recipes: RecipeRouter
     actions: InventoryActionService
+    history: ConversationHistoryRepository | None = None
+    application_timezone: str = "Asia/Shanghai"
     recursion_limit: int = 10
     max_input_chars: int = 12000
     repair_decider: (
@@ -82,7 +102,11 @@ class KitchenAgent:
 
     def run(self, context: AgentContext, target_language: str = "zh") -> AgentResult:
         trace = TraceRecorder()
-        user_message = self._user_message(context, target_language)
+        user_message = self._user_message(
+            context,
+            target_language,
+            application_timezone=self.application_timezone,
+        )
         if len(user_message) > self.max_input_chars:
             trace.record("agent", "input_limit", "blocked", "input too long")
             raise ValueError(
@@ -534,7 +558,7 @@ class KitchenAgent:
                 trace=trace.record,
             )
 
-        return [
+        tools = [
             list_inventory_instances,
             find_inventory_instances,
             get_inventory_instance,
@@ -545,6 +569,47 @@ class KitchenAgent:
             propose_confirm_inventory_instance,
             search_recipes,
         ]
+        if self.history is not None:
+            history_repository = self.history
+
+            @tool
+            def search_conversation_history_by_time(
+                start_at: str,
+                end_at: str,
+                limit: int = 20,
+            ) -> list[dict[str, object]] | dict[str, object]:
+                """Recall this user's input and output in an explicit time range."""
+                try:
+                    validated = HistoryTimeRangeInput(
+                        start_at=start_at,
+                        end_at=end_at,
+                        limit=limit,
+                    )
+                except ValidationError:
+                    return {
+                        "error": {
+                            "code": "INVALID_HISTORY_TIME_RANGE",
+                            "message": (
+                                "时间范围必须使用带时区的有效起止时间，"
+                                "且 limit 为 1 到 100。"
+                            ),
+                        }
+                    }
+                records = trace.run(
+                    "database",
+                    "search_conversation_history_by_time",
+                    lambda: history_repository.search_by_time(
+                        context.user_id,
+                        validated.start_at,
+                        validated.end_at,
+                        limit=validated.limit,
+                    ),
+                    lambda values: f"{len(values)} record(s)",
+                )
+                return [item.model_dump(mode="json") for item in records]
+
+            tools.append(search_conversation_history_by_time)
+        return tools
 
     @staticmethod
     def _profile_values(context: AgentContext, field: str) -> list[str]:
@@ -564,10 +629,25 @@ class KitchenAgent:
         return []
 
     @staticmethod
-    def _user_message(context: AgentContext, target_language: str) -> str:
+    def _user_message(
+        context: AgentContext,
+        target_language: str,
+        *,
+        current_time: datetime | None = None,
+        application_timezone: str = "Asia/Shanghai",
+    ) -> str:
+        timezone = ZoneInfo(application_timezone)
+        if current_time is None:
+            reference = datetime.now(timezone)
+        else:
+            if current_time.tzinfo is None or current_time.utcoffset() is None:
+                raise ValueError("current_time must be timezone-aware")
+            reference = current_time.astimezone(timezone)
         payload = {
             "request": context.request_text,
-            "current_date": date.today().isoformat(),
+            "current_date": reference.date().isoformat(),
+            "current_time": reference.isoformat(),
+            "application_timezone": application_timezone,
             "intent_hint": context.intent,
             "ingredients": [item.model_dump(mode="json") for item in context.ingredients],
             "allergens": context.allergens,
@@ -634,6 +714,7 @@ def build_agent(
     inventory: InventoryRepository,
     recipes: RecipeRouter,
     actions: InventoryActionService,
+    history: ConversationHistoryRepository,
 ) -> KitchenAgent:
     settings.require("deepseek_api_key", "deepseek_model", "deepseek_base_url")
     model = ChatOpenAI(
@@ -650,6 +731,8 @@ def build_agent(
         inventory=inventory,
         recipes=recipes,
         actions=actions,
+        history=history,
+        application_timezone=settings.application_timezone,
         recursion_limit=settings.agent_recursion_limit,
         max_input_chars=settings.deepseek_max_input_chars,
     )

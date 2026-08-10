@@ -25,6 +25,7 @@ class Settings:
     themealdb_base_url: str
     inventory_db_path: Path
     user_profile_path: Path
+    application_timezone: str
     http_timeout_seconds: float
     agent_recursion_limit: int
     deepseek_max_output_tokens: int
@@ -64,6 +65,7 @@ def get_settings() -> Settings:
         user_profile_path=Path(
             os.getenv("USER_PROFILE_PATH", "data/user_profile.md")
         ),
+        application_timezone=os.getenv("APP_TIMEZONE", "Asia/Shanghai"),
         http_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS", "20")),
         agent_recursion_limit=int(os.getenv("AGENT_RECURSION_LIMIT", "10")),
         deepseek_max_output_tokens=int(
