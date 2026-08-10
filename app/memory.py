@@ -12,19 +12,14 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from app.context import ExecutionTraceEvent, HistoryExcerpt
-
-DEFAULT_USER_PROFILE_TEMPLATE = (
-    Path(__file__).resolve().parent / "templates" / "user_profile.md"
+from app.profile import (
+    DEFAULT_USER_PROFILE_TEMPLATE,
+    UserProfile,
+    load_user_profile,
+    parse_user_profile,
+    profile_without_legacy_history,
+    read_user_profile,
 )
-
-
-class UserProfile(BaseModel):
-    markdown: str
-    allergens: list[str] = Field(default_factory=list)
-    allergen_intolerances: list[str] = Field(default_factory=list)
-    custom_allergens: list[str] = Field(default_factory=list)
-    preferences: list[str] = Field(default_factory=list)
-    history: list[str] = Field(default_factory=list)
 
 
 class ConversationOutcome(StrEnum):
@@ -303,59 +298,6 @@ def _as_utc_bound(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("history time bounds must be timezone-aware")
     return value.astimezone(UTC)
-
-
-def load_user_profile(path: Path) -> str:
-    if not path.exists():
-        template = DEFAULT_USER_PROFILE_TEMPLATE.read_text(encoding="utf-8")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with path.open("x", encoding="utf-8", newline="\n") as handle:
-                handle.write(template)
-        except FileExistsError:
-            pass
-    return path.read_text(encoding="utf-8")
-
-
-def parse_user_profile(markdown: str) -> UserProfile:
-    sections: dict[str, list[str]] = {}
-    current = ""
-    for raw_line in markdown.splitlines():
-        line = raw_line.strip()
-        if line.startswith("## "):
-            current = line[3:].strip()
-            sections.setdefault(current, [])
-        elif current and line.startswith("- "):
-            value = line[2:].strip()
-            if value and value not in {"待填写", "暂无"}:
-                sections[current].append(value)
-
-    broad = sections.get("广义过敏原", [])
-    custom = [*sections.get("自定义过敏食材", []), *sections.get("过敏原", [])]
-    return UserProfile(
-        markdown=markdown,
-        allergens=list(dict.fromkeys([*broad, *custom])),
-        allergen_intolerances=broad,
-        custom_allergens=list(dict.fromkeys(custom)),
-        preferences=sections.get("饮食偏好", []),
-        history=sections.get("历史摘要", []),
-    )
-
-
-def read_user_profile(path: Path) -> UserProfile:
-    return parse_user_profile(load_user_profile(path))
-
-
-def profile_without_legacy_history(markdown: str) -> str:
-    """Remove the old Markdown history section before building Agent context."""
-    retained: list[str] = []
-    skipping = False
-    for line in markdown.splitlines():
-        if line.startswith("## "):
-            skipping = line[3:].strip() == "历史摘要"
-        if not skipping:
-            retained.append(line)
-    return "\n".join(retained).rstrip()
 
 
 def write_user_allergens(
