@@ -9,7 +9,7 @@ from threading import Barrier
 import pytest
 
 from app.config import get_settings
-from app.context import HistorySegment
+from app.context import HistoryExcerpt
 from app.pipeline import KitchenPipeline, build_pipeline
 from app.proactive import (
     ProactiveService,
@@ -153,7 +153,7 @@ def test_valid_model_reminder_uses_existing_settings_and_recent_history(
     message = generator.generate(
         {"expired": [], "expiring": [candidate("牛奶")], "stale": []},
         [candidate("牛奶")],
-        [HistorySegment(request="昨天买了什么？", response="买了牛奶。")],
+        [HistoryExcerpt(request="昨天买了什么？", response="买了牛奶。")],
     )
 
     assert message == "有食材将在3天内过期，请优先使用。"
@@ -392,14 +392,14 @@ def test_service_validates_model_restock_selection_against_real_inventory(
     )
     service.visits.check_and_touch("u", scan_time - timedelta(hours=25))
     inventory_before = pipeline.inventory.list_instances()
-    history_before = pipeline.history.list_recent("u")
+    history_before = pipeline.history.list_context_window("u")
 
     message = service.check("u", now=scan_time)
 
     assert message == expected
     assert pipeline.inventory.list_instances() == inventory_before
     assert pipeline.actions.repository.list_pending("u") == []
-    assert pipeline.history.list_recent("u") == history_before
+    assert pipeline.history.list_context_window("u") == history_before
 
 
 def test_service_does_not_force_restock_when_provider_fails(
@@ -418,7 +418,7 @@ def test_service_does_not_force_restock_when_provider_fails(
     )
     service.visits.check_and_touch("u", scan_time - timedelta(hours=25))
     inventory_before = pipeline.inventory.list_instances()
-    history_before = pipeline.history.list_recent("u")
+    history_before = pipeline.history.list_context_window("u")
 
     assert pipeline.inventory.reminder_candidates(scan_time) == {
         "expired": [],
@@ -428,7 +428,7 @@ def test_service_does_not_force_restock_when_provider_fails(
     assert service.check("u", now=scan_time) is None
     assert pipeline.inventory.list_instances() == inventory_before
     assert pipeline.actions.repository.list_pending("u") == []
-    assert pipeline.history.list_recent("u") == history_before
+    assert pipeline.history.list_context_window("u") == history_before
 
 
 @pytest.mark.parametrize(
@@ -470,5 +470,5 @@ def test_service_uses_real_candidate_boundaries_without_inventory_writes(
         assert expected_fragment in message
     assert pipeline.inventory.list_instances() == before
     assert pipeline.actions.repository.list_pending("u") == []
-    assert pipeline.history.list_recent("u") == []
+    assert pipeline.history.list_context_window("u") == []
     assert service.check("u", now=scan_time + timedelta(seconds=1)) is None

@@ -7,7 +7,7 @@ import pytest
 from app.actions import InventoryActionService, PendingActionRepository
 from app.adapters.recipe_api import TheMealDbClient
 from app.agent import KitchenAgent
-from app.context import AgentContext, HistorySegment
+from app.context import AgentContext, HistoryExcerpt
 from app.prompts import SYSTEM_PROMPT
 from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
@@ -200,19 +200,12 @@ def test_exact_get_cannot_choose_duplicate_from_history_without_user_id_selectio
     inventory, actions, _ = inventory_tools(tmp_path)
     first = inventory.add_instance("番茄", "2个", None, "unknown")
     second = inventory.add_instance("番茄", "500g", None, "unknown")
-    history = HistorySegment(
+    history = HistoryExcerpt(
         request="查看番茄还有多少",
         response=(
             f"番茄 [{first['instance_id']}]：2个\n"
             f"番茄 [{second['instance_id']}]：500g"
         ),
-        tool_history=[
-            {
-                "tool": "find_inventory_instances",
-                "arguments": {"name": "番茄"},
-                "result": [first, second],
-            }
-        ],
     )
     agent = KitchenAgent(
         model=None,  # type: ignore[arg-type]

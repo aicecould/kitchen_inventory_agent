@@ -1,6 +1,8 @@
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from app.context import ExecutionTraceEvent
 from app.memory import (
@@ -96,6 +98,53 @@ def test_history_full_record_round_trips(tmp_path: Path) -> None:
     assert saved.created_at == datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
 
 
+def test_context_window_skips_irrelevant_rows_before_taking_ten(
+    tmp_path: Path,
+) -> None:
+    repository = ConversationHistoryRepository(tmp_path / "history.db")
+    repository.initialize()
+    base = datetime(2026, 8, 1, tzinfo=UTC)
+    for index in range(14):
+        repository.append(
+            user_id="u",
+            request=f"q{index}",
+            response=f"a{index}",
+            is_relevant=index not in {11, 13},
+            tool_history=[{"secret": index}],
+            audit_reason=(
+                "food_query_irrelevant" if index in {11, 13} else None
+            ),
+            created_at=base + timedelta(minutes=index),
+        )
+
+    window = repository.list_context_window("u")
+
+    assert [item.request for item in window] == [
+        "q2",
+        "q3",
+        "q4",
+        "q5",
+        "q6",
+        "q7",
+        "q8",
+        "q9",
+        "q10",
+        "q12",
+    ]
+    assert [set(item.model_dump()) for item in window] == [
+        {"request", "response"}
+    ] * 10
+    assert len(repository.list_records("u")) == 14
+
+
+def test_context_window_rejects_non_positive_limit(tmp_path: Path) -> None:
+    repository = ConversationHistoryRepository(tmp_path / "history.db")
+    repository.initialize()
+
+    with pytest.raises(ValueError, match="positive"):
+        repository.list_context_window("u", limit=0)
+
+
 def test_conversation_history_round_trips_final_audit_reason(tmp_path: Path) -> None:
     repository = ConversationHistoryRepository(tmp_path / "history.db")
     repository.initialize()
@@ -107,7 +156,7 @@ def test_conversation_history_round_trips_final_audit_reason(tmp_path: Path) -> 
         audit_reason="retry_exhausted",
     )
 
-    assert repository.list_recent("u")[0].audit_reason == "retry_exhausted"
+    assert repository.list_records("u")[0].audit_reason == "retry_exhausted"
 
 
 def test_conversation_history_adds_audit_column_to_existing_database(
@@ -138,7 +187,7 @@ def test_conversation_history_adds_audit_column_to_existing_database(
         audit_reason="user_cancelled",
     )
 
-    assert repository.list_recent("u")[0].audit_reason == "user_cancelled"
+    assert repository.list_records("u")[0].audit_reason == "user_cancelled"
 
 
 def test_read_user_profile_initializes_missing_file_from_template(

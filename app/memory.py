@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from app.context import ExecutionTraceEvent, HistorySegment
+from app.context import ExecutionTraceEvent, HistoryExcerpt
 
 DEFAULT_USER_PROFILE_TEMPLATE = (
     Path(__file__).resolve().parent / "templates" / "user_profile.md"
@@ -203,29 +203,27 @@ class ConversationHistoryRepository:
             ).fetchall()
         return [_conversation_record(row) for row in rows]
 
-    def list_recent(self, user_id: str) -> list[HistorySegment]:
+    def list_context_window(
+        self, user_id: str, limit: int = 10
+    ) -> list[HistoryExcerpt]:
+        if limit <= 0:
+            raise ValueError("context window limit must be positive")
         with sqlite3.connect(self.db_path) as connection:
             rows = connection.execute(
                 """
-                SELECT request_text, response_text, tool_history_json,
-                       confirmation_result_json, audit_reason
+                SELECT request_text, response_text
                 FROM conversation_history
-                WHERE user_id = ?
-                ORDER BY created_at DESC
-                LIMIT 5
+                WHERE user_id = ? AND is_relevant = 1
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
                 """,
-                (user_id,),
+                (user_id, limit),
             ).fetchall()
         rows.reverse()
         return [
-            HistorySegment(
+            HistoryExcerpt(
                 request=str(row[0]),
                 response=str(row[1]),
-                tool_history=json.loads(str(row[2])),
-                confirmation_result=(
-                    json.loads(str(row[3])) if row[3] is not None else None
-                ),
-                audit_reason=str(row[4]) if row[4] is not None else None,
             )
             for row in rows
         ]

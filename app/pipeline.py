@@ -576,7 +576,7 @@ class KitchenPipeline:
             allergen_intolerances=self.profile.allergen_intolerances,
             custom_allergens=self.profile.custom_allergens,
             profile_markdown=profile_without_legacy_history(self.profile.markdown),
-            history_segments=self.history.list_recent(user_id),
+            history_segments=self.history.list_context_window(user_id),
             vision_confirmation_result=confirmation_result,
         )
         result = self.agent.run(context, target_language=target_language)
@@ -688,7 +688,7 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
         ttl_minutes=settings.pending_action_ttl_minutes,
         expiry_inferer=expiry_inferer,
     )
-    history = ConversationHistoryRepository(settings.inventory_db_path, max_segments=5)
+    history = ConversationHistoryRepository(settings.inventory_db_path)
     history.initialize()
     vision_confirmations = VisionConfirmationRepository(
         settings.inventory_db_path,

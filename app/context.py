@@ -20,12 +20,9 @@ class Ingredient(BaseModel):
     status: ConfidenceStatus
 
 
-class HistorySegment(BaseModel):
+class HistoryExcerpt(BaseModel):
     request: str
     response: str
-    tool_history: list[dict[str, object]] = Field(default_factory=list)
-    confirmation_result: dict[str, object] | None = None
-    audit_reason: str | None = None
 
 
 class VisionConfirmationPrompt(BaseModel):
@@ -42,7 +39,7 @@ class AgentContext(BaseModel):
     allergen_intolerances: list[str] = Field(default_factory=list)
     custom_allergens: list[str] = Field(default_factory=list)
     profile_markdown: str = ""
-    history_segments: list[HistorySegment] = Field(default_factory=list, max_length=5)
+    history_segments: list[HistoryExcerpt] = Field(default_factory=list, max_length=10)
     vision_confirmation_result: dict[str, object] | None = None
 
 

@@ -12,7 +12,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
 from app.config import Settings
-from app.context import HistorySegment
+from app.context import HistoryExcerpt
 
 if TYPE_CHECKING:
     from app.pipeline import KitchenPipeline
@@ -99,7 +99,7 @@ class ReminderGenerator:
         self,
         candidates: dict[str, list[dict[str, object]]],
         inventory: list[dict[str, object]],
-        history: list[HistorySegment],
+        history: list[HistoryExcerpt],
     ) -> str | None:
         highest_priority = _highest_priority_selection(candidates)
         if self.model is not None:
@@ -158,7 +158,7 @@ class ProactiveService:
         return self.generator.generate(
             candidates,
             self.pipeline.inventory.list_instances(),
-            self.pipeline.history.list_recent(user_id),
+            self.pipeline.history.list_context_window(user_id),
         )
 
 

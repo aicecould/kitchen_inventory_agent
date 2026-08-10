@@ -510,7 +510,7 @@ def test_explicit_text_cancellation_bypasses_models_with_fixed_response(
     assert result.content == "已停止处理；没有执行新的库存变更。"
     assert result.blocked is False
     assert result.audit_reason == AuditCode.USER_CANCELLED.value
-    assert pipeline.history.list_recent("test")[0].audit_reason == (
+    assert pipeline.history.list_records("test")[0].audit_reason == (
         AuditCode.USER_CANCELLED.value
     )
     assert classifier.calls == 0
@@ -699,11 +699,17 @@ def test_contextual_route_bypasses_classifier_and_supplies_recent_history(
     agent = CapturingAgent()
     pipeline.food_classifier = classifier  # type: ignore[assignment]
     pipeline.agent = agent  # type: ignore[assignment]
-    pipeline.history.append(
-        user_id="test",
-        request="土豆怎么处理",
-        response="可以先清洗土豆。",
-    )
+    for index in range(14):
+        pipeline.history.append(
+            user_id="test",
+            request=f"土豆步骤 {index}",
+            response=f"回答 {index}",
+            is_relevant=index not in {11, 13},
+            audit_reason=(
+                "food_query_irrelevant" if index in {11, 13} else None
+            ),
+            created_at=datetime(2026, 8, 10, 0, index, tzinfo=UTC),
+        )
 
     result = pipeline.process_request(user_id="test", text="下一步呢")
 
@@ -711,8 +717,21 @@ def test_contextual_route_bypasses_classifier_and_supplies_recent_history(
     assert classifier.calls == 0
     assert len(agent.contexts) == 1
     assert [segment.request for segment in agent.contexts[0].history_segments] == [
-        "土豆怎么处理"
+        "土豆步骤 2",
+        "土豆步骤 3",
+        "土豆步骤 4",
+        "土豆步骤 5",
+        "土豆步骤 6",
+        "土豆步骤 7",
+        "土豆步骤 8",
+        "土豆步骤 9",
+        "土豆步骤 10",
+        "土豆步骤 12",
     ]
+    assert all(
+        set(segment.model_dump()) == {"request", "response"}
+        for segment in agent.contexts[0].history_segments
+    )
     assert result.execution_trace[0].name == "deterministic_route"
     assert result.execution_trace[0].detail == "contextual"
 
