@@ -7,7 +7,7 @@ import pytest
 from app.actions import InventoryActionService, PendingActionRepository
 from app.adapters.recipe_api import TheMealDbClient
 from app.agent import KitchenAgent
-from app.context import AgentContext, HistoryExcerpt
+from app.context import AgentContext, CookingTaskContext, HistoryExcerpt
 from app.profile import ProfileRepository
 from app.profile_actions import ProfileActionService
 from app.prompts import SYSTEM_PROMPT
@@ -47,7 +47,9 @@ def recipe_tool(
     )
 
 
-def inventory_tools(tmp_path: Path) -> tuple[
+def inventory_tools(
+    tmp_path: Path, context: AgentContext | None = None
+) -> tuple[
     InventoryRepository,
     InventoryActionService,
     dict[str, object],
@@ -70,10 +72,7 @@ def inventory_tools(tmp_path: Path) -> tuple[
         ),
         actions=actions,
     )
-    context = AgentContext(
-        user_id="test",
-        request_text="管理库存",
-    )
+    context = context or AgentContext(user_id="test", request_text="管理库存")
     created_tools = agent._create_tools(context, TraceRecorder())
     tools = {tool.name: tool for tool in created_tools}
     return inventory, actions, tools
@@ -129,6 +128,63 @@ def test_agent_prompt_requires_instance_lookup_and_ambiguity_clarification() -> 
     assert "完整的 quantity_text" in SYSTEM_PROMPT
     assert "完整 instance_id" in SYSTEM_PROMPT
     assert "短前缀" in SYSTEM_PROMPT and "不能" in SYSTEM_PROMPT
+
+
+def test_user_message_injects_task_separately_from_global_history() -> None:
+    context = AgentContext(
+        user_id="u",
+        request_text="继续",
+        history_segments=[HistoryExcerpt(request="global", response="history")],
+        cooking_task=CookingTaskContext(
+            task_id="task_0123456789abcdef0123456789abcdef",
+            query_text="做汤",
+            recipe_title="Tomato Soup",
+            servings=2,
+            ingredients=["2 tomatoes"],
+        ),
+    )
+
+    message = KitchenAgent._user_message(
+        context,
+        "zh",
+        current_time=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+    import json
+
+    payload = json.loads(message.split("\n", 1)[1])
+    assert payload["recent_history"] == [
+        {"request": "global", "response": "history"}
+    ]
+    assert payload["cooking_task"] == {
+        "task_id": "task_0123456789abcdef0123456789abcdef",
+        "query_text": "做汤",
+        "recipe_title": "Tomato Soup",
+        "servings": 2,
+        "ingredients": ["2 tomatoes"],
+    }
+
+
+def test_inventory_write_tools_bind_trusted_reconciliation_task(
+    tmp_path: Path,
+) -> None:
+    task_id = "task_0123456789abcdef0123456789abcdef"
+    context = AgentContext(
+        user_id="test",
+        request_text="番茄用完了",
+        inventory_source_task_id=task_id,
+    )
+    inventory, actions, tools = inventory_tools(tmp_path, context)
+    item = inventory.add_instance("番茄", "2个", None, "unknown")
+    tools["get_inventory_instance"].invoke(  # type: ignore[attr-defined]
+        {"instance_id": item["instance_id"]}
+    )
+
+    result = tools["propose_remove_inventory_instance"].invoke(  # type: ignore[attr-defined]
+        {"instance_id": item["instance_id"]}
+    )
+
+    assert result["source_task_id"] == task_id
+    assert actions.repository.get(result["action_id"]).source_task_id == task_id  # type: ignore[union-attr]
 
 
 def test_inventory_read_tools_return_real_instance_snapshots(tmp_path: Path) -> None:
