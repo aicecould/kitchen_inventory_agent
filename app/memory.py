@@ -51,10 +51,21 @@ class ConversationHistoryRepository:
                     response_text TEXT NOT NULL,
                     tool_history_json TEXT NOT NULL,
                     confirmation_result_json TEXT,
+                    audit_reason TEXT,
                     created_at TEXT NOT NULL
                 )
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(conversation_history)"
+                ).fetchall()
+            }
+            if "audit_reason" not in columns:
+                connection.execute(
+                    "ALTER TABLE conversation_history ADD COLUMN audit_reason TEXT"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_history_user_created "
                 "ON conversation_history(user_id, created_at DESC)"
@@ -68,6 +79,7 @@ class ConversationHistoryRepository:
         response: str,
         tool_history: list[dict[str, object]] | None = None,
         confirmation_result: dict[str, object] | None = None,
+        audit_reason: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.db_path) as connection:
@@ -76,8 +88,9 @@ class ConversationHistoryRepository:
                 """
                 INSERT INTO conversation_history(
                     segment_id, user_id, request_text, response_text,
-                    tool_history_json, confirmation_result_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    tool_history_json, confirmation_result_json, audit_reason,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     f"hist_{uuid4().hex}",
@@ -90,6 +103,7 @@ class ConversationHistoryRepository:
                         if confirmation_result is not None
                         else None
                     ),
+                    audit_reason,
                     now,
                 ),
             )
@@ -112,7 +126,7 @@ class ConversationHistoryRepository:
             rows = connection.execute(
                 """
                 SELECT request_text, response_text, tool_history_json,
-                       confirmation_result_json
+                       confirmation_result_json, audit_reason
                 FROM conversation_history
                 WHERE user_id = ?
                 ORDER BY created_at DESC
@@ -129,6 +143,7 @@ class ConversationHistoryRepository:
                 confirmation_result=(
                     json.loads(str(row[3])) if row[3] is not None else None
                 ),
+                audit_reason=str(row[4]) if row[4] is not None else None,
             )
             for row in rows
         ]

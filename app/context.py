@@ -25,6 +25,7 @@ class HistorySegment(BaseModel):
     response: str
     tool_history: list[dict[str, object]] = Field(default_factory=list)
     confirmation_result: dict[str, object] | None = None
+    audit_reason: str | None = None
 
 
 class VisionConfirmationPrompt(BaseModel):

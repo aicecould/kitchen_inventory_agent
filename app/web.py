@@ -117,7 +117,7 @@ def service_status() -> dict[str, object]:
             "max_text_chars": MAX_TEXT_CHARS,
             "max_image_bytes": MAX_IMAGE_BYTES,
         },
-        "note": "订单与独立模型二次审核暂未实现。",
+        "note": "订单暂未实现；回答监督采用一次子 Agent 修复和一次主 Agent 重试上限。",
     }
 
 
@@ -212,7 +212,10 @@ def cancel_action(action_id: str) -> dict[str, object]:
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     get_pipeline().record_inventory_confirmation(action=action, decision="cancel")
-    return {"action": action.model_dump(mode="json")}
+    return {
+        "action": action.model_dump(mode="json"),
+        "message": "库存操作已取消，库存未发生变化。",
+    }
 
 
 @app.post("/api/vision-confirmations/{confirmation_id}/resolve")

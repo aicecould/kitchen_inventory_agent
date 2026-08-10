@@ -114,6 +114,13 @@ def test_follow_up_phrases_are_contextual(text: str) -> None:
     assert route_deterministically(text) == RouteDecision("contextual", None, {})
 
 
+@pytest.mark.parametrize("text", ["取消", "不要了", "不用了", "算了", "停止吧"])
+def test_explicit_cancellation_has_a_deterministic_route(text: str) -> None:
+    assert route_deterministically(text) == RouteDecision(
+        "supported", "request.cancel", {}
+    )
+
+
 @pytest.mark.parametrize(
     "text",
     ["Python怎么安装", "明天天气如何", "查询我的订单", "怎么支付"],

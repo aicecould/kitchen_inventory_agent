@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from time import perf_counter
@@ -18,14 +19,30 @@ from pydantic import BaseModel, Field, field_validator
 from app.actions import InventoryActionService
 from app.allergens import AllergenIntolerance
 from app.audit import (
+    AuditCode,
+    AuditResult,
     append_confidence_notice,
     canonical_tool_response,
     regex_audit,
+    review_candidate,
     review_tool_calls,
 )
 from app.config import Settings
 from app.context import AgentContext, AgentResult
-from app.prompts import SYSTEM_PROMPT
+from app.prompts import (
+    ANSWER_REWRITE_SYSTEM_PROMPT,
+    RECIPE_RECOVERY_SYSTEM_PROMPT,
+    REPAIR_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+)
+from app.supervisor import (
+    RepairDecision,
+    ResponseSupervisor,
+    RetryMode,
+    SupervisorCandidate,
+    SupervisorRequest,
+    fixed_response,
+)
 from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
 from app.trace import TraceRecorder, elapsed_ms
@@ -59,6 +76,9 @@ class KitchenAgent:
     actions: InventoryActionService
     recursion_limit: int = 10
     max_input_chars: int = 12000
+    repair_decider: (
+        Callable[[SupervisorRequest, AuditResult], RepairDecision] | None
+    ) = None
 
     def run(self, context: AgentContext, target_language: str = "zh") -> AgentResult:
         trace = TraceRecorder()
@@ -90,7 +110,17 @@ class KitchenAgent:
                 type(exc).__name__,
                 elapsed_ms(started),
             )
-            raise
+            trace.record(
+                "supervisor",
+                "final_fallback",
+                "completed",
+                AuditCode.TASK_IMPOSSIBLE.value,
+            )
+            return AgentResult(
+                content=fixed_response(AuditCode.TASK_IMPOSSIBLE, target_language),
+                audit_reason=AuditCode.TASK_IMPOSSIBLE.value,
+                execution_trace=trace.events,
+            )
         trace.record(
             "model",
             "deepseek_agent",
@@ -116,14 +146,6 @@ class KitchenAgent:
             "passed" if audit.passed else "blocked",
             audit.reason or "passed",
         )
-        if not audit.passed:
-            return AgentResult(
-                content="输出未通过安全检查。",
-                blocked=True,
-                audit_reason=audit.reason,
-                tool_history=history,
-                execution_trace=trace.events,
-            )
         tool_audit = review_tool_calls(
             content,
             history,
@@ -137,12 +159,56 @@ class KitchenAgent:
             "passed" if tool_audit.passed else "blocked",
             tool_audit.reason or "passed",
         )
-        if not tool_audit.passed:
+        combined_audit = review_candidate(
+            content,
+            history,
+            intent=context.intent,
+            target_language=target_language,
+            ingredients=context.ingredients,
+            vision_confirmation_result=context.vision_confirmation_result,
+        )
+        if not audit.passed or not tool_audit.passed or not combined_audit.passed:
+            supervisor = ResponseSupervisor(
+                audit=lambda candidate, candidate_history: review_candidate(
+                    candidate,
+                    candidate_history,
+                    intent=context.intent,
+                    target_language=target_language,
+                    ingredients=context.ingredients,
+                    vision_confirmation_result=context.vision_confirmation_result,
+                ),
+                repair=self.repair_decider or self._run_repair_subagent,
+                main_retry=lambda mode, feedback, immutable_history: (
+                    self._run_main_retry(
+                        context=context,
+                        target_language=target_language,
+                        mode=mode,
+                        feedback=feedback,
+                        immutable_history=immutable_history,
+                        trace=trace,
+                    )
+                ),
+            )
+            outcome = supervisor.review(
+                SupervisorRequest(
+                    content=content,
+                    tool_history=history,
+                    intent=context.intent,
+                    target_language=target_language,
+                )
+            )
+            for name, detail in outcome.steps:
+                trace.record(
+                    "supervisor",
+                    name,
+                    "blocked" if name == "final_fallback" else "completed",
+                    detail,
+                )
             return AgentResult(
-                content="输出与工具执行记录不一致，本次结果已被拦截。",
-                blocked=True,
-                audit_reason=tool_audit.reason,
-                tool_history=history,
+                content=outcome.content,
+                blocked=outcome.blocked,
+                audit_reason=outcome.audit_reason,
+                tool_history=outcome.tool_history,
                 execution_trace=trace.events,
             )
         return AgentResult(
@@ -150,6 +216,80 @@ class KitchenAgent:
             tool_history=history,
             execution_trace=trace.events,
         )
+
+    def _run_repair_subagent(
+        self, request: SupervisorRequest, audit: AuditResult
+    ) -> RepairDecision:
+        structured_model = self.model.with_structured_output(RepairDecision)
+        payload = {
+            "request": request.model_dump(mode="json"),
+            "audit": {
+                "code": audit.code.value,
+                "reason": audit.reason,
+            },
+        }
+        result = structured_model.invoke(
+            [
+                {"role": "system", "content": REPAIR_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, ensure_ascii=False, default=str),
+                },
+            ]
+        )
+        if isinstance(result, RepairDecision):
+            return result
+        return RepairDecision.model_validate(result)
+
+    def _run_main_retry(
+        self,
+        *,
+        context: AgentContext,
+        target_language: str,
+        mode: RetryMode,
+        feedback: str,
+        immutable_history: list[dict[str, object]],
+        trace: TraceRecorder,
+    ) -> SupervisorCandidate:
+        payload = {
+            "request": context.request_text,
+            "feedback": feedback,
+            "tool_history": immutable_history,
+            "target_language": target_language,
+        }
+        user_message = json.dumps(payload, ensure_ascii=False, default=str)
+        if mode == RetryMode.ANSWER_REWRITE:
+            response = self.model.invoke(
+                [
+                    {"role": "system", "content": ANSWER_REWRITE_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
+                ]
+            )
+            content = self._last_text([response])
+            history = immutable_history
+        else:
+            tools = [
+                candidate
+                for candidate in self._create_tools(context, trace)
+                if candidate.name == "search_recipes"
+            ]
+            agent = create_agent(
+                model=self.model,
+                tools=tools,
+                system_prompt=RECIPE_RECOVERY_SYSTEM_PROMPT,
+            )
+            response = agent.invoke(
+                {"messages": [{"role": "user", "content": user_message}]},
+                config={"recursion_limit": self.recursion_limit},
+            )
+            messages = response.get("messages", [])
+            content = self._last_text(messages)
+            history = [*immutable_history, *self._tool_history(messages)]
+        canonical = canonical_tool_response(history, target_language=target_language)
+        if canonical is not None:
+            content = canonical
+        content = append_confidence_notice(content, context.ingredients)
+        return SupervisorCandidate(content=content, tool_history=history)
 
     def _create_tools(
         self, context: AgentContext, trace: TraceRecorder

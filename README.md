@@ -19,7 +19,7 @@ Kitchen Inventory Agent 解决的不是“把食材名称存进数据库”这�
 | 图片识别 | 接入百度果蔬识别 API，校验图片格式、尺寸和长宽比，并按置信度分层处理结果 |
 | 菜谱检索 | Spoonacular 主检索、TheMealDB 回退、DeepSeek 官方 Web Search 最终兜底，统一结果并执行过敏原过滤 |
 | 对话记忆 | 请求、最终回答、工具记录和确认结果写入 SQLite，每个用户保留最近 5 段非递归历史 |
-| 输出审核与轨迹 | 只要 Agent 读取库存或创建提案，就从工具快照生成固定结构回答；核对完整 ID、数量原文、待确认预览、菜谱来源和图片确认记录 |
+| 输出审核与轨迹 | 工具快照生成固定库存回答；受限子 Agent 可修复一次表达问题，主 Agent 最多重试一次，随后固定安全兜底 |
 
 ## 系统架构
 
@@ -67,7 +67,7 @@ flowchart TD
     Y --> Z["页面便笺；无后台推送、无业务动作"]
 ```
 
-这条架构刻意把“模型建议”和“状态变化”分开。Agent 只能调用预先定义的工具，库存写工具只生成带 `preview` 的 `pending` 提案；主动检查甚至不会生成提案，只返回可选的页面文案。库存读取或提案一旦出现在 Agent 工具历史中，模型撰写的库存段落会被丢弃，改由程序从结构化结果生成固定回答；后续 `/api/actions/{action_id}/confirm` 与 `/api/actions/{action_id}/cancel` 直接返回序列化 action，并把确认或取消结果写入历史。
+这条架构刻意把“模型建议”和“状态变化”分开。Agent 只能调用预先定义的工具，库存写工具只生成带 `preview` 的 `pending` 提案；主动检查甚至不会生成提案，只返回可选的页面文案。库存读取或提案一旦出现在 Agent 工具历史中，模型撰写的库存段落会被丢弃，改由程序从结构化结果生成固定回答；后续 `/api/actions/{action_id}/confirm` 与 `/api/actions/{action_id}/cancel` 直接返回序列化 action，并把确认或取消结果写入历史。取消接口还返回固定文案“库存操作已取消，库存未发生变化”。
 
 ## 已实现功能
 
@@ -232,11 +232,17 @@ Spoonacular 当前支持 `max-used-ingredients` 和 `min-missing-ingredients` �
 - 审核重新计算同一规范输出并要求精确匹配，因此自然语言散文、Markdown 表格、引用块、省略 ID、短 ID 或英文执行声明都不能绕过；
 - 工具参数、结果字段、UTC 时间、完整 ID、提案 operation、参数与预览仍逐项校验；图片置信度与用户确认记录沿用原有约束。
 
-没有库存工具历史时，普通回答仍经过空输出、提示注入式语句和不支持付款／下单声明的正则检查，以及菜谱来源和图片记录审核。库存提案之后的确认／取消接口返回结构化 action，不生成新的自然语言 Agent 回答；它们仍受用户归属、状态转换、允许列表和历史记录约束。独立二次审核模型仍未实现。
+没有库存工具历史时，普通回答仍经过空输出、提示注入式语句和不支持付款／下单声明的正则检查，以及菜谱来源和图片记录审核。菜谱意图出现推荐但没有 `search_recipes` 工具记录时会被标记为工具缺失；菜谱标题或链接超出工具结果时会被标记为结果不一致。库存提案之后的确认／取消接口仍受用户归属、状态转换、允许列表和历史记录约束。
 
-### 12. 可视化执行轨迹
+### 12. 有界回答监督与纠错子 Agent
 
-`/api/process` 请求以 `stage / name / status / detail / duration_ms` 记录实际执行阶段。轨迹显示 `deterministic_route` 是否命中，以及未决文本的 FastText 调用、`unavailable` 或 `fail-open`；确定性／上下文文本路径没有单独的 classifier-skipped 事件，其绕过行为由 `deterministic_route` 推断，图片请求才显式记录分类器 `skipped`。进入相应链路后，轨迹还包含实例读取、提案创建、外部 API、DeepSeek Agent、正则审核和工具调用审核；新增日期无法推断时额外记录安全的 `expiry_inference / degraded / unknown expiry` 事件。
+审核失败不再一律立即返回 blocked。确定性 `ResponseSupervisor` 持有请求级重试状态：事实受工具记录支持但表达违规时，无工具的纠错子 Agent 可重写一次；重写仍失败时，主 Agent 在 `answer_rewrite` 模式下无工具重写一次。菜谱缺少工具调用或与工具结果不一致时，纠错子 Agent只生成错误反馈，主 Agent 在 `recipe_recovery` 模式下仅能调用 `search_recipes` 一次。任何路径都不能进行第三次生成、创建重复库存提案或修改既有工具记录。
+
+用户明确输入“取消”“不要了”等表达时走确定性取消响应；确认卡片点击取消仍由 HTTP 状态转换处理，不调用模型。首次 Agent调用无法完成、纠错输出结构无效或最终重试仍不通过时，系统返回固定安全文案。中间草稿和模型推理不写入历史。
+
+### 13. 可视化执行轨迹
+
+`/api/process` 请求以 `stage / name / status / detail / duration_ms` 记录实际执行阶段。轨迹显示 `deterministic_route` 是否命中，以及未决文本的 FastText 调用、`unavailable` 或 `fail-open`；确定性／上下文文本路径没有单独的 classifier-skipped 事件，其绕过行为由 `deterministic_route` 推断，图片请求才显式记录分类器 `skipped`。进入相应链路后，轨迹还包含实例读取、提案创建、外部 API、DeepSeek Agent、正则审核和工具调用审核；触发恢复时额外记录 `response_audit`、`supervisor_classification`、`subagent_rewrite`、`subagent_reaudit`、`main_agent_retry` 和 `final_fallback`。新增日期无法推断时记录安全的 `expiry_inference / degraded / unknown expiry` 事件。
 
 异常轨迹只保存异常类型和安全摘要，避免把密钥或原始服务响应返回浏览器。轨迹仍随单次响应返回，没有跨请求统计存储，也没有 Token、费用或首字延迟指标。
 
@@ -258,7 +264,7 @@ Spoonacular 当前支持 `max-used-ingredients` 和 `min-missing-ingredients` �
 
 ### 自动化测试
 
-当前完整测试套件为 **228 项通过测试**。最初修复前基线为 165 项，更新后的全量验证使用：
+当前完整测试套件为 **260 项通过测试**。更新后的全量验证使用：
 
 ```bash
 TMPDIR=/tmp TMP=/tmp TEMP=/tmp .venv/bin/python -m pytest -q
@@ -275,7 +281,7 @@ pytest 自动化覆盖重点包括：
 - 严格 24 小时访问边界、并发抑制、候选优先级、100 字符单句模板和只读副作用检查；
 - 图片格式与置信度、过敏原参数、菜谱主备路由、混合结果的中英文原料／步骤／来源与空结果、用户画像初始化与过敏原读写、近期历史传入上下文及主动检查的只读性、HTTP 输入限制、前端静态壳与实例 API 响应、Node 执行的安全 Markdown 链接渲染，以及 Linux 脚本契约。
 
-当前 pytest 没有直接覆盖提案到期、取消、跨用户确认／取消或对话历史保留最近 5 段时的裁剪／顺序边界；它会在 Node 中执行独立 Markdown 渲染器并验证 action JSON 和前端静态契约，但仍不会执行整个 `frontend/app.js` 观察真实 DOM。
+当前 pytest 已直接覆盖文本取消、确认区取消和最终审核码历史持久化；尚未直接覆盖提案到期、跨用户确认／取消或对话历史保留最近 5 段时的裁剪／顺序边界。它会在 Node 中执行独立 Markdown 渲染器并验证 action JSON 和前端静态契约，但仍不会执行整个 `frontend/app.js` 观察真实 DOM。
 
 本轮另用隔离数据库启动 Uvicorn，并以真实 headless Chromium 执行页面脚本。渲染后的 DOM 同时出现 `inventory.add`、`replace`、`remove`、`remove_all`、`confirm` 五类有效预览，包含两个同名实例、两个完整可见 ID、拟新增／拟替换数量、日期来源、上次确认时间和预计删除数量。追加的异常场景通过 API 注入一个空预览：对应卡片呈现 `data-preview-ready=false`，确认按钮同时带 `disabled`、`hidden` 和 `aria-disabled=true`；自动提交的混合结果把审核过的 `https://recipes.example/tomato-soup` 渲染为带 `_blank` 和 `noopener noreferrer` 的真实锚点，并保留英文原料和步骤。页面加载日志只有一次 `POST /api/proactive-check`，`markdown.js`、`app.js` 和自动提交均返回 200，Chromium 输出没有 JavaScript `SyntaxError`、`ReferenceError`、`TypeError` 或 `Uncaught`。这是真实运行烟雾证据，但完整 `frontend/app.js` 场景尚未纳入可重复的 CI 浏览器测试，仍是已知覆盖缺口。
 
@@ -310,7 +316,7 @@ pytest 自动化覆盖重点包括：
 | 菜谱检索 | 两个外部源、过敏原工具校验、结果过滤，以及规范化中英文详情／空结果和安全来源链接 | 没有本地检索、向量召回、营养求解或多日菜单规划 |
 | 对话与审计 | 五段历史、实例工具记录和关键事实一致性审核 | 早期返回未完全统一持久化，审核不覆盖任意自然语言事实 |
 
-此外，当前仍没有独立结构化 Plan、审核 Agent、食材／营养标准化 API、通用网页搜索、根据菜谱份数生成成组扣减提案、经确认写回饮食偏好候选或账户登录与多租户鉴权。
+此外，当前仍没有独立结构化 Plan、食材／营养标准化 API、通用网页搜索、根据菜谱份数生成成组扣减提案、经确认写回饮食偏好候选或账户登录与多租户鉴权。
 
 ## 项目结构
 
@@ -330,6 +336,7 @@ app/
 ├── pipeline.py               # 顶层请求编排
 ├── proactive.py              # 访问节流、候选选择与固定提醒模板
 ├── prompts.py                # Agent 实例语义约束
+├── supervisor.py             # 有界审核修复、主 Agent 重试与固定兜底
 ├── tools/
 │   ├── inventory.py          # SQLite 实例库存仓库
 │   └── recipe.py             # 菜谱主备路由与过滤
@@ -342,7 +349,7 @@ app/
 classifier/                   # 未改动的 FastText 数据、训练、评估与运行时
 frontend/                     # 页面、实例库存、主动便笺和执行轨迹
 scripts/                      # Linux Bash 启停脚本
-tests/                        # 228 项 pytest 测试
+tests/                        # 260 项 pytest 测试
 main.py                       # CLI 入口
 ```
 

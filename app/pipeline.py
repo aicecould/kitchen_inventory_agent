@@ -18,6 +18,7 @@ from app.adapters.recipe_api import (
 from app.adapters.vision_api import VisionApiClient
 from app.agent import KitchenAgent, build_agent
 from app.audit import (
+    AuditCode,
     append_confidence_notice,
     canonical_tool_response,
     regex_audit,
@@ -45,6 +46,7 @@ from app.memory import (
     read_user_profile,
 )
 from app.proactive import ProactiveService, ReminderGenerator, VisitRepository
+from app.supervisor import fixed_response
 from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
 from app.trace import TraceRecorder
@@ -381,6 +383,19 @@ class KitchenPipeline:
         prior_tool_history = prior_tool_history or []
         operation = route_decision.operation if route_decision is not None else None
         arguments = route_decision.arguments if route_decision is not None else {}
+        if operation == "request.cancel":
+            trace.record("routing", "request_cancel", "matched", operation)
+            return self._finish_direct(
+                user_id=user_id,
+                request_text=text,
+                target_language=target_language,
+                content=fixed_response(AuditCode.USER_CANCELLED, target_language),
+                tool_history=prior_tool_history,
+                trace=trace,
+                ingredients=ingredients,
+                confirmation_result=confirmation_result,
+                audit_reason_override=AuditCode.USER_CANCELLED.value,
+            )
         if not force_agent and (
             operation == "inventory.list"
             or (operation is None and match_simple_inventory_query(text))
@@ -586,6 +601,7 @@ class KitchenPipeline:
         trace: TraceRecorder,
         ingredients: list[Ingredient] | None = None,
         confirmation_result: dict[str, object] | None = None,
+        audit_reason_override: str | None = None,
     ) -> AgentResult:
         ingredients = ingredients or []
         canonical = canonical_tool_response(
@@ -614,7 +630,9 @@ class KitchenPipeline:
             "passed" if tool_result.passed else "blocked",
             tool_result.reason or "passed",
         )
-        audit_reason = regex_result.reason or tool_result.reason
+        audit_reason = (
+            audit_reason_override or regex_result.reason or tool_result.reason
+        )
         blocked = not regex_result.passed or not tool_result.passed
         result = AgentResult(
             content=(
@@ -649,6 +667,7 @@ class KitchenPipeline:
             response=result.content,
             tool_history=result.tool_history,
             confirmation_result=confirmation_result,
+            audit_reason=result.audit_reason,
         )
 
 

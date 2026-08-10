@@ -1,15 +1,71 @@
 import pytest
 
 import app.audit as audit_module
-from app.audit import regex_audit, review_tool_calls
+from app.audit import AuditCode, regex_audit, review_candidate, review_tool_calls
 
 
 def test_regex_audit_placeholder_blocks_fake_order_claim() -> None:
-    assert not regex_audit("已经完成下单").passed
+    result = regex_audit("已经完成下单")
+
+    assert result.passed is False
+    assert result.code == AuditCode.REPAIRABLE_OUTPUT_VIOLATION
 
 
 def test_regex_audit_placeholder_allows_normal_content() -> None:
-    assert regex_audit("推荐一道不含花生的菜").passed
+    result = regex_audit("推荐一道不含花生的菜")
+
+    assert result.passed is True
+    assert result.code == AuditCode.PASSED
+
+
+def test_recipe_recommendation_requires_search_tool_history() -> None:
+    result = review_candidate(
+        "推荐一道番茄汤菜谱，步骤是把番茄煮熟。",
+        [],
+        intent="recipe",
+    )
+
+    assert result.passed is False
+    assert result.code == AuditCode.RECIPE_TOOL_MISSING
+
+
+def test_english_recipe_recommendation_requires_search_tool_history() -> None:
+    result = review_candidate(
+        "I recommend tomato soup. Recipe steps: simmer the tomatoes.",
+        [],
+        intent="recipe",
+        target_language="en",
+    )
+
+    assert result.passed is False
+    assert result.code == AuditCode.RECIPE_TOOL_MISSING
+
+
+def test_recipe_recommendation_must_match_tool_result() -> None:
+    result = review_candidate(
+        "推荐一道土豆浓汤菜谱，步骤是煮熟土豆。",
+        [
+            {
+                "tool": "search_recipes",
+                "arguments": {"ingredients": ["tomato"]},
+                "result": [
+                    {
+                        "id": "recipe-1",
+                        "title": "Tomato Soup",
+                        "instructions": "Simmer.",
+                        "ingredients": ["tomato"],
+                        "source": "example",
+                        "source_url": "https://recipes.example/tomato-soup",
+                        "image_url": None,
+                    }
+                ],
+            }
+        ],
+        intent="recipe",
+    )
+
+    assert result.passed is False
+    assert result.code == AuditCode.RECIPE_RESULT_MISMATCH
 
 
 def inventory_instance(
@@ -43,6 +99,7 @@ def test_inventory_audit_rejects_changed_quantity_text() -> None:
 
     assert audit.passed is False
     assert audit.reason == "Inventory response does not match canonical tool output"
+    assert audit.code == AuditCode.REPAIRABLE_OUTPUT_VIOLATION
 
 
 def test_inventory_audit_accepts_exact_instance_quantity_text() -> None:

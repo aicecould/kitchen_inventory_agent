@@ -7,6 +7,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -64,18 +65,37 @@ _INVENTORY_SNAPSHOT_FIELDS = {
 }
 
 
+class AuditCode(StrEnum):
+    PASSED = "passed"
+    USER_CANCELLED = "user_cancelled"
+    TASK_IMPOSSIBLE = "task_impossible"
+    RECIPE_TOOL_MISSING = "recipe_tool_missing"
+    RECIPE_RESULT_MISMATCH = "recipe_result_mismatch"
+    REPAIRABLE_OUTPUT_VIOLATION = "repairable_output_violation"
+    INVALID_SUPERVISOR_OUTPUT = "invalid_supervisor_output"
+    RETRY_EXHAUSTED = "retry_exhausted"
+
+
 @dataclass(frozen=True, slots=True)
 class AuditResult:
     passed: bool
     reason: str | None = None
+    code: AuditCode = AuditCode.PASSED
+
+
+def audit_failure(
+    reason: str,
+    code: AuditCode = AuditCode.REPAIRABLE_OUTPUT_VIOLATION,
+) -> AuditResult:
+    return AuditResult(False, reason, code)
 
 
 def regex_audit(content: str) -> AuditResult:
     if not content.strip():
-        return AuditResult(False, "Output is empty")
+        return audit_failure("Output is empty")
     for pattern in BLOCK_PATTERNS:
         if pattern.search(content):
-            return AuditResult(False, f"Matched blocked pattern: {pattern.pattern}")
+            return audit_failure(f"Matched blocked pattern: {pattern.pattern}")
     return AuditResult(True)
 
 
@@ -131,11 +151,11 @@ def review_tool_calls(
 
     ingredient_values = ingredients or []
     if any(item.status == ConfidenceStatus.REJECTED for item in ingredient_values):
-        return AuditResult(False, "Low-confidence image result reached the Agent")
+        return audit_failure("Low-confidence image result reached the Agent")
 
     notice = confidence_notice(ingredient_values)
     if notice is not None and notice not in content:
-        return AuditResult(False, "Medium-confidence image warning is missing")
+        return audit_failure("Medium-confidence image warning is missing")
 
     confirmed = {
         item.name
@@ -144,14 +164,14 @@ def review_tool_calls(
     }
     if confirmed:
         if vision_confirmation_result is None:
-            return AuditResult(False, "Confirmed image result has no confirmation record")
+            return audit_failure("Confirmed image result has no confirmation record")
         selected = {
             str(value.get("name", "")).strip()
             for value in vision_confirmation_result.get("selected", [])  # type: ignore[union-attr]
             if isinstance(value, dict)
         }
         if not confirmed.issubset(selected):
-            return AuditResult(False, "Confirmed image result differs from user selection")
+            return audit_failure("Confirmed image result differs from user selection")
 
     parsed_calls = [
         {
@@ -164,7 +184,7 @@ def review_tool_calls(
     for entry in parsed_calls:
         record_error = _validate_tool_record(entry)
         if record_error:
-            return AuditResult(False, record_error)
+            return audit_failure(record_error)
 
     proposals = [
         entry
@@ -175,22 +195,22 @@ def review_tool_calls(
         result = entry["result"]
         arguments = entry["arguments"]
         if not isinstance(result, dict):
-            return AuditResult(False, "Inventory proposal has no structured result")
+            return audit_failure("Inventory proposal has no structured result")
         if result.get("status") != "pending":
-            return AuditResult(False, "Inventory proposal result is not pending")
+            return audit_failure("Inventory proposal result is not pending")
         result_arguments = result.get("arguments")
         if (
             isinstance(arguments, dict)
             and isinstance(result_arguments, dict)
             and not _arguments_match(arguments, result_arguments)
         ):
-            return AuditResult(False, "Inventory proposal arguments differ from tool result")
+            return audit_failure("Inventory proposal arguments differ from tool result")
     canonical = _canonical_response_from_calls(parsed_calls, target_language)
     if canonical is not None:
         expected = canonical if notice is None else f"{canonical}\n\n> {notice}"
         if content != expected:
-            return AuditResult(
-                False, "Inventory response does not match canonical tool output"
+            return audit_failure(
+                "Inventory response does not match canonical tool output"
             )
 
     recipe_calls = [
@@ -209,18 +229,64 @@ def review_tool_calls(
         }
         unexpected_urls = set(_MARKDOWN_URL.findall(content)) - allowed_urls
         if unexpected_urls:
-            return AuditResult(False, "Recipe answer contains a URL absent from tool results")
+            return audit_failure(
+                "Recipe answer contains a URL absent from tool results",
+                AuditCode.RECIPE_RESULT_MISMATCH,
+            )
         if recipes and _looks_like_recipe_recommendation(content):
             titles = [str(item.get("title", "")).strip() for item in recipes]
             if not any(title and title.casefold() in content.casefold() for title in titles):
-                return AuditResult(False, "Recommended recipe is absent from tool results")
+                return audit_failure(
+                    "Recommended recipe is absent from tool results",
+                    AuditCode.RECIPE_RESULT_MISMATCH,
+                )
 
     return AuditResult(True)
 
 
-def review_with_secondary_model() -> None:
-    """Reserved for the independent audit Agent."""
-    raise NotImplementedError
+def review_candidate(
+    content: str,
+    tool_history: list[dict[str, object]],
+    *,
+    intent: str = "unknown",
+    target_language: str = "zh",
+    ingredients: list[Ingredient] | None = None,
+    vision_confirmation_result: dict[str, object] | None = None,
+) -> AuditResult:
+    """Return one stable review classification for supervisor orchestration."""
+
+    has_recipe_tool = any(
+        entry.get("tool") == "search_recipes" for entry in tool_history
+    )
+    if (
+        intent == "recipe"
+        and _looks_like_recipe_recommendation(content)
+        and not has_recipe_tool
+    ):
+        return audit_failure(
+            "Recipe recommendation has no search_recipes tool record",
+            AuditCode.RECIPE_TOOL_MISSING,
+        )
+
+    tool_result = review_tool_calls(
+        content,
+        tool_history,
+        target_language=target_language,
+        ingredients=ingredients,
+        vision_confirmation_result=vision_confirmation_result,
+    )
+    if not tool_result.passed:
+        if tool_result.code == AuditCode.RECIPE_RESULT_MISMATCH:
+            return tool_result
+        return audit_failure(
+            tool_result.reason or "Tool-call audit failed",
+            AuditCode.REPAIRABLE_OUTPUT_VIOLATION,
+        )
+
+    regex_result = regex_audit(content)
+    if not regex_result.passed:
+        return regex_result
+    return AuditResult(True)
 
 
 def _as_value(value: object) -> Any:
@@ -735,7 +801,12 @@ def _is_utc_iso(value: object) -> bool:
 
 
 def _looks_like_recipe_recommendation(content: str) -> bool:
-    return (
+    chinese = (
         ("菜谱" in content or "食谱" in content or "做法" in content)
         and ("推荐" in content or "可以做" in content or "步骤" in content)
     )
+    normalized = content.casefold()
+    english = (
+        "recipe" in normalized or "dish" in normalized
+    ) and any(term in normalized for term in ("recommend", "steps", "instructions"))
+    return chinese or english

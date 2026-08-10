@@ -13,10 +13,12 @@ from pydantic import Field
 
 from app.adapters.recipe_api import TheMealDbClient
 from app.agent import KitchenAgent
+from app.audit import AuditCode, AuditResult
 from app.config import get_settings
 from app.context import AgentContext, AgentResult
 from app.pipeline import build_pipeline
 from app.tools.recipe import RecipeRouter
+from app.supervisor import RepairAction, RepairDecision
 
 
 class ForbiddenClassifier:
@@ -66,6 +68,7 @@ class FixedExpiryInferer:
 
 class ScriptedChatModel(FakeMessagesListChatModel):
     bound_tool_names: list[str] = Field(default_factory=list)
+    bound_tool_names_by_call: list[list[str]] = Field(default_factory=list)
     received_messages: list[list[BaseMessage]] = Field(default_factory=list)
 
     def bind_tools(
@@ -79,11 +82,17 @@ class ScriptedChatModel(FakeMessagesListChatModel):
             str(getattr(tool, "name", tool.get("name") if isinstance(tool, dict) else ""))
             for tool in tools
         ]
+        self.bound_tool_names_by_call.append(list(self.bound_tool_names))
         return self
 
     def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any):
         self.received_messages.append(list(messages))
         return super()._generate(messages, *args, **kwargs)
+
+
+class FailingChatModel(ScriptedChatModel):
+    def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any):
+        raise RuntimeError("provider unavailable")
 
 
 def build_test_pipeline(tmp_path: Path):
@@ -125,6 +134,7 @@ def install_scripted_agent(
     pipeline: Any,
     responses: list[AIMessage],
     recipes: Any | None = None,
+    repair_decider: Any | None = None,
 ) -> ScriptedChatModel:
     model = ScriptedChatModel(responses=responses)
     recipe_router = recipes or RecipeRouter(
@@ -140,6 +150,7 @@ def install_scripted_agent(
         inventory=pipeline.inventory,
         recipes=recipe_router,
         actions=pipeline.actions,
+        repair_decider=repair_decider,
     )
     return model
 
@@ -157,6 +168,142 @@ class FixedRecipeRouter:
                 "image_url": None,
             }
         ]
+
+
+def test_repair_subagent_rewrites_audit_only_failure_once(tmp_path: Path) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    pipeline.food_classifier = RelatedClassifierSpy()  # type: ignore[assignment]
+    repair_calls: list[AuditCode] = []
+
+    def repair_decider(request: object, audit: AuditResult) -> RepairDecision:
+        repair_calls.append(audit.code)
+        return RepairDecision(
+            action=RepairAction.REWRITE,
+            content="当前不支持下单。",
+            reason_code=AuditCode.REPAIRABLE_OUTPUT_VIOLATION,
+        )
+
+    install_scripted_agent(
+        pipeline,
+        [AIMessage(content="已经完成下单")],
+        repair_decider=repair_decider,
+    )
+
+    result = pipeline.process_request(user_id="test", text="帮我处理一下")
+
+    assert result.content == "当前不支持下单。"
+    assert result.blocked is False
+    assert repair_calls == [AuditCode.REPAIRABLE_OUTPUT_VIOLATION]
+    assert [
+        event.name
+        for event in result.execution_trace
+        if event.stage == "supervisor"
+    ] == [
+        "response_audit",
+        "supervisor_classification",
+        "subagent_rewrite",
+        "subagent_reaudit",
+    ]
+
+
+def test_failed_subagent_rewrite_uses_one_toolless_main_retry(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    pipeline.food_classifier = RelatedClassifierSpy()  # type: ignore[assignment]
+
+    def repair_decider(request: object, audit: AuditResult) -> RepairDecision:
+        return RepairDecision(
+            action=RepairAction.REWRITE,
+            content="已经完成下单",
+            reason_code=AuditCode.REPAIRABLE_OUTPUT_VIOLATION,
+        )
+
+    model = install_scripted_agent(
+        pipeline,
+        [
+            AIMessage(content="已经完成下单"),
+            AIMessage(content="当前不支持订单操作。"),
+        ],
+        repair_decider=repair_decider,
+    )
+
+    result = pipeline.process_request(user_id="test", text="帮我处理一下")
+
+    assert result.content == "当前不支持订单操作。"
+    assert result.blocked is False
+    assert len(model.bound_tool_names_by_call) == 1
+    assert pipeline.actions.repository.list_pending("test") == []
+
+
+def test_missing_recipe_tool_retries_main_with_search_recipes_only(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    pipeline.food_classifier = RelatedClassifierSpy()  # type: ignore[assignment]
+
+    def repair_decider(request: object, audit: AuditResult) -> RepairDecision:
+        return RepairDecision(
+            action=RepairAction.RETRY_MAIN,
+            feedback="必须先调用 search_recipes。",
+            reason_code=AuditCode.RECIPE_TOOL_MISSING,
+        )
+
+    model = install_scripted_agent(
+        pipeline,
+        [
+            AIMessage(content="推荐一道番茄汤菜谱，步骤是煮熟番茄。"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_recipes",
+                        "args": {
+                            "ingredients": ["tomato"],
+                            "intolerances": [],
+                            "exclude_ingredients": [],
+                            "custom_allergen_mapping": [],
+                        },
+                        "id": "call-recipe-retry",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="推荐 Tomato Soup 菜谱，步骤是 Simmer。"),
+        ],
+        recipes=FixedRecipeRouter(),
+        repair_decider=repair_decider,
+    )
+
+    result = pipeline.process_request(user_id="test", text="推荐一道番茄菜谱")
+
+    assert result.blocked is False
+    assert "Tomato Soup" in result.content
+    assert model.bound_tool_names_by_call[-1] == ["search_recipes"]
+    assert [entry["tool"] for entry in result.tool_history] == ["search_recipes"]
+
+
+def test_initial_agent_failure_returns_fixed_task_impossible_response(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    pipeline.food_classifier = RelatedClassifierSpy()  # type: ignore[assignment]
+    pipeline.agent = KitchenAgent(
+        model=FailingChatModel(responses=[]),  # type: ignore[arg-type]
+        inventory=pipeline.inventory,
+        recipes=FixedRecipeRouter(),  # type: ignore[arg-type]
+        actions=pipeline.actions,
+    )
+
+    result = pipeline.process_request(user_id="test", text="推荐一道番茄菜谱")
+
+    assert result.content == "当前无法完成该请求，库存未发生变化。"
+    assert result.blocked is False
+    assert result.audit_reason == AuditCode.TASK_IMPOSSIBLE.value
+    assert [event.name for event in result.execution_trace[-2:]] == [
+        "deepseek_agent",
+        "final_fallback",
+    ]
 
 
 def test_non_food_query_is_blocked_before_deepseek(
@@ -349,6 +496,31 @@ def test_irrelevant_greeting_bypasses_classifier_with_boundary_result(
         "deterministic_route"
     ]
     assert result.execution_trace[0].detail == "irrelevant"
+
+
+def test_explicit_text_cancellation_bypasses_models_with_fixed_response(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    classifier = ForbiddenClassifier()
+    pipeline.food_classifier = classifier  # type: ignore[assignment]
+
+    result = pipeline.process_request(user_id="test", text="不要了")
+
+    assert result.content == "已停止处理；没有执行新的库存变更。"
+    assert result.blocked is False
+    assert result.audit_reason == AuditCode.USER_CANCELLED.value
+    assert pipeline.history.list_recent("test")[0].audit_reason == (
+        AuditCode.USER_CANCELLED.value
+    )
+    assert classifier.calls == 0
+    assert [event.name for event in result.execution_trace] == [
+        "deterministic_route",
+        "intent_match",
+        "request_cancel",
+        "regex_audit",
+        "tool_call_audit",
+    ]
 
 
 def test_supported_list_bypasses_classifier_and_returns_real_inventory(

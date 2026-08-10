@@ -48,6 +48,7 @@ _LIST_INVENTORY_PATTERN = re.compile(
     r"^(?:查询|查看|看看|列出)(?:一下)?(?:当前|现有)?库存(?:情况|列表)?[。！？!?]?$"
 )
 _GREETING_PATTERN = re.compile(r"^(?:你好|您好|在吗|谢谢|再见)[。！？!?]?$")
+_CANCEL_PATTERN = re.compile(r"^(?:取消|不要了|不用了|算了|停止)(?:吧)?[。！？!?]?$")
 _NAMED_INVENTORY_PATTERN = re.compile(
     r"^(?:查询|查看|看看)(?:一下)?\s*(?P<name>.+?)\s*"
     r"(?:还有多少|有多少|库存)[。！？!?]?$"
@@ -63,6 +64,8 @@ _CONTEXTUAL_PATTERN = re.compile(
 def route_deterministically(text: str) -> RouteDecision:
     normalized = text.strip()
 
+    if _CANCEL_PATTERN.fullmatch(normalized):
+        return RouteDecision("supported", "request.cancel", {})
     if _GREETING_PATTERN.fullmatch(normalized):
         return RouteDecision("irrelevant", None, {})
     if match_simple_inventory_query(normalized):

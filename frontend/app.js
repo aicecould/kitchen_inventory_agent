@@ -314,7 +314,9 @@ confirmationList.addEventListener("click", async (event) => {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "操作失败");
     card.classList.add(action === "confirm" ? "confirmed" : "cancelled");
-    card.querySelector("h3").textContent = action === "confirm" ? "操作已执行" : "操作已取消";
+    card.querySelector("h3").textContent = action === "confirm"
+      ? "操作已执行"
+      : (data.message || "库存操作已取消，库存未发生变化。");
     await loadInventory();
     window.setTimeout(loadPendingActions, 550);
   } catch (error) {

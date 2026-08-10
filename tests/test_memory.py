@@ -1,11 +1,59 @@
 from pathlib import Path
 
 from app.memory import (
+    ConversationHistoryRepository,
     DEFAULT_USER_PROFILE_TEMPLATE,
     parse_user_profile,
     read_user_profile,
     write_user_allergens,
 )
+
+
+def test_conversation_history_round_trips_final_audit_reason(tmp_path: Path) -> None:
+    repository = ConversationHistoryRepository(tmp_path / "history.db")
+    repository.initialize()
+
+    repository.append(
+        user_id="u",
+        request="推荐一道菜",
+        response="暂时无法完成",
+        audit_reason="retry_exhausted",
+    )
+
+    assert repository.list_recent("u")[0].audit_reason == "retry_exhausted"
+
+
+def test_conversation_history_adds_audit_column_to_existing_database(
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    path = tmp_path / "history.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE conversation_history (
+                segment_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                request_text TEXT NOT NULL,
+                response_text TEXT NOT NULL,
+                tool_history_json TEXT NOT NULL,
+                confirmation_result_json TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+    repository = ConversationHistoryRepository(path)
+    repository.initialize()
+    repository.append(
+        user_id="u",
+        request="取消",
+        response="已取消",
+        audit_reason="user_cancelled",
+    )
+
+    assert repository.list_recent("u")[0].audit_reason == "user_cancelled"
 
 
 def test_read_user_profile_initializes_missing_file_from_template(

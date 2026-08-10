@@ -168,6 +168,49 @@ def test_actions_api_returns_structured_previews_for_all_inventory_operations(
     assert payloads["inventory.confirm"]["preview"] == {"current": first}
 
 
+def test_cancel_action_returns_fixed_inventory_safe_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.web as web
+    from app.actions import InventoryActionService, PendingActionRepository
+    from app.tools.inventory import InventoryRepository
+
+    database = tmp_path / "inventory.db"
+    inventory = InventoryRepository(database)
+    inventory.initialize()
+    repository = PendingActionRepository(database)
+    repository.initialize()
+    service = InventoryActionService(repository, inventory)
+    action = service.propose(
+        web.SHOWCASE_USER_ID,
+        "inventory.add",
+        {
+            "name": "牛奶",
+            "quantity_text": "一盒",
+            "expires_at": None,
+            "expiry_source": "unknown",
+        },
+    )
+
+    class RecordingPipeline:
+        calls = 0
+
+        def record_inventory_confirmation(self, **kwargs: object) -> None:
+            self.calls += 1
+
+    pipeline = RecordingPipeline()
+    monkeypatch.setattr(web, "get_action_service", lambda: service)
+    monkeypatch.setattr(web, "get_pipeline", lambda: pipeline)
+
+    response = TestClient(app).post(f"/api/actions/{action.action_id}/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "库存操作已取消，库存未发生变化。"
+    assert response.json()["action"]["status"] == "cancelled"
+    assert inventory.find_by_name("牛奶") == []
+    assert pipeline.calls == 1
+
+
 def test_frontend_script_exposes_full_ids_and_all_confirmation_preview_labels() -> None:
     """The shipped browser code must render the authoritative preview contract."""
     script = client.get("/static/app.js").text
