@@ -544,3 +544,83 @@ def test_canonical_mixed_response_honors_english_target_language() -> None:
     assert "Source: example" in content
     assert "库存实例快照" not in content
     assert review_tool_calls(content, history, target_language="en").passed is True
+
+
+def profile_proposal_history() -> list[dict[str, object]]:
+    arguments: dict[str, object] = {
+        "operation": "upsert",
+        "category": "preference",
+        "key": "ingredient.cilantro",
+        "value": "不喜欢香菜",
+        "reason": "用户明确表达长期偏好",
+    }
+    preview: dict[str, object] = {
+        "before_revision": 0,
+        "after_revision": 1,
+        "proposal_id": "prof_" + "1" * 32,
+        "source": "explicit_user_statement",
+        "evidence_ids": ["hist_" + "2" * 32],
+        "current": None,
+        "proposed": {
+            "operation": "upsert",
+            "category": "preference",
+            "key": "ingredient.cilantro",
+            "value": "不喜欢香菜",
+        },
+    }
+    return [
+        {
+            "tool": "propose_profile_change",
+            "arguments": arguments,
+            "result": {
+                "proposal_id": "prof_" + "1" * 32,
+                "user_id": "showcase-user",
+                **arguments,
+                "source": "explicit_user_statement",
+                "evidence_ids": ["hist_" + "2" * 32],
+                "status": "pending",
+                "base_revision": 0,
+                "created_at": "2026-08-10T05:00:00Z",
+                "expires_at": "2026-09-09T05:00:00Z",
+                "preview": preview,
+            },
+        }
+    ]
+
+
+def test_profile_proposal_uses_existing_tool_audit_and_canonical_output() -> None:
+    history = profile_proposal_history()
+
+    content = audit_module.canonical_tool_response(history)
+
+    assert content is not None
+    assert "画像变更" in content
+    assert "不喜欢香菜" in content
+    assert "尚未写入" in content
+    assert review_tool_calls(content, history).passed is True
+
+
+def test_profile_proposal_rejects_invalid_id() -> None:
+    history = profile_proposal_history()
+    result = history[0]["result"]
+    assert isinstance(result, dict)
+    result["proposal_id"] = "not-a-profile-id"
+
+    audit = review_tool_calls("任意回答", history)
+
+    assert audit.passed is False
+    assert audit.reason == "Profile proposal has an invalid ID"
+
+
+def test_profile_proposal_rejects_preview_mismatch() -> None:
+    history = profile_proposal_history()
+    result = history[0]["result"]
+    assert isinstance(result, dict)
+    preview = result["preview"]
+    assert isinstance(preview, dict)
+    preview["after_revision"] = 8
+
+    audit = review_tool_calls("任意回答", history)
+
+    assert audit.passed is False
+    assert audit.reason == "Profile preview revision is invalid"

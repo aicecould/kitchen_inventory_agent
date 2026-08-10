@@ -110,6 +110,7 @@ class ProfileProposal(BaseModel):
     created_at: datetime
     expires_at: datetime
     resolved_at: datetime | None = None
+    preview: dict[str, object] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_proposal(self) -> "ProfileProposal":
