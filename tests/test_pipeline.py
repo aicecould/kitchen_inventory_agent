@@ -159,7 +159,7 @@ def test_non_food_query_is_blocked_before_deepseek(
     assert "仅支持食谱和食材" in result.content
 
 
-def test_simple_write_preserves_quantity_text_without_deepseek(
+def test_simple_write_reaches_agent_and_preserves_quantity_text(
     tmp_path: Path,
 ) -> None:
     profile_path = tmp_path / "profile.md"
@@ -172,9 +172,29 @@ def test_simple_write_preserves_quantity_text_without_deepseek(
     )
     pipeline = build_pipeline(settings)
     pipeline.actions.expiry_inferer = FixedExpiryInferer()
+    classifier = RelatedClassifierSpy()
+    pipeline.food_classifier = classifier  # type: ignore[assignment]
+    install_scripted_agent(
+        pipeline,
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "propose_add_inventory_instance",
+                        "args": {"name": "番茄", "quantity_text": "02个"},
+                        "id": "call-add",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="已生成待确认操作，确认前库存不会改变。"),
+        ],
+    )
 
     result = pipeline.process_request(user_id="test", text="添加 02个 番茄到库存")
 
+    assert classifier.calls == ["添加 02个 番茄到库存"]
     assert "待确认" in result.content
     assert pipeline.inventory.find_by_name("番茄") == []
     pending = pipeline.actions.repository.list_pending("test")
@@ -191,9 +211,27 @@ def test_simple_write_preserves_quantity_text_without_deepseek(
     )
 
 
-def test_direct_add_records_safe_unknown_expiry_degradation(tmp_path: Path) -> None:
+def test_agent_add_records_safe_unknown_expiry_degradation(tmp_path: Path) -> None:
     """A no-provider add must disclose unknown inference without provider details."""
     pipeline = build_test_pipeline(tmp_path)
+    pipeline.food_classifier = RelatedClassifierSpy()  # type: ignore[assignment]
+    install_scripted_agent(
+        pipeline,
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "propose_add_inventory_instance",
+                        "args": {"name": "土豆", "quantity_text": "2个"},
+                        "id": "call-add",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="已生成待确认操作，确认前库存不会改变。"),
+        ],
+    )
 
     result = pipeline.process_request(user_id="test", text="添加2个土豆到库存")
 

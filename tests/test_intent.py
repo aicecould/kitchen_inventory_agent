@@ -45,11 +45,6 @@ def test_greeting_matching_does_not_capture_a_longer_request() -> None:
         ("查询一下当前库存", "inventory.list", {}),
         ("查看土豆还有多少", "inventory.find", {"name": "土豆"}),
         ("删除所有土豆", "inventory.remove_all", {"name": "土豆"}),
-        (
-            "添加2个土豆到库存",
-            "inventory.add",
-            {"name": "土豆", "quantity_text": "2个"},
-        ),
     ],
 )
 def test_supported_inventory_requests_have_structured_routes(
@@ -57,6 +52,12 @@ def test_supported_inventory_requests_have_structured_routes(
 ) -> None:
     assert route_deterministically(text) == RouteDecision(
         "supported", operation, arguments
+    )
+
+
+def test_inventory_add_is_not_routed_deterministically() -> None:
+    assert route_deterministically("添加2个土豆到库存") == RouteDecision(
+        "undecided", None, {}
     )
 
 

@@ -99,12 +99,6 @@ def route_deterministically(text: str) -> RouteDecision:
                 },
             )
 
-    simple_operation = match_simple_inventory_operation(normalized)
-    if simple_operation is not None and simple_operation.operation == "inventory.add":
-        return RouteDecision(
-            "supported", simple_operation.operation, simple_operation.arguments
-        )
-
     if _CONTEXTUAL_PATTERN.fullmatch(normalized):
         return RouteDecision("contextual", None, {})
     return RouteDecision("undecided", None, {})

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from time import perf_counter
 from typing import Any, Literal
 
@@ -427,6 +427,7 @@ class KitchenAgent:
     def _user_message(context: AgentContext, target_language: str) -> str:
         payload = {
             "request": context.request_text,
+            "current_date": date.today().isoformat(),
             "intent_hint": context.intent,
             "ingredients": [item.model_dump(mode="json") for item in context.ingredients],
             "allergens": context.allergens,
