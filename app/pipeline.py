@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from classifier.model import FoodQueryClassifier
 from app.actions import (
@@ -673,6 +674,7 @@ class KitchenPipeline:
 
 def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
     settings = settings or get_settings()
+    ZoneInfo(settings.application_timezone)
     profile = read_user_profile(settings.user_profile_path)
 
     inventory = InventoryRepository(settings.inventory_db_path)
@@ -721,7 +723,7 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
     )
     recipes = RecipeRouter(spoonacular, themealdb, web_search)
     agent = (
-        build_agent(settings, inventory, recipes, actions)
+        build_agent(settings, inventory, recipes, actions, history)
         if settings.deepseek_api_key
         else None
     )
