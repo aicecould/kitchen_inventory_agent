@@ -13,7 +13,12 @@ from app.actions import (
 from app.adapters.recipe_api import SpoonacularClient, TheMealDbClient
 from app.adapters.vision_api import VisionApiClient
 from app.agent import KitchenAgent, build_agent
-from app.audit import append_confidence_notice, regex_audit, review_tool_calls
+from app.audit import (
+    append_confidence_notice,
+    canonical_tool_response,
+    regex_audit,
+    review_tool_calls,
+)
 from app.config import Settings, get_settings
 from app.context import (
     AgentContext,
@@ -22,10 +27,12 @@ from app.context import (
     Ingredient,
     VisionConfirmationPrompt,
 )
+from app.expiry import DeepSeekExpiryInferer
 from app.intent import (
+    RouteDecision,
     match_intent,
-    match_simple_inventory_operation,
     match_simple_inventory_query,
+    route_deterministically,
 )
 from app.memory import (
     ConversationHistoryRepository,
@@ -33,6 +40,7 @@ from app.memory import (
     profile_without_legacy_history,
     read_user_profile,
 )
+from app.proactive import ProactiveService, ReminderGenerator, VisitRepository
 from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
 from app.trace import TraceRecorder
@@ -62,6 +70,8 @@ class KitchenPipeline:
         target_language: str = "zh",
     ) -> AgentResult:
         trace = TraceRecorder()
+        route_decision: RouteDecision | None = None
+        force_agent = False
         if image_bytes is not None:
             trace.record(
                 "routing",
@@ -69,45 +79,70 @@ class KitchenPipeline:
                 "skipped",
                 "image request bypasses text-only classifier",
             )
-        elif self.food_classifier is None:
+        else:
+            route_decision = route_deterministically(text)
+            route_detail = route_decision.kind
+            if route_decision.operation is not None:
+                route_detail += f"; {route_decision.operation}"
             trace.record(
                 "routing",
-                "food_query_classifier",
-                "unavailable",
-                (
-                    f"fail-open; {self.food_classifier_load_error}"
-                    if self.food_classifier_load_error
-                    else "disabled; fail-open"
-                ),
+                "deterministic_route",
+                "undecided" if route_decision.kind == "undecided" else "matched",
+                route_detail,
             )
-        else:
-            try:
-                classification = trace.run(
-                    "routing",
-                    "food_query_classifier",
-                    lambda: self.food_classifier.classify(text),
-                    lambda value: (
-                        f"related={str(value.is_related).lower()}; "
-                        f"score={value.positive_score:.4f}; "
-                        f"threshold={value.threshold:.4f}"
-                    ),
-                )
-            except Exception:
-                trace.record(
-                    "routing",
-                    "food_query_classifier_fallback",
-                    "fail-open",
-                    "prediction failed; continuing request",
-                )
-                classification = None
-
-            if classification is not None and not classification.is_related:
+            if route_decision.kind == "irrelevant":
                 return AgentResult(
                     content="当前仅支持食谱和食材相关问题。",
                     blocked=True,
                     audit_reason="food_query_irrelevant",
                     execution_trace=trace.events,
                 )
+            force_agent = route_decision.kind == "contextual"
+
+        if (
+            image_bytes is None
+            and route_decision is not None
+            and route_decision.kind == "undecided"
+        ):
+            if self.food_classifier is None:
+                trace.record(
+                    "routing",
+                    "food_query_classifier",
+                    "unavailable",
+                    (
+                        f"fail-open; {self.food_classifier_load_error}"
+                        if self.food_classifier_load_error
+                        else "disabled; fail-open"
+                    ),
+                )
+            else:
+                try:
+                    classification = trace.run(
+                        "routing",
+                        "food_query_classifier",
+                        lambda: self.food_classifier.classify(text),
+                        lambda value: (
+                            f"related={str(value.is_related).lower()}; "
+                            f"score={value.positive_score:.4f}; "
+                            f"threshold={value.threshold:.4f}"
+                        ),
+                    )
+                except Exception:
+                    trace.record(
+                        "routing",
+                        "food_query_classifier_fallback",
+                        "fail-open",
+                        "prediction failed; continuing request",
+                    )
+                    classification = None
+
+                if classification is not None and not classification.is_related:
+                    return AgentResult(
+                        content="当前仅支持食谱和食材相关问题。",
+                        blocked=True,
+                        audit_reason="food_query_irrelevant",
+                        execution_trace=trace.events,
+                    )
 
         intent = match_intent(text)
         trace.record("routing", "intent_match", "success", intent)
@@ -116,6 +151,7 @@ class KitchenPipeline:
             return self._finish_direct(
                 user_id=user_id,
                 request_text=text,
+                target_language=target_language,
                 content="当前原型暂不支持订单或购物车管理。",
                 tool_history=[],
                 trace=trace,
@@ -180,6 +216,8 @@ class KitchenPipeline:
             confirmation_result=None,
             trace=trace,
             prior_tool_history=prior_tool_history,
+            route_decision=route_decision,
+            force_agent=force_agent,
         )
 
     def resolve_vision_confirmation(
@@ -333,21 +371,29 @@ class KitchenPipeline:
         confirmation_result: dict[str, object] | None,
         trace: TraceRecorder,
         prior_tool_history: list[dict[str, object]] | None = None,
+        route_decision: RouteDecision | None = None,
+        force_agent: bool = False,
     ) -> AgentResult:
         prior_tool_history = prior_tool_history or []
-        if match_simple_inventory_query(text):
+        operation = route_decision.operation if route_decision is not None else None
+        arguments = route_decision.arguments if route_decision is not None else {}
+        if not force_agent and (
+            operation == "inventory.list"
+            or (operation is None and match_simple_inventory_query(text))
+        ):
             trace.record(
                 "routing", "inventory_query_regex", "matched", "inventory.list"
             )
             items = trace.run(
                 "database",
                 "list_inventory",
-                self.inventory.list_items,
+                self.inventory.list_instances,
                 lambda values: f"{len(values)} item(s)",
             )
             if items:
                 lines = [
-                    f"- {item['name']}：{float(item['quantity']):g} {item['unit']}"
+                    f"- {item['name']} [{item['instance_id']}]："
+                    f"{item['quantity_text']}"
                     for item in items
                 ]
                 content = "当前库存：\n" + "\n".join(lines)
@@ -356,17 +402,67 @@ class KitchenPipeline:
             return self._finish_direct(
                 user_id=user_id,
                 request_text=text,
+                target_language=target_language,
                 content=content,
                 tool_history=[
                     *prior_tool_history,
-                    {"tool": "list_inventory", "arguments": {}, "result": items}
+                    {
+                        "tool": "list_inventory_instances",
+                        "arguments": {},
+                        "result": items,
+                    }
                 ],
                 trace=trace,
                 ingredients=ingredients,
                 confirmation_result=confirmation_result,
             )
 
-        simple_operation = match_simple_inventory_operation(text)
+        if not force_agent and operation == "inventory.find":
+            name = str(arguments["name"])
+            trace.record("routing", "inventory_query_regex", "matched", operation)
+            items = trace.run(
+                "database",
+                "find_inventory",
+                lambda: self.inventory.find_by_name(name),
+                lambda values: f"{len(values)} item(s)",
+            )
+            content = (
+                "库存中没有找到该食材。"
+                if not items
+                else f"{name}库存：\n"
+                + "\n".join(
+                    f"- {item['name']} [{item['instance_id']}]："
+                    f"{item['quantity_text']}"
+                    for item in items
+                )
+            )
+            return self._finish_direct(
+                user_id=user_id,
+                request_text=text,
+                target_language=target_language,
+                content=content,
+                tool_history=[
+                    *prior_tool_history,
+                    {
+                        "tool": "find_inventory_instances",
+                        "arguments": {"name": name},
+                        "result": items,
+                    },
+                ],
+                trace=trace,
+                ingredients=ingredients,
+                confirmation_result=confirmation_result,
+            )
+
+        simple_operation = None
+        if not force_agent and operation in {
+            "inventory.add",
+            "inventory.replace",
+            "inventory.remove",
+            "inventory.remove_all",
+            "inventory.confirm",
+        }:
+            simple_operation = RouteDecision("supported", operation, arguments)
         if simple_operation is not None:
             trace.record(
                 "routing",
@@ -374,25 +470,73 @@ class KitchenPipeline:
                 "matched",
                 simple_operation.operation,
             )
-            action = trace.run(
-                "database",
-                "create_pending_action",
-                lambda: self.actions.propose(
-                    user_id, simple_operation.operation, simple_operation.arguments
-                ),
-                lambda value: f"{value.operation}; status={value.status}",
-            )
+            proposal_arguments = dict(simple_operation.arguments)
+            if simple_operation.operation == "inventory.add":
+                action = trace.run(
+                    "database",
+                    "create_pending_action",
+                    lambda: self.actions.propose_add(
+                        user_id,
+                        str(simple_operation.arguments["name"]),
+                        str(simple_operation.arguments["quantity_text"]),
+                    ),
+                    lambda value: f"{value.operation}; status={value.status}",
+                )
+                if action.arguments.get("expiry_source") == "unknown":
+                    trace.record(
+                        "model",
+                        "expiry_inference",
+                        "degraded",
+                        "unknown expiry; proposal remains pending",
+                    )
+            else:
+                if simple_operation.operation in {
+                    "inventory.replace",
+                    "inventory.remove",
+                    "inventory.confirm",
+                }:
+                    instance_id = str(proposal_arguments["instance_id"])
+                    current = trace.run(
+                        "database",
+                        "get_inventory_instance",
+                        lambda: self.inventory.get_instance(instance_id),
+                        lambda value: "found" if value is not None else "not found",
+                    )
+                    if current is None:
+                        raise KeyError(
+                            f"inventory instance not found: {instance_id}"
+                        )
+                    if simple_operation.operation == "inventory.replace":
+                        proposal_arguments = {
+                            **proposal_arguments,
+                            "expires_at": current["expires_at"],
+                            "expiry_source": current["expiry_source"],
+                        }
+                action = trace.run(
+                    "database",
+                    "create_pending_action",
+                    lambda: self.actions.propose(
+                        user_id, simple_operation.operation, proposal_arguments
+                    ),
+                    lambda value: f"{value.operation}; status={value.status}",
+                )
+            tool_names = {
+                "inventory.add": "propose_add_inventory_instance",
+                "inventory.replace": "propose_replace_inventory_instance",
+                "inventory.remove": "propose_remove_inventory_instance",
+                "inventory.remove_all": "propose_remove_all_inventory_instances",
+                "inventory.confirm": "propose_confirm_inventory_instance",
+            }
             return self._finish_direct(
                 user_id=user_id,
                 request_text=text,
+                target_language=target_language,
                 content=f"已生成待确认操作：{action.summary}。确认前库存不会改变。",
                 tool_history=[
                     *prior_tool_history,
                     {
-                        "tool": (
-                            f"propose_{simple_operation.operation.replace('.', '_')}"
-                        ),
-                        "arguments": simple_operation.arguments,
+                        "tool": tool_names[simple_operation.operation],
+                        "arguments": action.arguments,
                         "result": action.model_dump(mode="json"),
                     }
                 ],
@@ -432,6 +576,7 @@ class KitchenPipeline:
         *,
         user_id: str,
         request_text: str,
+        target_language: str,
         content: str,
         tool_history: list[dict[str, object]],
         trace: TraceRecorder,
@@ -439,6 +584,11 @@ class KitchenPipeline:
         confirmation_result: dict[str, object] | None = None,
     ) -> AgentResult:
         ingredients = ingredients or []
+        canonical = canonical_tool_response(
+            tool_history, target_language=target_language
+        )
+        if canonical is not None:
+            content = canonical
         content = append_confidence_notice(content, ingredients)
         regex_result = regex_audit(content)
         trace.record(
@@ -450,6 +600,7 @@ class KitchenPipeline:
         tool_result = review_tool_calls(
             content,
             tool_history,
+            target_language=target_language,
             ingredients=ingredients,
             vision_confirmation_result=confirmation_result,
         )
@@ -505,10 +656,14 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
     inventory.initialize()
     action_repository = PendingActionRepository(settings.inventory_db_path)
     action_repository.initialize()
+    expiry_inferer = (
+        DeepSeekExpiryInferer(settings) if settings.deepseek_api_key else None
+    )
     actions = InventoryActionService(
         action_repository,
         inventory,
         ttl_minutes=settings.pending_action_ttl_minutes,
+        expiry_inferer=expiry_inferer,
     )
     history = ConversationHistoryRepository(settings.inventory_db_path, max_segments=5)
     history.initialize()
@@ -569,4 +724,14 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
         vision,
         food_classifier,
         food_classifier_load_error,
+    )
+
+
+def build_proactive_service(pipeline: KitchenPipeline) -> ProactiveService:
+    visits = VisitRepository(pipeline.settings.inventory_db_path)
+    visits.initialize()
+    return ProactiveService(
+        visits,
+        ReminderGenerator(pipeline.settings),
+        pipeline,
     )

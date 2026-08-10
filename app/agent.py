@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from time import perf_counter
 from typing import Any, Literal
 
@@ -16,7 +17,12 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.actions import InventoryActionService
 from app.allergens import AllergenIntolerance
-from app.audit import append_confidence_notice, regex_audit, review_tool_calls
+from app.audit import (
+    append_confidence_notice,
+    canonical_tool_response,
+    regex_audit,
+    review_tool_calls,
+)
 from app.config import Settings
 from app.context import AgentContext, AgentResult
 from app.prompts import SYSTEM_PROMPT
@@ -94,11 +100,14 @@ class KitchenAgent:
         )
         messages = response.get("messages", [])
         content = self._last_text(messages)
-        if target_language == "zh" and any(
+        history = self._tool_history(messages)
+        canonical = canonical_tool_response(history, target_language=target_language)
+        if canonical is not None:
+            content = canonical
+        elif target_language == "zh" and any(
             code in content for code in _ALLERGEN_TOOL_ERRORS
         ):
             content = "菜谱查询缺少或包含无效的过敏原过滤条件，本次没有发送查询请求。"
-        history = self._tool_history(messages)
         content = append_confidence_notice(content, context.ingredients)
         audit = regex_audit(content)
         trace.record(
@@ -118,6 +127,7 @@ class KitchenAgent:
         tool_audit = review_tool_calls(
             content,
             history,
+            target_language=target_language,
             ingredients=context.ingredients,
             vision_confirmation_result=context.vision_confirmation_result,
         )
@@ -147,71 +157,181 @@ class KitchenAgent:
         repository = self.inventory
         recipe_router = self.recipes
         action_service = self.actions
+        resolved_instance_ids: set[str] = set()
+        ambiguous_instance_ids: set[str] = set()
+        looked_up_names: set[str] = set()
+
+        def remember_instances(
+            instances: list[dict[str, object]],
+            *,
+            exact_instance: bool = False,
+        ) -> None:
+            counts_by_name: dict[str, int] = {}
+            for instance in instances:
+                name = str(instance.get("name", ""))
+                counts_by_name[name] = counts_by_name.get(name, 0) + 1
+                looked_up_names.add(name)
+            for instance in instances:
+                instance_id = str(instance.get("instance_id", ""))
+                name = str(instance.get("name", ""))
+                if exact_instance or counts_by_name[name] == 1:
+                    resolved_instance_ids.add(instance_id)
+                    ambiguous_instance_ids.discard(instance_id)
+                else:
+                    resolved_instance_ids.discard(instance_id)
+                    ambiguous_instance_ids.add(instance_id)
+
+        def require_resolved_instance(instance_id: str) -> None:
+            if instance_id in ambiguous_instance_ids:
+                raise ValueError("AMBIGUOUS_INSTANCE_MATCH")
+            if instance_id not in resolved_instance_ids:
+                raise ValueError("INSTANCE_LOOKUP_REQUIRED")
+
+        def user_selected_instance(instance_id: str) -> bool:
+            return instance_id in context.request_text
 
         @tool
-        def list_inventory() -> list[dict[str, object]]:
-            """List every ingredient currently stored in the user's inventory."""
-            return trace.run(
+        def list_inventory_instances() -> list[dict[str, object]]:
+            """List every stored inventory instance with its ID and exact quantity text."""
+            instances = trace.run(
                 "database",
-                "list_inventory",
-                repository.list_items,
+                "list_inventory_instances",
+                repository.list_instances,
                 lambda values: f"{len(values)} item(s)",
             )
+            remember_instances(instances)
+            return instances
 
         @tool
-        def get_inventory_item(name: str) -> dict[str, object] | None:
-            """Get one inventory item by its exact ingredient name."""
-            return trace.run(
+        def find_inventory_instances(name: str) -> list[dict[str, object]]:
+            """Find all inventory instances matching one exact ingredient name."""
+            instances = trace.run(
                 "database",
-                "get_inventory_item",
-                lambda: repository.get_item(name),
+                "find_inventory_instances",
+                lambda: repository.find_by_name(name),
+                lambda values: f"{len(values)} item(s)",
+            )
+            if instances:
+                remember_instances(instances)
+            return instances
+
+        @tool
+        def get_inventory_instance(instance_id: str) -> dict[str, object] | None:
+            """Get one inventory instance by its exact instance ID."""
+            instance = trace.run(
+                "database",
+                "get_inventory_instance",
+                lambda: repository.get_instance(instance_id),
                 lambda value: "found" if value else "not found",
             )
+            if instance is not None:
+                if user_selected_instance(instance_id):
+                    remember_instances([instance], exact_instance=True)
+                else:
+                    matches = repository.find_by_name(str(instance["name"]))
+                    remember_instances(matches)
+            return instance
 
         @tool
-        def propose_add_inventory_item(
-            name: str, quantity: float, unit: str
+        def propose_add_inventory_instance(
+            name: str,
+            quantity_text: str,
+            expires_at: datetime | None = None,
         ) -> dict[str, object]:
-            """Propose adding an ingredient. This never writes until the user confirms."""
+            """Propose one new instance using exact quantity text and optional user expiry."""
+            action = trace.run(
+                "database",
+                "propose_add_inventory_instance",
+                lambda: action_service.propose_add(
+                    context.user_id,
+                    name,
+                    quantity_text,
+                    user_expires_at=expires_at,
+                ).model_dump(mode="json"),
+                lambda value: f"status={value['status']}",
+            )
+            arguments = action.get("arguments")
+            if (
+                isinstance(arguments, dict)
+                and arguments.get("expiry_source") == "unknown"
+            ):
+                trace.record(
+                    "model",
+                    "expiry_inference",
+                    "degraded",
+                    "unknown expiry; proposal remains pending",
+                )
+            return action
+
+        @tool
+        def propose_replace_inventory_instance(
+            instance_id: str,
+            quantity_text: str,
+            expires_at: datetime | None,
+            expiry_source: Literal["llm", "user", "unknown"],
+        ) -> dict[str, object]:
+            """Propose a complete replacement for one looked-up inventory instance."""
+            require_resolved_instance(instance_id)
             return trace.run(
                 "database",
-                "propose_add_inventory_item",
+                "propose_replace_inventory_instance",
                 lambda: action_service.propose(
                     context.user_id,
-                    "inventory.add",
-                    {"name": name, "quantity": quantity, "unit": unit},
+                    "inventory.replace",
+                    {
+                        "instance_id": instance_id,
+                        "quantity_text": quantity_text,
+                        "expires_at": (
+                            expires_at.isoformat() if expires_at is not None else None
+                        ),
+                        "expiry_source": expiry_source,
+                    },
                 ).model_dump(mode="json"),
                 lambda value: f"status={value['status']}",
             )
 
         @tool
-        def propose_update_inventory_item(
-            name: str, quantity: float, unit: str
-        ) -> dict[str, object]:
-            """Propose setting inventory quantity. This never writes until confirmation."""
+        def propose_remove_inventory_instance(instance_id: str) -> dict[str, object]:
+            """Propose deleting one looked-up inventory instance by exact ID."""
+            require_resolved_instance(instance_id)
             return trace.run(
                 "database",
-                "propose_update_inventory_item",
-                lambda: action_service.propose(
-                    context.user_id,
-                    "inventory.update",
-                    {"name": name, "quantity": quantity, "unit": unit},
-                ).model_dump(mode="json"),
-                lambda value: f"status={value['status']}",
-            )
-
-        @tool
-        def propose_remove_inventory_item(
-            name: str, quantity: float | None = None
-        ) -> dict[str, object]:
-            """Propose reducing or deleting inventory. Confirmation is always required."""
-            return trace.run(
-                "database",
-                "propose_remove_inventory_item",
+                "propose_remove_inventory_instance",
                 lambda: action_service.propose(
                     context.user_id,
                     "inventory.remove",
-                    {"name": name, "quantity": quantity},
+                    {"instance_id": instance_id},
+                ).model_dump(mode="json"),
+                lambda value: f"status={value['status']}",
+            )
+
+        @tool
+        def propose_remove_all_inventory_instances(name: str) -> dict[str, object]:
+            """Propose deleting every looked-up inventory instance with an exact name."""
+            if name not in looked_up_names:
+                raise ValueError("INSTANCE_LOOKUP_REQUIRED")
+            return trace.run(
+                "database",
+                "propose_remove_all_inventory_instances",
+                lambda: action_service.propose(
+                    context.user_id,
+                    "inventory.remove_all",
+                    {"name": name},
+                ).model_dump(mode="json"),
+                lambda value: f"status={value['status']}",
+            )
+
+        @tool
+        def propose_confirm_inventory_instance(instance_id: str) -> dict[str, object]:
+            """Propose confirming one looked-up inventory instance is still current."""
+            require_resolved_instance(instance_id)
+            return trace.run(
+                "database",
+                "propose_confirm_inventory_instance",
+                lambda: action_service.propose(
+                    context.user_id,
+                    "inventory.confirm",
+                    {"instance_id": instance_id},
                 ).model_dump(mode="json"),
                 lambda value: f"status={value['status']}",
             )
@@ -275,11 +395,14 @@ class KitchenAgent:
             )
 
         return [
-            list_inventory,
-            get_inventory_item,
-            propose_add_inventory_item,
-            propose_update_inventory_item,
-            propose_remove_inventory_item,
+            list_inventory_instances,
+            find_inventory_instances,
+            get_inventory_instance,
+            propose_add_inventory_instance,
+            propose_replace_inventory_instance,
+            propose_remove_inventory_instance,
+            propose_remove_all_inventory_instances,
+            propose_confirm_inventory_instance,
             search_recipes,
         ]
 

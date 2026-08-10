@@ -1,3 +1,4 @@
+const { escapeHtml, renderSafeMarkdown } = globalThis.KitchenMarkdown;
 const form = document.querySelector("#agent-form");
 const promptInput = document.querySelector("#prompt");
 const charCount = document.querySelector("#char-count");
@@ -13,6 +14,8 @@ const answerContent = document.querySelector("#answer-content");
 const toolTrace = document.querySelector("#tool-trace");
 const inventoryList = document.querySelector("#inventory-list");
 const globalStatus = document.querySelector("#global-status");
+const proactiveReminder = document.querySelector("#proactive-reminder");
+const proactiveReminderMessage = proactiveReminder.querySelector(".proactive-reminder-message");
 const confirmationSection = document.querySelector("#confirmation-section");
 const confirmationList = document.querySelector("#confirmation-list");
 const visionCheckpoint = document.querySelector("#vision-checkpoint");
@@ -45,6 +48,7 @@ const requestLimits = {
   maxTextChars: 2000,
   maxImageBytes: 3 * 1024 * 1024,
 };
+const maxProactiveReminderChars = 100;
 
 promptInput.addEventListener("input", () => {
   charCount.textContent = promptInput.value.length;
@@ -230,13 +234,36 @@ async function loadInventory() {
       return;
     }
     inventoryList.innerHTML = data.items.map((item) => `
-      <div class="inventory-item">
-        <strong>${escapeHtml(item.name)}</strong>
-        <span>${item.quantity} ${escapeHtml(item.unit)}</span>
-      </div>
+      <article class="inventory-item">
+        <header class="inventory-item-heading">
+          <strong>${escapeHtml(item.name)}</strong>
+          <span class="inventory-instance-id" title="完整库存实例 ID">${escapeHtml(item.instance_id)}</span>
+        </header>
+        <p class="inventory-quantity">${escapeHtml(item.quantity_text)}</p>
+        <dl class="inventory-details">
+          <div><dt>入库</dt><dd>${formatLocalDateTime(item.stocked_at)}</dd></div>
+          <div><dt>过期</dt><dd>${formatLocalDateTime(item.expires_at, "过期未知")}</dd></div>
+          <div><dt>确认</dt><dd>${formatLocalDateTime(item.last_confirmed_at)}</dd></div>
+        </dl>
+      </article>
     `).join("");
   } catch {
     inventoryList.innerHTML = '<p class="empty-note">库存暂时打不开，请稍后再试。</p>';
+  }
+}
+
+async function loadProactiveReminder() {
+  proactiveReminder.hidden = true;
+  proactiveReminderMessage.textContent = "";
+  try {
+    const response = await fetch("/api/proactive-check", { method: "POST" });
+    const data = await response.json();
+    const message = typeof data.message === "string" ? data.message.trim() : "";
+    if (!response.ok || !message || message.length > maxProactiveReminderChars || /[\r\n]/.test(message)) return;
+    proactiveReminderMessage.textContent = message;
+    proactiveReminder.hidden = false;
+  } catch {
+    // A reminder must never block the independent pantry and status requests.
   }
 }
 
@@ -246,20 +273,27 @@ async function loadPendingActions() {
     const data = await response.json();
     const actions = data.actions || [];
     confirmationSection.hidden = actions.length === 0;
-    confirmationList.innerHTML = actions.map((action) => `
-      <article class="confirmation-card" data-action-id="${escapeHtml(action.action_id)}">
+    confirmationList.innerHTML = actions.map((action) => {
+      const previewReady = action.preview
+        && typeof action.preview === "object"
+        && Object.keys(action.preview).length > 0;
+      const confirmAttributes = previewReady ? "" : "disabled hidden aria-disabled=\"true\"";
+      return `
+      <article class="confirmation-card" data-action-id="${escapeHtml(action.action_id)}" data-preview-ready="${previewReady}">
         <div class="confirmation-seal">待<br>确认</div>
         <div class="confirmation-copy">
           <span>${escapeHtml(operationLabel(action.operation))}</span>
           <h3>${escapeHtml(action.summary)}</h3>
+          ${renderActionPreview(action)}
           <small>${escapeHtml(action.action_id)} · 过期时间 ${formatTime(action.expires_at)}</small>
         </div>
         <div class="confirmation-actions">
           <button type="button" class="cancel-action" data-action="cancel">取消</button>
-          <button type="button" class="confirm-action" data-action="confirm">确认执行</button>
+          <button type="button" class="confirm-action" data-action="confirm" ${confirmAttributes}>确认执行</button>
         </div>
       </article>
-    `).join("");
+    `;
+    }).join("");
   } catch {
     confirmationSection.hidden = true;
   }
@@ -449,119 +483,100 @@ function shorten(value, limit) {
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
 }
 
-function renderInlineMarkdown(text) {
-  const codeSpans = [];
-  let rendered = text.replace(/`([^`\n]+)`/g, (_, code) => {
-    const index = codeSpans.push(code) - 1;
-    return `\uE000${index}\uE001`;
-  });
-  rendered = rendered
-    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/__([^_\n]+)__/g, "<strong>$1</strong>")
-    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
-  return rendered.replace(/\uE000(\d+)\uE001/g, (_, index) => {
-    return `<code>${codeSpans[Number(index)]}</code>`;
-  });
+function previewField(label, value, className = "") {
+  const displayValue = value === null || value === undefined || value === ""
+    ? "未知"
+    : String(value);
+  return `
+    <div class="${escapeHtml(className)}">
+      <dt>${escapeHtml(label)}</dt>
+      <dd>${escapeHtml(displayValue)}</dd>
+    </div>
+  `;
 }
 
-function renderSafeMarkdown(markdown) {
-  const lines = escapeHtml(String(markdown || "")).replace(/\r\n?/g, "\n").split("\n");
-  const output = [];
-  let paragraph = [];
-  let listType = null;
-  let inCodeBlock = false;
-  let codeLines = [];
-
-  const closeParagraph = () => {
-    if (!paragraph.length) return;
-    output.push(`<p>${paragraph.map(renderInlineMarkdown).join("<br>")}</p>`);
-    paragraph = [];
-  };
-  const closeList = () => {
-    if (!listType) return;
-    output.push(`</${listType}>`);
-    listType = null;
-  };
-  const closeCodeBlock = () => {
-    output.push(`<pre><code>${codeLines.join("\n")}</code></pre>`);
-    codeLines = [];
-    inCodeBlock = false;
-  };
-
-  lines.forEach((line) => {
-    if (/^\s*```/.test(line)) {
-      if (inCodeBlock) {
-        closeCodeBlock();
-      } else {
-        closeParagraph();
-        closeList();
-        inCodeBlock = true;
-      }
-      return;
-    }
-    if (inCodeBlock) {
-      codeLines.push(line);
-      return;
-    }
-    if (!line.trim()) {
-      closeParagraph();
-      closeList();
-      return;
-    }
-    const heading = line.match(/^(#{1,3})\s+(.+)$/);
-    if (heading) {
-      closeParagraph();
-      closeList();
-      const level = heading[1].length;
-      output.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
-      return;
-    }
-    if (/^\s*(?:---|___|\*\*\*)\s*$/.test(line)) {
-      closeParagraph();
-      closeList();
-      output.push("<hr>");
-      return;
-    }
-    const unordered = line.match(/^\s*[-*]\s+(.+)$/);
-    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
-    if (unordered || ordered) {
-      closeParagraph();
-      const nextListType = unordered ? "ul" : "ol";
-      if (listType !== nextListType) {
-        closeList();
-        listType = nextListType;
-        output.push(`<${listType}>`);
-      }
-      output.push(`<li>${renderInlineMarkdown((unordered || ordered)[1])}</li>`);
-      return;
-    }
-    const quote = line.match(/^&gt;\s?(.+)$/);
-    if (quote) {
-      closeParagraph();
-      closeList();
-      output.push(`<blockquote>${renderInlineMarkdown(quote[1])}</blockquote>`);
-      return;
-    }
-    paragraph.push(line);
-  });
-
-  if (inCodeBlock) closeCodeBlock();
-  closeParagraph();
-  closeList();
-  return output.join("");
+function previewDate(value) {
+  return value ? formatLocalDateTime(value, "未知") : "未知";
 }
 
-function escapeHtml(value) {
-  return String(value).replace(/[&<>'"]/g, (character) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
-  })[character]);
+function currentInstanceFields(current, { includeConfirmed = false } = {}) {
+  if (!current || typeof current !== "object") return [];
+  const fields = [
+    previewField("完整实例 ID", current.instance_id, "confirmation-preview-id"),
+    previewField("食材", current.name),
+    previewField("当前数量", current.quantity_text),
+    previewField("当前过期时间", previewDate(current.expires_at)),
+    previewField("日期来源", current.expiry_source),
+  ];
+  if (includeConfirmed) {
+    fields.push(previewField("上次确认时间", previewDate(current.last_confirmed_at)));
+  }
+  return fields;
+}
+
+function renderActionPreview(action) {
+  const preview = action.preview && typeof action.preview === "object"
+    ? action.preview
+    : {};
+  let fields = [];
+  let items = "";
+
+  if (action.operation === "inventory.add") {
+    const proposed = preview.proposed || {};
+    fields = [
+      previewField("食材", proposed.name),
+      previewField("拟新增数量", proposed.quantity_text),
+      previewField("拟定过期时间", previewDate(proposed.expires_at)),
+      previewField("日期来源", proposed.expiry_source),
+    ];
+  } else if (action.operation === "inventory.replace") {
+    const proposed = preview.proposed || {};
+    fields = [
+      ...currentInstanceFields(preview.current),
+      previewField("拟替换数量", proposed.quantity_text),
+      previewField("拟定过期时间", previewDate(proposed.expires_at)),
+      previewField("拟定日期来源", proposed.expiry_source),
+    ];
+  } else if (action.operation === "inventory.remove") {
+    fields = currentInstanceFields(preview.current);
+  } else if (action.operation === "inventory.confirm") {
+    fields = currentInstanceFields(preview.current, { includeConfirmed: true });
+  } else if (action.operation === "inventory.remove_all") {
+    fields = [
+      previewField("精确食材名称", preview.name),
+      previewField("预计删除数量", preview.expected_count),
+    ];
+    const previewItems = Array.isArray(preview.items) ? preview.items : [];
+    items = `
+      <ul class="confirmation-preview-items">
+        ${previewItems.map((item) => `
+          <li>
+            <code>${escapeHtml(item.instance_id)}</code>
+            <span>${escapeHtml(item.name)} · ${escapeHtml(item.quantity_text)} · 过期 ${escapeHtml(previewDate(item.expires_at))} · 日期来源 ${escapeHtml(item.expiry_source)}</span>
+          </li>
+        `).join("")}
+      </ul>
+    `;
+  }
+
+  if (!fields.length && !items) {
+    return '<p class="confirmation-preview-empty">暂无结构化预览，请取消并重新创建提案。</p>';
+  }
+  return `
+    <section class="confirmation-preview" data-preview-operation="${escapeHtml(action.operation)}" aria-label="操作预览">
+      <dl>${fields.join("")}</dl>
+      ${items}
+    </section>
+  `;
 }
 
 function operationLabel(operation) {
   return ({
     "inventory.add": "库存新增",
-    "inventory.update": "库存修改",
-    "inventory.remove": "库存删除",
+    "inventory.replace": "库存替换",
+    "inventory.remove": "单项删除",
+    "inventory.remove_all": "同名全部删除",
+    "inventory.confirm": "库存校准",
   })[operation] || operation;
 }
 
@@ -569,7 +584,21 @@ function formatTime(value) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
+function formatLocalDateTime(value, fallback = "时间未知") {
+  if (!value) return fallback;
+  const time = new Date(value);
+  if (Number.isNaN(time.getTime())) return fallback;
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(time);
+}
+
 document.querySelector("#refresh-inventory").addEventListener("click", loadInventory);
 loadStatus();
 loadInventory();
 loadPendingActions();
+loadProactiveReminder();

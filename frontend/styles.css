@@ -125,6 +125,16 @@ main { width: min(1240px, calc(100% - 48px)); margin: 0 auto; }
 .orbit-label { position: absolute; padding: 8px 12px; background: var(--paper-light); border: 1px solid var(--line); border-radius: 999px; font-size: 12px; box-shadow: 0 8px 20px rgba(24,55,46,.08); }
 .label-a { top: 4%; left: 10%; }.label-b { top: 19%; right: -4%; }.label-c { bottom: 11%; right: 2%; }.label-d { bottom: 3%; left: 5%; }
 
+.proactive-reminder {
+  position: relative; width: min(720px, calc(100% - 92px)); margin: -28px auto 28px; padding: 18px 30px 17px;
+  color: var(--ink); background: #f7e7a8; border: 1px solid rgba(24,55,46,.48); border-left: 5px solid var(--tomato);
+  box-shadow: 7px 8px 0 rgba(24,55,46,.12); transform: rotate(-.55deg);
+}
+.proactive-reminder::before { content: ""; position: absolute; inset: 6px; border: 1px dashed rgba(24,55,46,.28); pointer-events: none; }
+.proactive-reminder-pin { position: absolute; z-index: 1; top: -10px; left: 18px; color: var(--tomato); font-size: 20px; line-height: 1; text-shadow: 1px 2px 0 rgba(24,55,46,.24); }
+.proactive-reminder-kicker { position: relative; margin: 0 0 5px; color: var(--tomato); font: 800 9px/1 monospace; letter-spacing: .18em; }
+.proactive-reminder-message { position: relative; margin: 0; font: 500 16px/1.55 "STKaiti", "KaiTi", "Songti SC", serif; }
+
 .workspace { display: grid; grid-template-columns: minmax(0, 1fr) 340px; border: 1px solid var(--ink); box-shadow: var(--shadow); background: var(--paper-light); }
 .workbench { padding: 46px; }
 .section-heading { display: flex; justify-content: space-between; gap: 36px; align-items: flex-start; margin-bottom: 34px; }
@@ -173,8 +183,15 @@ main { width: min(1240px, calc(100% - 48px)); margin: 0 auto; }
 .inventory-title h2 { margin: 0; font: 500 30px/1 "STKaiti", "KaiTi", serif; }
 .inventory-title button { width: 32px; height: 32px; border: 1px solid rgba(255,255,255,.24); border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
 .inventory-list { min-height: 270px; }
-.inventory-item { display: grid; grid-template-columns: 1fr auto; gap: 12px; padding: 13px 0; border-bottom: 1px dotted rgba(255,255,255,.2); }
-.inventory-item strong { font-size: 13px; }.inventory-item span { color: #d9c875; font: 600 12px/1 monospace; }
+.inventory-item { padding: 15px 0; border-bottom: 1px dotted rgba(255,255,255,.2); }
+.inventory-item-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.inventory-item strong { min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+.inventory-instance-id { min-width: 0; color: #a8bdb3; font: 9px/1.35 monospace; letter-spacing: .03em; overflow-wrap: anywhere; user-select: all; }
+.inventory-quantity { margin: 7px 0 10px; color: #e4ce75; font: 600 15px/1.3 "STKaiti", "KaiTi", "Songti SC", serif; overflow-wrap: anywhere; }
+.inventory-details { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin: 0; }
+.inventory-details div { min-width: 0; }
+.inventory-details dt { margin: 0 0 3px; color: #829b90; font: 700 8px/1 monospace; letter-spacing: .1em; }
+.inventory-details dd { margin: 0; color: #d6e1d8; font: 9px/1.35 monospace; overflow-wrap: anywhere; }
 .empty-note { color: #a8bdb3; font-size: 12px; line-height: 1.7; }
 .inventory-foot { margin-top: 24px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,.18); color: #829b90; font-size: 9px; letter-spacing: .12em; text-transform: uppercase; }
 
@@ -209,6 +226,18 @@ main { width: min(1240px, calc(100% - 48px)); margin: 0 auto; }
 .confirmation-copy > span { color: var(--tomato); font-size: 9px; font-weight: 800; letter-spacing: .15em; }
 .confirmation-copy h3 { margin: 5px 0 7px; font: 500 18px/1.3 "Iowan Old Style", "Songti SC", serif; }
 .confirmation-copy small { color: var(--ink-soft); font: 10px/1.4 monospace; }
+.confirmation-preview { margin: 12px 0; padding: 12px 14px; border: 1px dashed var(--line); background: rgba(24,55,46,.035); }
+.confirmation-preview dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 16px; margin: 0; }
+.confirmation-preview dl > div { min-width: 0; }
+.confirmation-preview dt { margin: 0 0 3px; color: var(--ink-soft); font: 800 8px/1.2 monospace; letter-spacing: .08em; }
+.confirmation-preview dd { margin: 0; font: 600 11px/1.45 monospace; overflow-wrap: anywhere; }
+.confirmation-preview-id { grid-column: 1 / -1; }
+.confirmation-preview-id dd, .confirmation-preview-items code { user-select: all; }
+.confirmation-preview-items { display: grid; gap: 7px; margin: 12px 0 0; padding: 10px 0 0; border-top: 1px dotted var(--line); list-style: none; }
+.confirmation-preview-items li { display: grid; gap: 3px; min-width: 0; }
+.confirmation-preview-items code { padding: 0; color: var(--tomato); background: transparent; font: 800 9px/1.3 monospace; overflow-wrap: anywhere; }
+.confirmation-preview-items span { color: var(--ink-soft); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.confirmation-preview-empty { margin: 10px 0; color: var(--tomato); font-size: 10px; line-height: 1.5; }
 .confirmation-actions { display: flex; gap: 8px; }
 .confirmation-actions button { padding: 10px 14px; border: 1px solid var(--ink); cursor: pointer; font-size: 11px; font-weight: 800; transition: .2s; }
 .cancel-action { background: transparent; }
@@ -271,6 +300,7 @@ footer { width: min(1240px, calc(100% - 48px)); margin: 0 auto; padding: 24px 0 
   .process-orbit { max-width: 330px; }
   .workspace { grid-template-columns: 1fr; }
   .inventory-panel { border-left: 0; }
+  .proactive-reminder { margin-top: -18px; }
   .result-grid { grid-template-columns: 1fr; }
   .confirmation-heading { display: block; }.confirmation-heading > p { margin: 14px 0 0 28px; }
   .service-grid { grid-template-columns: repeat(2, 1fr); }
@@ -288,6 +318,8 @@ footer { width: min(1240px, calc(100% - 48px)); margin: 0 auto; padding: 24px 0 
   .hero { padding: 54px 0 65px; min-height: auto; }
   .hero h1 { font-size: 52px; }
   .workspace { margin-inline: -14px; border-left: 0; border-right: 0; }
+  .proactive-reminder { width: calc(100% - 14px); margin: -16px 7px 22px; padding: 16px 22px 15px; }
+  .proactive-reminder-message { font-size: 15px; }
   .workbench { padding: 32px 22px; }
   .section-heading { display: block; }.section-heading p { margin-top: 14px; }
   .form-grid { grid-template-columns: 1fr; }
@@ -302,6 +334,9 @@ footer { width: min(1240px, calc(100% - 48px)); margin: 0 auto; padding: 24px 0 
   .confirmation-card { grid-template-columns: 48px 1fr; }
   .confirmation-seal { width: 44px; height: 44px; }
   .confirmation-actions { grid-column: 1 / -1; }.confirmation-actions button { flex: 1; }
+  .confirmation-preview dl { grid-template-columns: 1fr; }
+  .inventory-details { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .inventory-details div:last-child { grid-column: 1 / -1; }
   .service-card { min-height: 120px; border-right: 0; }
   footer { display: block; line-height: 1.7; }
 }

@@ -81,6 +81,12 @@
         </div>
       </section>
 
+      <aside class="proactive-reminder" id="proactive-reminder" role="status" aria-live="polite" hidden>
+        <span class="proactive-reminder-pin" aria-hidden="true">●</span>
+        <p class="proactive-reminder-kicker">冰箱便笺</p>
+        <p class="proactive-reminder-message"></p>
+      </aside>
+
       <section class="workspace reveal delay-2">
         <div class="workbench">
           <div class="section-heading">
@@ -174,7 +180,7 @@
             <p class="eyebrow">HUMAN CHECKPOINT</p>
             <h2>这些操作还没有执行</h2>
           </div>
-          <p>Agent 只能提出库存变更。请核对食材、数量和单位，再决定是否真正写入数据库。</p>
+          <p>Agent 只能提出库存变更。请核对实例、数量描述和日期，再决定是否真正写入数据库。</p>
         </div>
         <div class="confirmation-list" id="confirmation-list"></div>
       </section>
@@ -213,6 +219,7 @@
       </div>
     </template>
 
+    <script src="/static/markdown.js" defer></script>
     <script src="/static/app.js" defer></script>
   </body>
 </html>

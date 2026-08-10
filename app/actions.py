@@ -3,39 +3,79 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.expiry import ExpiryInferer
 from app.tools.inventory import InventoryRepository
 
 ActionStatus = Literal[
     "pending", "executing", "executed", "cancelled", "expired", "failed"
 ]
+_INSTANCE_ID_PATTERN = r"^inv_[0-9a-f]{32}$"
+_INVENTORY_SNAPSHOT_FIELDS = {
+    "instance_id",
+    "name",
+    "quantity_text",
+    "stocked_at",
+    "expires_at",
+    "expiry_source",
+    "last_confirmed_at",
+}
+_UNSAFE_PREVIEW_ERROR = (
+    "Structured confirmation preview unavailable; recreate this proposal."
+)
 
 
 class AddInventoryArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=100)
-    quantity: float = Field(gt=0)
-    unit: str = Field(min_length=1, max_length=20)
+    quantity_text: str = Field(min_length=1, max_length=100)
+    expires_at: datetime | None
+    expiry_source: Literal["llm", "user", "unknown"]
+
+    @field_validator("expires_at")
+    @classmethod
+    def expires_at_must_be_aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("expires_at must be timezone-aware")
+        return value
 
 
-class UpdateInventoryArguments(BaseModel):
+class ReplaceInventoryArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=100)
-    quantity: float = Field(ge=0)
-    unit: str = Field(min_length=1, max_length=20)
+    instance_id: str = Field(pattern=_INSTANCE_ID_PATTERN)
+    quantity_text: str = Field(min_length=1, max_length=100)
+    expires_at: datetime | None
+    expiry_source: Literal["llm", "user", "unknown"]
+
+    @field_validator("expires_at")
+    @classmethod
+    def expires_at_must_be_aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("expires_at must be timezone-aware")
+        return value
 
 
 class RemoveInventoryArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    instance_id: str = Field(pattern=_INSTANCE_ID_PATTERN)
+
+
+class RemoveAllInventoryArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=100)
-    quantity: float | None = Field(default=None, gt=0)
+
+
+class ConfirmInventoryArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    instance_id: str = Field(pattern=_INSTANCE_ID_PATTERN)
 
 
 class PendingAction(BaseModel):
@@ -44,6 +84,7 @@ class PendingAction(BaseModel):
     operation: str
     arguments: dict[str, object]
     summary: str
+    preview: dict[str, object] = Field(default_factory=dict)
     status: ActionStatus
     created_at: datetime
     expires_at: datetime
@@ -53,8 +94,10 @@ class PendingAction(BaseModel):
 
 ARGUMENT_MODELS = {
     "inventory.add": AddInventoryArguments,
-    "inventory.update": UpdateInventoryArguments,
+    "inventory.replace": ReplaceInventoryArguments,
     "inventory.remove": RemoveInventoryArguments,
+    "inventory.remove_all": RemoveAllInventoryArguments,
+    "inventory.confirm": ConfirmInventoryArguments,
 }
 
 WRITE_OPERATION_ALLOWLIST = frozenset(ARGUMENT_MODELS)
@@ -70,13 +113,127 @@ def validate_operation(operation: str, arguments: dict[str, object]) -> BaseMode
 def action_summary(operation: str, arguments: BaseModel) -> str:
     values = arguments.model_dump()
     if operation == "inventory.add":
-        return f"向库存添加 {values['quantity']:g} {values['unit']} {values['name']}"
-    if operation == "inventory.update":
-        return f"将 {values['name']} 的库存设置为 {values['quantity']:g} {values['unit']}"
-    quantity = values.get("quantity")
-    if quantity is None:
-        return f"从库存删除 {values['name']}"
-    return f"从库存减少 {quantity:g} {values['name']}"
+        return f"向库存添加 {values['quantity_text']} {values['name']}"
+    if operation == "inventory.replace":
+        return f"更新库存项 {values['instance_id']}"
+    if operation == "inventory.remove":
+        return f"从库存删除库存项 {values['instance_id']}"
+    if operation == "inventory.remove_all":
+        return f"从库存删除所有 {values['name']}"
+    if operation == "inventory.confirm":
+        return f"确认库存项 {values['instance_id']}"
+    raise ValueError(f"Operation is not allowlisted: {operation}")
+
+
+def preview_validation_error(
+    operation: str,
+    arguments: dict[str, object],
+    preview: dict[str, object],
+) -> str | None:
+    """Return a safe error when a persisted mutation preview is not authoritative."""
+
+    try:
+        validated = validate_operation(operation, arguments)
+    except (TypeError, ValueError):
+        return _UNSAFE_PREVIEW_ERROR
+    values = validated.model_dump(mode="json")
+    if not preview:
+        return _UNSAFE_PREVIEW_ERROR
+
+    if operation == "inventory.add":
+        if set(preview) != {"proposed"} or preview.get("proposed") != values:
+            return _UNSAFE_PREVIEW_ERROR
+        return None
+
+    if operation in {"inventory.replace", "inventory.remove", "inventory.confirm"}:
+        expected_keys = {"current", "proposed"} if operation == "inventory.replace" else {"current"}
+        current = preview.get("current")
+        if set(preview) != expected_keys or not _valid_inventory_snapshot(current):
+            return _UNSAFE_PREVIEW_ERROR
+        assert isinstance(current, dict)
+        if current.get("instance_id") != values.get("instance_id"):
+            return _UNSAFE_PREVIEW_ERROR
+        if operation == "inventory.replace":
+            expected_proposed = {
+                "instance_id": values.get("instance_id"),
+                "name": current.get("name"),
+                "quantity_text": values.get("quantity_text"),
+                "expires_at": values.get("expires_at"),
+                "expiry_source": values.get("expiry_source"),
+            }
+            if preview.get("proposed") != expected_proposed:
+                return _UNSAFE_PREVIEW_ERROR
+        return None
+
+    if operation == "inventory.remove_all":
+        if set(preview) != {"name", "items", "expected_count"}:
+            return _UNSAFE_PREVIEW_ERROR
+        name = values.get("name")
+        items = preview.get("items")
+        expected_count = preview.get("expected_count")
+        if (
+            preview.get("name") != name
+            or not isinstance(items, list)
+            or not items
+            or not isinstance(expected_count, int)
+            or isinstance(expected_count, bool)
+            or expected_count != len(items)
+            or any(not _valid_inventory_snapshot(item) for item in items)
+            or any(item.get("name") != name for item in items if isinstance(item, dict))
+        ):
+            return _UNSAFE_PREVIEW_ERROR
+        instance_ids = [
+            str(item["instance_id"]) for item in items if isinstance(item, dict)
+        ]
+        if len(instance_ids) != len(set(instance_ids)):
+            return _UNSAFE_PREVIEW_ERROR
+        return None
+
+    return _UNSAFE_PREVIEW_ERROR
+
+
+def _valid_inventory_snapshot(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != _INVENTORY_SNAPSHOT_FIELDS:
+        return False
+    instance_id = value.get("instance_id")
+    if not isinstance(instance_id, str) or re.fullmatch(_INSTANCE_ID_PATTERN, instance_id) is None:
+        return False
+    if (
+        not isinstance(value.get("name"), str)
+        or not str(value["name"]).strip()
+        or not isinstance(value.get("quantity_text"), str)
+        or not str(value["quantity_text"]).strip()
+        or value.get("expiry_source") not in {"llm", "user", "unknown"}
+    ):
+        return False
+    if not _is_utc_iso(value.get("stocked_at")) or not _is_utc_iso(
+        value.get("last_confirmed_at")
+    ):
+        return False
+    expires_at = value.get("expires_at")
+    return expires_at is None or _is_utc_iso(expires_at)
+
+
+def _is_utc_iso(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return (
+        parsed.tzinfo is not None
+        and parsed.utcoffset() is not None
+        and parsed.utcoffset() == timedelta(0)
+    )
+
+
+def _decode_json_object(value: object) -> dict[str, object] | None:
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 class PendingActionRepository:
@@ -98,13 +255,46 @@ class PendingActionRepository:
                     created_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     result_json TEXT,
-                    error TEXT
+                    error TEXT,
+                    preview_json TEXT NOT NULL DEFAULT '{}'
                 )
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(pending_actions)"
+                ).fetchall()
+            }
+            if "preview_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE pending_actions ADD COLUMN preview_json "
+                    "TEXT NOT NULL DEFAULT '{}'"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_pending_actions_user_status "
                 "ON pending_actions(user_id, status)"
+            )
+            pending_inventory_rows = connection.execute(
+                "SELECT action_id, operation, arguments_json, preview_json "
+                "FROM pending_actions "
+                "WHERE operation LIKE 'inventory.%' AND status = 'pending'"
+            ).fetchall()
+            unsafe_action_ids: list[str] = []
+            for action_id, operation, arguments_json, preview_json in pending_inventory_rows:
+                arguments = _decode_json_object(arguments_json)
+                preview = _decode_json_object(preview_json)
+                if (
+                    arguments is None
+                    or preview is None
+                    or preview_validation_error(str(operation), arguments, preview)
+                    is not None
+                ):
+                    unsafe_action_ids.append(str(action_id))
+            connection.executemany(
+                "UPDATE pending_actions SET status = 'failed', error = ? "
+                "WHERE action_id = ? AND status = 'pending'",
+                [(_UNSAFE_PREVIEW_ERROR, action_id) for action_id in unsafe_action_ids],
             )
 
     def create(
@@ -114,6 +304,7 @@ class PendingActionRepository:
         operation: str,
         arguments: dict[str, object],
         summary: str,
+        preview: dict[str, object],
         ttl_minutes: int,
     ) -> PendingAction:
         now = datetime.now(timezone.utc)
@@ -123,6 +314,7 @@ class PendingActionRepository:
             operation=operation,
             arguments=arguments,
             summary=summary,
+            preview=preview,
             status="pending",
             created_at=now,
             expires_at=now + timedelta(minutes=ttl_minutes),
@@ -132,8 +324,8 @@ class PendingActionRepository:
                 """
                 INSERT INTO pending_actions(
                     action_id, user_id, operation, arguments_json, summary,
-                    status, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    status, created_at, expires_at, preview_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     action.action_id,
@@ -144,6 +336,7 @@ class PendingActionRepository:
                     action.status,
                     action.created_at.isoformat(),
                     action.expires_at.isoformat(),
+                    json.dumps(action.preview, ensure_ascii=False),
                 ),
             )
         return action
@@ -180,6 +373,16 @@ class PendingActionRepository:
                 return action, False
             if action.status != "pending":
                 raise ValueError(f"Action cannot be confirmed from status: {action.status}")
+            if preview_validation_error(
+                action.operation, action.arguments, action.preview
+            ) is not None:
+                connection.execute(
+                    "UPDATE pending_actions SET status = 'failed', error = ? "
+                    "WHERE action_id = ? AND status = 'pending'",
+                    (_UNSAFE_PREVIEW_ERROR, action_id),
+                )
+                connection.commit()
+                raise ValueError(_UNSAFE_PREVIEW_ERROR)
             if action.expires_at <= datetime.now(timezone.utc):
                 connection.execute(
                     "UPDATE pending_actions SET status = 'expired' WHERE action_id = ?",
@@ -255,6 +458,11 @@ class PendingActionRepository:
             expires_at=datetime.fromisoformat(str(row[7])),
             result=json.loads(str(row[8])) if row[8] else None,
             error=str(row[9]) if row[9] else None,
+            preview=(
+                _decode_json_object(row[10]) or {}
+                if len(row) > 10 and row[10]
+                else {}
+            ),
         )
 
 
@@ -264,20 +472,69 @@ class InventoryActionService:
         repository: PendingActionRepository,
         inventory: InventoryRepository,
         ttl_minutes: int = 15,
+        *,
+        expiry_inferer: ExpiryInferer | None = None,
     ) -> None:
         self.repository = repository
         self.inventory = inventory
+        self.expiry_inferer = expiry_inferer
         self.ttl_minutes = ttl_minutes
+
+    def propose_add(
+        self,
+        user_id: str,
+        name: str,
+        quantity_text: str,
+        *,
+        user_expires_at: datetime | None = None,
+    ) -> PendingAction:
+        if user_expires_at is not None:
+            expires_at = user_expires_at
+            expiry_source = "user"
+        else:
+            now = datetime.now(timezone.utc)
+            try:
+                inferred = (
+                    self.expiry_inferer.infer(name, now)
+                    if self.expiry_inferer is not None
+                    else None
+                )
+            except Exception:
+                inferred = None
+            if (
+                inferred is not None
+                and inferred.tzinfo is not None
+                and inferred.utcoffset() is not None
+                and inferred > now
+            ):
+                expires_at = inferred
+                expiry_source = "llm"
+            else:
+                expires_at = None
+                expiry_source = "unknown"
+
+        return self.propose(
+            user_id,
+            "inventory.add",
+            {
+                "name": name,
+                "quantity_text": quantity_text,
+                "expires_at": expires_at.isoformat() if expires_at is not None else None,
+                "expiry_source": expiry_source,
+            },
+        )
 
     def propose(
         self, user_id: str, operation: str, arguments: dict[str, object]
     ) -> PendingAction:
         validated = validate_operation(operation, arguments)
+        preview = self._build_preview(operation, validated)
         return self.repository.create(
             user_id=user_id,
             operation=operation,
-            arguments=validated.model_dump(),
+            arguments=validated.model_dump(mode="json"),
             summary=action_summary(operation, validated),
+            preview=preview,
             ttl_minutes=self.ttl_minutes,
         )
 
@@ -296,12 +553,54 @@ class InventoryActionService:
     def cancel(self, action_id: str, user_id: str) -> PendingAction:
         return self.repository.cancel(action_id, user_id)
 
-    def _execute(self, operation: str, arguments: BaseModel) -> dict[str, object]:
-        values = arguments.model_dump()
+    def _build_preview(
+        self, operation: str, arguments: BaseModel
+    ) -> dict[str, object]:
+        values = arguments.model_dump(mode="json")
         if operation == "inventory.add":
-            return self.inventory.add_item(**values)  # type: ignore[arg-type]
-        if operation == "inventory.update":
-            return self.inventory.update_item(**values)  # type: ignore[arg-type]
+            return {"proposed": values}
+        if operation in {
+            "inventory.replace",
+            "inventory.remove",
+            "inventory.confirm",
+        }:
+            instance_id = str(values["instance_id"])
+            current = self.inventory.get_instance(instance_id)
+            if current is None:
+                raise KeyError(f"inventory instance not found: {instance_id}")
+            if operation == "inventory.replace":
+                return {
+                    "current": current,
+                    "proposed": {
+                        "instance_id": instance_id,
+                        "name": current["name"],
+                        "quantity_text": values["quantity_text"],
+                        "expires_at": values["expires_at"],
+                        "expiry_source": values["expiry_source"],
+                    },
+                }
+            return {"current": current}
+        if operation == "inventory.remove_all":
+            name = str(values["name"])
+            items = self.inventory.find_by_name(name)
+            if not items:
+                raise KeyError(f"inventory instances not found: {name}")
+            return {"name": name, "items": items, "expected_count": len(items)}
+        raise ValueError(f"Operation is not allowlisted: {operation}")
+
+    def _execute(self, operation: str, arguments: BaseModel) -> dict[str, object]:
+        values = arguments.model_dump(mode="python")
+        if operation == "inventory.add":
+            return self.inventory.add_instance(**values)  # type: ignore[arg-type]
+        if operation == "inventory.replace":
+            return self.inventory.replace_instance(**values)  # type: ignore[arg-type]
         if operation == "inventory.remove":
-            return self.inventory.remove_item(**values)  # type: ignore[arg-type]
+            return self.inventory.remove_instance(**values)  # type: ignore[arg-type]
+        if operation == "inventory.remove_all":
+            removed = self.inventory.remove_all_by_name(**values)  # type: ignore[arg-type]
+            items = removed["removed_instances"]
+            assert isinstance(items, list)
+            return {"name": values["name"], "removed_count": len(items), "items": items}
+        if operation == "inventory.confirm":
+            return self.inventory.confirm_instance(**values)  # type: ignore[arg-type]
         raise ValueError(f"Operation is not allowlisted: {operation}")
