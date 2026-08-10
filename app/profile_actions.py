@@ -238,6 +238,54 @@ class ProfileActionService:
             expected_revision=profile.state.revision, state=state, audit_passed=True
         )
 
+    def replace_confirmed_allergens(
+        self,
+        user_id: str,
+        broad: list[str],
+        custom: list[str],
+        *,
+        evidence_id: str,
+    ) -> object:
+        self._validate_evidence(user_id, [evidence_id])
+        if len(broad) + len(custom) > 20:
+            raise ValueError("Profile requirement category cannot exceed 20 active facts")
+        profile = self.repository.read()
+        state = profile.state.model_copy(deep=True)
+        now = self._now()
+        for fact in state.facts:
+            if (
+                fact.status == ProfileFactStatus.ACTIVE
+                and fact.category == ProfileCategory.REQUIREMENT
+                and fact.key.startswith("allergen.")
+            ):
+                fact.status = ProfileFactStatus.SUPERSEDED
+                fact.updated_at = now
+        for prefix, values in (("broad", broad), ("custom", custom)):
+            for value in dict.fromkeys(values):
+                cleaned = _one_line(value, "allergen")
+                state.facts.append(
+                    _new_fact(
+                        ProfileCategory.REQUIREMENT,
+                        f"allergen.{prefix}.{cleaned.casefold().replace(' ', '-')}",
+                        cleaned,
+                        ProfileOrigin.USER_CONFIRMED,
+                        [evidence_id],
+                        "用户在过敏原设置中确认",
+                        now,
+                    )
+                )
+        self._finish_state(
+            state,
+            operation="replace_confirmed_allergens",
+            subject_id=evidence_id,
+            now=now,
+        )
+        return self.repository.replace(
+            expected_revision=profile.state.revision,
+            state=state,
+            audit_passed=True,
+        )
+
     def _new_proposal(
         self,
         user_id: str,

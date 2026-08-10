@@ -473,6 +473,118 @@ def test_allergen_api_rejects_unsupported_category() -> None:
     assert response.status_code == 422
 
 
+def test_profile_proposal_confirm_endpoint_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.web as web
+    from app.pipeline import build_pipeline
+    from app.profile_actions import ProfileChangeRequest
+
+    settings = replace(
+        get_settings(),
+        deepseek_api_key="",
+        inventory_db_path=tmp_path / "inventory.db",
+        user_profile_path=tmp_path / "profile.md",
+        food_classifier_enabled=False,
+    )
+    pipeline = build_pipeline(settings)
+    evidence = pipeline.history.append(
+        user_id=web.SHOWCASE_USER_ID,
+        request="以后默认一人份",
+        response="已生成画像提案",
+    )
+    proposal = pipeline.profile_actions.propose(
+        web.SHOWCASE_USER_ID,
+        ProfileChangeRequest(
+            operation="upsert",
+            category="default_context",
+            key="servings.default",
+            value="默认一人份",
+            reason="用户明确要求永久默认",
+        ),
+        [evidence.segment_id],
+    )
+    monkeypatch.setattr(web, "get_settings", lambda: settings)
+    monkeypatch.setattr(web, "_pipeline", pipeline)
+
+    first = client.post(f"/api/profile-proposals/{proposal.proposal_id}/confirm")
+    second = client.post(f"/api/profile-proposals/{proposal.proposal_id}/confirm")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["proposal"]["status"] == "confirmed"
+    assert pipeline.profile.default_context == ["默认一人份"]
+    assert len(pipeline.profile.state.facts) == 1
+
+
+def test_profile_proposal_reject_endpoint_keeps_profile_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.web as web
+    from app.pipeline import build_pipeline
+    from app.profile_actions import ProfileChangeRequest
+
+    settings = replace(
+        get_settings(),
+        deepseek_api_key="",
+        inventory_db_path=tmp_path / "inventory.db",
+        user_profile_path=tmp_path / "profile.md",
+        food_classifier_enabled=False,
+    )
+    pipeline = build_pipeline(settings)
+    evidence = pipeline.history.append(
+        user_id=web.SHOWCASE_USER_ID, request="以后不吃香菜", response="已生成提案"
+    )
+    proposal = pipeline.profile_actions.propose(
+        web.SHOWCASE_USER_ID,
+        ProfileChangeRequest(
+            operation="upsert",
+            category="preference",
+            key="ingredient.cilantro",
+            value="不喜欢香菜",
+            reason="用户明确要求永久避免",
+        ),
+        [evidence.segment_id],
+    )
+    monkeypatch.setattr(web, "get_settings", lambda: settings)
+    monkeypatch.setattr(web, "_pipeline", pipeline)
+
+    response = client.post(f"/api/profile-proposals/{proposal.proposal_id}/reject")
+
+    assert response.status_code == 200
+    assert response.json()["proposal"]["status"] == "rejected"
+    assert pipeline.profile.preferences == []
+
+
+def test_allergen_api_writes_confirmed_v2_requirement_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.web as web
+    from app.pipeline import build_pipeline
+
+    settings = replace(
+        get_settings(),
+        deepseek_api_key="",
+        inventory_db_path=tmp_path / "inventory.db",
+        user_profile_path=tmp_path / "profile.md",
+        food_classifier_enabled=False,
+    )
+    pipeline = build_pipeline(settings)
+    monkeypatch.setattr(web, "get_settings", lambda: settings)
+    monkeypatch.setattr(web, "_pipeline", pipeline)
+
+    response = client.put(
+        "/api/allergens", json={"broad": ["Peanut"], "custom": ["腰果"]}
+    )
+
+    assert response.status_code == 200
+    profile = pipeline.profile_actions.repository.read()
+    assert profile.state.schema_version == 2
+    assert profile.allergens == ["Peanut", "腰果"]
+    assert {fact.origin.value for fact in profile.state.facts} == {"user_confirmed"}
+    assert profile.state.audit_events[-1].operation == "replace_confirmed_allergens"
+
+
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
