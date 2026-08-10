@@ -20,6 +20,7 @@ from app.audit import AuditCode, AuditResult
 from app.config import get_settings
 from app.context import AgentContext, AgentResult
 from app.memory import ConversationOutcome
+from app.profile_actions import ProfileChangeRequest
 from app.pipeline import build_pipeline
 from app.tools.recipe import RecipeRouter
 from app.supervisor import RepairAction, RepairDecision
@@ -62,6 +63,15 @@ class CapturingAgent:
     def run(self, context: AgentContext, target_language: str = "zh") -> AgentResult:
         self.contexts.append(context)
         return AgentResult(content="已根据上文继续处理。")
+
+
+class SummarySpy:
+    def __init__(self) -> None:
+        self.users: list[str] = []
+
+    def run_if_due(self, user_id: str) -> list[object]:
+        self.users.append(user_id)
+        return []
 
 
 class FixedExpiryInferer:
@@ -109,6 +119,68 @@ def build_test_pipeline(tmp_path: Path):
         user_profile_path=profile_path,
     )
     return build_pipeline(settings)
+
+
+def test_pipeline_reserves_segment_id_before_agent_and_persists_same_id(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    agent = CapturingAgent()
+    pipeline.agent = agent  # type: ignore[assignment]
+    pipeline.food_classifier = RelatedClassifierSpy()  # type: ignore[assignment]
+
+    pipeline.process_request(user_id="u", text="土豆怎么做")
+
+    record = pipeline.history.list_records("u")[-1]
+    assert agent.contexts[0].segment_id == record.segment_id
+
+
+def test_pipeline_checks_profile_summary_after_persisting_result(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    summarizer = SummarySpy()
+    pipeline.profile_summarizer = summarizer  # type: ignore[attr-defined]
+
+    pipeline.process_request(user_id="u", text="查看库存")
+
+    assert summarizer.users == ["u"]
+    assert len(pipeline.history.list_records("u")) == 1
+
+
+def test_pipeline_resolves_profile_proposal_and_reloads_active_profile(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    evidence = pipeline.history.append(
+        user_id="u", request="以后不吃香菜", response="已生成提案"
+    )
+    proposal = pipeline.profile_actions.propose(
+        "u",
+        ProfileChangeRequest(
+            operation="upsert",
+            category="preference",
+            key="ingredient.cilantro",
+            value="不喜欢香菜",
+            reason="用户明确表达永久偏好",
+        ),
+        [evidence.segment_id],
+    )
+
+    resolved = pipeline.resolve_profile_proposal(
+        user_id="u", proposal_id=proposal.proposal_id, decision="confirm"
+    )
+
+    assert resolved.status == "confirmed"
+    assert pipeline.profile.preferences == ["不喜欢香菜"]
+    confirmation = pipeline.history.list_records("u")[-1]
+    assert confirmation.outcome_type == ConversationOutcome.CONFIRMATION
+    assert confirmation.confirmation_result == {
+        "type": "profile",
+        "decision": "confirm",
+        "proposal_id": proposal.proposal_id,
+        "status": "confirmed",
+    }
 
 
 def test_pipeline_enables_deepseek_web_search_fallback_with_api_key(

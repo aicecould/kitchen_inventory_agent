@@ -8,6 +8,8 @@ from app.actions import InventoryActionService, PendingActionRepository
 from app.adapters.recipe_api import TheMealDbClient
 from app.agent import KitchenAgent
 from app.context import AgentContext, HistoryExcerpt
+from app.profile import ProfileRepository
+from app.profile_actions import ProfileActionService
 from app.prompts import SYSTEM_PROMPT
 from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
@@ -75,6 +77,49 @@ def inventory_tools(tmp_path: Path) -> tuple[
     created_tools = agent._create_tools(context, TraceRecorder())
     tools = {tool.name: tool for tool in created_tools}
     return inventory, actions, tools
+
+
+def test_profile_tool_binds_trusted_user_and_current_segment(tmp_path: Path) -> None:
+    inventory, actions, _ = inventory_tools(tmp_path)
+    profile_actions = ProfileActionService(
+        ProfileRepository(tmp_path / "profile.md"),
+        evidence_exists=lambda _user_id, _segment_id: False,
+        now=lambda: datetime(2026, 8, 10, tzinfo=UTC),
+    )
+    agent = KitchenAgent(
+        model=None,  # type: ignore[arg-type]
+        inventory=inventory,
+        recipes=RecipeRouter(
+            None,
+            TheMealDbClient("https://example.invalid", timeout=1),
+        ),
+        actions=actions,
+        profile_actions=profile_actions,
+    )
+    segment_id = "hist_" + "1" * 32
+    context = AgentContext(
+        user_id="test",
+        segment_id=segment_id,
+        request_text="以后都不吃香菜",
+    )
+    tools = {
+        tool.name: tool
+        for tool in agent._create_tools(context, TraceRecorder())
+    }
+
+    result = tools["propose_profile_change"].invoke(  # type: ignore[attr-defined]
+        {
+            "category": "preference",
+            "key": "ingredient.cilantro",
+            "operation": "upsert",
+            "value": "不喜欢香菜",
+            "reason": "用户明确表达永久偏好",
+        }
+    )
+
+    assert result["user_id"] == "test"
+    assert result["evidence_ids"] == [segment_id]
+    assert result["status"] == "pending"
 
 
 def test_agent_prompt_requires_instance_lookup_and_ambiguity_clarification() -> None:

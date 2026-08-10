@@ -6,6 +6,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+from app.profile import ProfileProposal
+
 
 class ConfidenceStatus(StrEnum):
     ACCEPTED = "accepted"
@@ -32,6 +34,7 @@ class VisionConfirmationPrompt(BaseModel):
 
 class AgentContext(BaseModel):
     user_id: str
+    segment_id: str = ""
     request_text: str
     intent: str = "unknown"
     ingredients: list[Ingredient] = Field(default_factory=list)
@@ -59,3 +62,4 @@ class AgentResult(BaseModel):
     execution_trace: list[ExecutionTraceEvent] = Field(default_factory=list)
     awaiting_vision_confirmation: bool = False
     vision_confirmation: VisionConfirmationPrompt | None = None
+    profile_proposals: list[ProfileProposal] = Field(default_factory=list)
