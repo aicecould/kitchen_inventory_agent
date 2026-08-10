@@ -75,6 +75,27 @@ class VisionResolution(BaseModel):
     selections: list[VisionSelection] = Field(default_factory=list, max_length=20)
 
 
+class TaskRecipeRequest(BaseModel):
+    segment_id: str = Field(pattern=r"^hist_[0-9a-f]{32}$")
+    recipe_id: str = Field(min_length=1, max_length=200)
+    servings: int | None = Field(default=None, ge=1, le=100)
+    expected_version: int | None = Field(default=None, ge=1)
+    request_id: str = Field(min_length=1, max_length=100)
+
+
+class TaskMutationRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    request_id: str = Field(min_length=1, max_length=100)
+
+
+class TaskServingsRequest(TaskMutationRequest):
+    servings: int = Field(ge=1, le=100)
+
+
+class ContextClearRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=100)
+
+
 def get_pipeline() -> KitchenPipeline:
     global _pipeline
     if _pipeline is None:
@@ -234,6 +255,136 @@ def reject_profile_proposal(proposal_id: str) -> dict[str, object]:
     return result
 
 
+def _task_error(exc: Exception) -> HTTPException:
+    detail = str(exc)
+    if isinstance(exc, KeyError):
+        return HTTPException(status_code=404, detail=detail)
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=403, detail=detail)
+    return HTTPException(status_code=409, detail=detail)
+
+
+@app.get("/api/tasks")
+def list_tasks() -> dict[str, object]:
+    tasks = get_pipeline().tasks.repository.list_available(SHOWCASE_USER_ID)
+    return {"tasks": [task.model_dump(mode="json") for task in tasks]}
+
+
+@app.get("/api/tasks/active")
+def active_task() -> dict[str, object]:
+    task = get_pipeline().tasks.repository.get_active(SHOWCASE_USER_ID)
+    return {"task": task.model_dump(mode="json") if task is not None else None}
+
+
+def _confirm_task_recipe(
+    payload: TaskRecipeRequest, *, as_new: bool
+) -> dict[str, object]:
+    pipeline = get_pipeline()
+    try:
+        task = pipeline.tasks.confirm_recipe(
+            user_id=SHOWCASE_USER_ID,
+            segment_id=payload.segment_id,
+            recipe_id=payload.recipe_id,
+            servings=payload.servings,
+            default_context=pipeline.profile.default_context,
+            as_new=as_new,
+            expected_version=payload.expected_version,
+            request_id=payload.request_id,
+        )
+    except (KeyError, PermissionError, ValueError) as exc:
+        raise _task_error(exc) from exc
+    return {"task": task.model_dump(mode="json")}
+
+
+@app.post("/api/tasks/recipe")
+def confirm_task_recipe(payload: TaskRecipeRequest) -> dict[str, object]:
+    return _confirm_task_recipe(payload, as_new=False)
+
+
+@app.post("/api/tasks/recipe-as-new")
+def confirm_recipe_as_new(payload: TaskRecipeRequest) -> dict[str, object]:
+    return _confirm_task_recipe(payload, as_new=True)
+
+
+@app.patch("/api/tasks/{task_id}/servings")
+def update_task_servings(
+    task_id: str, payload: TaskServingsRequest
+) -> dict[str, object]:
+    try:
+        task = get_pipeline().tasks.update_servings(
+            user_id=SHOWCASE_USER_ID,
+            task_id=task_id,
+            servings=payload.servings,
+            expected_version=payload.expected_version,
+            request_id=payload.request_id,
+        )
+    except (KeyError, PermissionError, ValueError) as exc:
+        raise _task_error(exc) from exc
+    return {"task": task.model_dump(mode="json")}
+
+
+@app.post("/api/tasks/{task_id}/activate")
+def activate_task(
+    task_id: str, payload: TaskMutationRequest
+) -> dict[str, object]:
+    try:
+        task = get_pipeline().tasks.activate(
+            user_id=SHOWCASE_USER_ID,
+            task_id=task_id,
+            expected_version=payload.expected_version,
+            request_id=payload.request_id,
+        )
+    except (KeyError, PermissionError, ValueError) as exc:
+        raise _task_error(exc) from exc
+    return {"task": task.model_dump(mode="json")}
+
+
+@app.post("/api/tasks/{task_id}/cooked")
+def complete_task_as_cooked(
+    task_id: str, payload: TaskMutationRequest
+) -> dict[str, object]:
+    try:
+        task, changed = get_pipeline().tasks.complete_cooked(
+            user_id=SHOWCASE_USER_ID,
+            task_id=task_id,
+            expected_version=payload.expected_version,
+            request_id=payload.request_id,
+        )
+    except (KeyError, PermissionError, ValueError) as exc:
+        raise _task_error(exc) from exc
+    return {
+        "task": task.model_dump(mode="json"),
+        "start_reconciliation": changed,
+    }
+
+
+@app.post("/api/tasks/{task_id}/reconciliation/close")
+def close_task_reconciliation(
+    task_id: str, payload: TaskMutationRequest
+) -> dict[str, object]:
+    try:
+        task = get_pipeline().tasks.close_reconciliation(
+            user_id=SHOWCASE_USER_ID,
+            task_id=task_id,
+            expected_version=payload.expected_version,
+            request_id=payload.request_id,
+        )
+    except (KeyError, PermissionError, ValueError) as exc:
+        raise _task_error(exc) from exc
+    return {"task": task.model_dump(mode="json")}
+
+
+@app.post("/api/context/clear")
+def clear_context(payload: ContextClearRequest) -> dict[str, object]:
+    try:
+        task = get_pipeline().tasks.clear_context(
+            SHOWCASE_USER_ID, request_id=payload.request_id
+        )
+    except (KeyError, PermissionError, ValueError) as exc:
+        raise _task_error(exc) from exc
+    return {"task": task.model_dump(mode="json") if task is not None else None}
+
+
 def get_action_service() -> InventoryActionService:
     settings = get_settings()
     inventory = InventoryRepository(settings.inventory_db_path)
@@ -344,6 +495,7 @@ async def process_request(
     text: str = Form(..., min_length=1),
     language: str = Form("zh", min_length=2, max_length=10),
     image: UploadFile | None = File(default=None),
+    reconciliation_task_id: str | None = Form(default=None),
 ) -> dict[str, object]:
     validation_started = perf_counter()
     if len(text) > MAX_TEXT_CHARS:
@@ -419,6 +571,7 @@ async def process_request(
             image_bytes=image_bytes,
             target_language=language,
             initial_trace=[validation_trace],
+            reconciliation_task_id=reconciliation_task_id,
         )
     except VisionApiError as exc:
         detail = f"百度果蔬识别失败（错误码 {exc.code}）：{exc.user_message}"
