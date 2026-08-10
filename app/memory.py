@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -136,9 +137,12 @@ class ConversationHistoryRepository:
         blocked: bool = False,
         execution_trace: list[ExecutionTraceEvent] | None = None,
         created_at: datetime | None = None,
+        segment_id: str | None = None,
     ) -> ConversationRecord:
         timestamp = _as_utc(created_at or datetime.now(UTC))
-        segment_id = f"hist_{uuid4().hex}"
+        segment_id = segment_id or self.reserve_segment_id()
+        if re.fullmatch(r"hist_[0-9a-f]{32}", segment_id) is None:
+            raise ValueError("conversation segment_id is invalid")
         trace = execution_trace or []
         with sqlite3.connect(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -187,6 +191,76 @@ class ConversationHistoryRepository:
             execution_trace=trace,
             created_at=timestamp,
         )
+
+    @staticmethod
+    def reserve_segment_id() -> str:
+        return f"hist_{uuid4().hex}"
+
+    def get_evidence(
+        self, user_id: str, segment_ids: list[str]
+    ) -> list[ConversationRecord]:
+        if not segment_ids:
+            return []
+        unique_ids = list(dict.fromkeys(segment_ids))
+        placeholders = ",".join("?" for _ in unique_ids)
+        with sqlite3.connect(self.db_path) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT segment_id, user_id, request_text, response_text,
+                       tool_history_json, confirmation_result_json, audit_reason,
+                       is_relevant, outcome_type, blocked, execution_trace_json,
+                       created_at
+                FROM conversation_history
+                WHERE user_id = ? AND segment_id IN ({placeholders})
+                """,
+                (user_id, *unique_ids),
+            ).fetchall()
+        by_id = {
+            record.segment_id: record
+            for record in (_conversation_record(row) for row in rows)
+        }
+        return [by_id[value] for value in unique_ids if value in by_id]
+
+    def list_completed_after(
+        self,
+        user_id: str,
+        segment_id: str | None,
+        *,
+        limit: int,
+    ) -> list[ConversationRecord]:
+        if limit <= 0:
+            raise ValueError("completed history limit must be positive")
+        cursor_created = ""
+        cursor_rowid = 0
+        with sqlite3.connect(self.db_path) as connection:
+            if segment_id is not None:
+                cursor = connection.execute(
+                    "SELECT created_at, rowid FROM conversation_history "
+                    "WHERE user_id = ? AND segment_id = ?",
+                    (user_id, segment_id),
+                ).fetchone()
+                if cursor is None:
+                    raise KeyError("conversation summary cursor not found")
+                cursor_created = str(cursor[0])
+                cursor_rowid = int(cursor[1])
+            rows = connection.execute(
+                """
+                SELECT segment_id, user_id, request_text, response_text,
+                       tool_history_json, confirmation_result_json, audit_reason,
+                       is_relevant, outcome_type, blocked, execution_trace_json,
+                       created_at
+                FROM conversation_history
+                WHERE user_id = ?
+                  AND is_relevant = 1
+                  AND outcome_type = 'completed'
+                  AND blocked = 0
+                  AND (created_at > ? OR (created_at = ? AND rowid > ?))
+                ORDER BY created_at ASC, rowid ASC
+                LIMIT ?
+                """,
+                (user_id, cursor_created, cursor_created, cursor_rowid, limit),
+            ).fetchall()
+        return [_conversation_record(row) for row in rows]
 
     def list_records(self, user_id: str) -> list[ConversationRecord]:
         with sqlite3.connect(self.db_path) as connection:
