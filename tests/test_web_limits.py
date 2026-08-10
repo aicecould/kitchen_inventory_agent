@@ -556,6 +556,185 @@ def test_profile_proposal_reject_endpoint_keeps_profile_unchanged(
     assert pipeline.profile.preferences == []
 
 
+def _install_task_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import app.web as web
+    from app.pipeline import build_pipeline
+
+    settings = replace(
+        get_settings(),
+        deepseek_api_key="",
+        inventory_db_path=tmp_path / "inventory.db",
+        user_profile_path=tmp_path / "profile.md",
+        food_classifier_enabled=False,
+    )
+    pipeline = build_pipeline(settings)
+    evidence = pipeline.history.append(
+        user_id=web.SHOWCASE_USER_ID,
+        request="用番茄找菜谱",
+        response="找到 Tomato Soup",
+        tool_history=[
+            {
+                "tool": "search_recipes",
+                "arguments": {"ingredients": ["tomato"]},
+                "result": [
+                    {
+                        "id": "recipe-1",
+                        "title": "Tomato Soup",
+                        "instructions": "Simmer.",
+                        "ingredients": ["2 tomatoes"],
+                        "source": "example",
+                        "source_url": "https://recipes.example/tomato-soup",
+                        "image_url": None,
+                    }
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(web, "get_settings", lambda: settings)
+    monkeypatch.setattr(web, "_pipeline", pipeline)
+    return pipeline, evidence
+
+
+def test_task_recipe_servings_and_switch_endpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pipeline, evidence = _install_task_pipeline(tmp_path, monkeypatch)
+    payload = {
+        "segment_id": evidence.segment_id,
+        "recipe_id": "recipe-1",
+        "servings": 2,
+        "expected_version": None,
+        "request_id": "confirm-1",
+    }
+
+    created = client.post("/api/tasks/recipe", json=payload)
+    active = client.get("/api/tasks/active")
+    listed = client.get("/api/tasks")
+
+    assert created.status_code == active.status_code == listed.status_code == 200
+    task = created.json()["task"]
+    assert task["recipe"]["title"] == "Tomato Soup"
+    assert task["servings"] == 2
+    assert active.json()["task"]["task_id"] == task["task_id"]
+    assert listed.json()["tasks"][0]["task_id"] == task["task_id"]
+
+    servings = client.patch(
+        f"/api/tasks/{task['task_id']}/servings",
+        json={
+            "servings": 4,
+            "expected_version": task["version"],
+            "request_id": "servings-1",
+        },
+    )
+    assert servings.status_code == 200
+    assert servings.json()["task"]["servings"] == 4
+
+    as_new_payload = {
+        **payload,
+        "expected_version": servings.json()["task"]["version"],
+        "request_id": "confirm-2",
+    }
+    second = client.post("/api/tasks/recipe-as-new", json=as_new_payload)
+    assert second.status_code == 200
+    first_paused = pipeline.tasks.repository.get(task["task_id"])
+    assert first_paused is not None
+    switched = client.post(
+        f"/api/tasks/{task['task_id']}/activate",
+        json={
+            "expected_version": first_paused.version,
+            "request_id": "activate-1",
+        },
+    )
+    assert switched.status_code == 200
+    assert switched.json()["task"]["task_id"] == task["task_id"]
+
+
+def test_cooked_is_idempotent_and_context_clear_is_independent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pipeline, evidence = _install_task_pipeline(tmp_path, monkeypatch)
+    created = client.post(
+        "/api/tasks/recipe",
+        json={
+            "segment_id": evidence.segment_id,
+            "recipe_id": "recipe-1",
+            "servings": None,
+            "expected_version": None,
+            "request_id": "confirm-1",
+        },
+    ).json()["task"]
+    cooked_payload = {
+        "expected_version": created["version"],
+        "request_id": "cooked-1",
+    }
+
+    first = client.post(f"/api/tasks/{created['task_id']}/cooked", json=cooked_payload)
+    repeated = client.post(
+        f"/api/tasks/{created['task_id']}/cooked", json=cooked_payload
+    )
+
+    assert first.status_code == repeated.status_code == 200
+    assert first.json()["start_reconciliation"] is True
+    assert repeated.json()["start_reconciliation"] is False
+    completed = first.json()["task"]
+    closed = client.post(
+        f"/api/tasks/{created['task_id']}/reconciliation/close",
+        json={
+            "expected_version": completed["version"],
+            "request_id": "close-1",
+        },
+    )
+    assert closed.status_code == 200
+    assert closed.json()["task"]["reconciliation_open"] is False
+
+    pipeline.history.append(
+        user_id="showcase-user", request="新窗口内容", response="回答"
+    )
+    clear = client.post("/api/context/clear", json={"request_id": "clear-1"})
+    assert clear.status_code == 200
+    assert clear.json()["task"] is None
+    assert pipeline.history.list_context_window("showcase-user") == []
+
+
+def test_task_api_rejects_stale_version_and_forged_recipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, evidence = _install_task_pipeline(tmp_path, monkeypatch)
+    missing = client.post(
+        "/api/tasks/recipe",
+        json={
+            "segment_id": evidence.segment_id,
+            "recipe_id": "forged",
+            "servings": 1,
+            "expected_version": None,
+            "request_id": "forged-1",
+        },
+    )
+    assert missing.status_code == 404
+
+    created = client.post(
+        "/api/tasks/recipe",
+        json={
+            "segment_id": evidence.segment_id,
+            "recipe_id": "recipe-1",
+            "servings": 1,
+            "expected_version": None,
+            "request_id": "confirm-1",
+        },
+    ).json()["task"]
+    stale = client.patch(
+        f"/api/tasks/{created['task_id']}/servings",
+        json={
+            "servings": 3,
+            "expected_version": created["version"] + 1,
+            "request_id": "stale-1",
+        },
+    )
+    assert stale.status_code == 409
+
+
 def test_allergen_api_writes_confirmed_v2_requirement_facts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

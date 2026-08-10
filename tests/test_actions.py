@@ -126,6 +126,42 @@ def test_add_is_delayed_and_idempotent_when_confirmed(tmp_path: Path) -> None:
     assert inventory.find_by_name("番茄")[0]["quantity_text"] == "2 个"
 
 
+def test_pending_action_round_trips_nullable_source_task_id(tmp_path: Path) -> None:
+    service, inventory = build_service(tmp_path)
+    item = inventory.add_instance("番茄", "2 个", None, "unknown")
+    task_id = "task_0123456789abcdef0123456789abcdef"
+
+    sourced = service.propose(
+        "u",
+        "inventory.remove",
+        {"instance_id": item["instance_id"]},
+        source_task_id=task_id,
+    )
+    ordinary = service.propose(
+        "u",
+        "inventory.remove",
+        {"instance_id": item["instance_id"]},
+    )
+
+    assert sourced.source_task_id == task_id
+    assert service.repository.get(sourced.action_id).source_task_id == task_id  # type: ignore[union-attr]
+    assert ordinary.source_task_id is None
+    assert service.repository.get(ordinary.action_id).source_task_id is None  # type: ignore[union-attr]
+
+
+def test_pending_action_rejects_malformed_source_task_id(tmp_path: Path) -> None:
+    service, inventory = build_service(tmp_path)
+    item = inventory.add_instance("番茄", "2 个", None, "unknown")
+
+    with pytest.raises(ValueError, match="source task"):
+        service.propose(
+            "u",
+            "inventory.remove",
+            {"instance_id": item["instance_id"]},
+            source_task_id="task_unsafe",
+        )
+
+
 def test_add_preview_persists_all_proposed_values(tmp_path: Path) -> None:
     """The confirmation payload must expose every value the add will create."""
     service, _ = build_service(tmp_path)
@@ -538,6 +574,9 @@ def test_initialize_fails_pre_preview_pending_actions_and_preserves_executed_his
             for row in connection.execute("PRAGMA table_info(pending_actions)")
         }
     assert "preview_json" in columns
+    assert "source_task_id" in columns
+    assert existing.source_task_id is None
+    assert executed.source_task_id is None
 
 
 def test_confirm_rejects_a_pending_inventory_action_with_tampered_empty_preview(

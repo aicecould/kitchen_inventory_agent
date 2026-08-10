@@ -29,6 +29,7 @@ from app.config import Settings, get_settings
 from app.context import (
     AgentContext,
     AgentResult,
+    CookingTaskContext,
     ConfidenceStatus,
     ExecutionTraceEvent,
     Ingredient,
@@ -56,6 +57,7 @@ from app.proactive import ProactiveService, ReminderGenerator, VisitRepository
 from app.supervisor import fixed_response
 from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
+from app.tasks import CookingTask, CookingTaskRepository, CookingTaskService
 from app.trace import TraceRecorder
 from app.vision import recognize_ingredients
 from app.vision_confirmations import VisionConfirmationRepository
@@ -68,6 +70,7 @@ class KitchenPipeline:
     inventory: InventoryRepository
     actions: InventoryActionService
     history: ConversationHistoryRepository
+    tasks: CookingTaskService
     profile_actions: ProfileActionService
     profile_summarizer: ProfileSummarizer | None
     vision_confirmations: VisionConfirmationRepository
@@ -84,6 +87,7 @@ class KitchenPipeline:
         image_bytes: bytes | None = None,
         target_language: str = "zh",
         initial_trace: list[ExecutionTraceEvent] | None = None,
+        reconciliation_task_id: str | None = None,
     ) -> AgentResult:
         segment_id = self.history.reserve_segment_id()
         result = self._process_request(
@@ -93,7 +97,26 @@ class KitchenPipeline:
             target_language=target_language,
             initial_trace=initial_trace,
             segment_id=segment_id,
+            reconciliation_task_id=reconciliation_task_id,
         )
+        result.segment_id = segment_id
+        result.recipe_options = _recipe_options(result.tool_history)
+        if (
+            reconciliation_task_id is not None
+            and not result.blocked
+            and _has_sourced_inventory_proposal(
+                result.tool_history, reconciliation_task_id
+            )
+        ):
+            reconciliation_task = self.tasks.get_reconciliation_task(
+                user_id, reconciliation_task_id
+            )
+            self.tasks.close_reconciliation(
+                user_id=user_id,
+                task_id=reconciliation_task_id,
+                expected_version=reconciliation_task.version,
+                request_id=f"reconcile-{segment_id}",
+            )
         self._record_result(
             user_id=user_id,
             request_text=text,
@@ -117,11 +140,15 @@ class KitchenPipeline:
         target_language: str = "zh",
         initial_trace: list[ExecutionTraceEvent] | None = None,
         segment_id: str,
+        reconciliation_task_id: str | None = None,
     ) -> AgentResult:
         trace = TraceRecorder()
         trace.events.extend(initial_trace or [])
         route_decision: RouteDecision | None = None
         force_agent = False
+        if reconciliation_task_id is not None:
+            self.tasks.get_reconciliation_task(user_id, reconciliation_task_id)
+            force_agent = True
         if image_bytes is not None:
             trace.record(
                 "routing",
@@ -269,6 +296,7 @@ class KitchenPipeline:
             route_decision=route_decision,
             force_agent=force_agent,
             segment_id=segment_id,
+            reconciliation_task_id=reconciliation_task_id,
         )
 
     def resolve_vision_confirmation(
@@ -498,6 +526,7 @@ class KitchenPipeline:
         route_decision: RouteDecision | None = None,
         force_agent: bool = False,
         segment_id: str | None = None,
+        reconciliation_task_id: str | None = None,
     ) -> AgentResult:
         prior_tool_history = prior_tool_history or []
         operation = route_decision.operation if route_decision is not None else None
@@ -617,6 +646,7 @@ class KitchenPipeline:
                         user_id,
                         str(simple_operation.arguments["name"]),
                         str(simple_operation.arguments["quantity_text"]),
+                        source_task_id=reconciliation_task_id,
                     ),
                     lambda value: f"{value.operation}; status={value.status}",
                 )
@@ -654,7 +684,10 @@ class KitchenPipeline:
                     "database",
                     "create_pending_action",
                     lambda: self.actions.propose(
-                        user_id, simple_operation.operation, proposal_arguments
+                        user_id,
+                        simple_operation.operation,
+                        proposal_arguments,
+                        source_task_id=reconciliation_task_id,
                     ),
                     lambda value: f"{value.operation}; status={value.status}",
                 )
@@ -686,6 +719,11 @@ class KitchenPipeline:
         if self.agent is None:
             raise ValueError("Missing configuration in .env: deepseek_api_key")
 
+        task = (
+            self.tasks.get_reconciliation_task(user_id, reconciliation_task_id)
+            if reconciliation_task_id is not None
+            else self.tasks.repository.get_active(user_id)
+        )
         context = AgentContext(
             user_id=user_id,
             segment_id=segment_id or self.history.reserve_segment_id(),
@@ -697,6 +735,8 @@ class KitchenPipeline:
             custom_allergens=self.profile.custom_allergens,
             profile_markdown=profile_without_legacy_history(self.profile.markdown),
             history_segments=self.history.list_context_window(user_id),
+            cooking_task=_task_context(task),
+            inventory_source_task_id=reconciliation_task_id,
             vision_confirmation_result=confirmation_result,
         )
         result = self.agent.run(context, target_language=target_language)
@@ -829,6 +869,9 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
     )
     history = ConversationHistoryRepository(settings.inventory_db_path)
     history.initialize()
+    task_repository = CookingTaskRepository(settings.inventory_db_path)
+    task_repository.initialize()
+    tasks = CookingTaskService(task_repository, history)
     profile_actions = ProfileActionService(
         profile_repository,
         evidence_exists=lambda user_id, segment_id: bool(
@@ -897,19 +940,75 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
             food_classifier_load_error = type(exc).__name__
 
     return KitchenPipeline(
-        settings,
-        profile,
-        inventory,
-        actions,
-        history,
-        profile_actions,
-        profile_summarizer,
-        vision_confirmations,
-        agent,
-        vision,
-        food_classifier,
-        food_classifier_load_error,
+        settings=settings,
+        profile=profile,
+        inventory=inventory,
+        actions=actions,
+        history=history,
+        tasks=tasks,
+        profile_actions=profile_actions,
+        profile_summarizer=profile_summarizer,
+        vision_confirmations=vision_confirmations,
+        agent=agent,
+        vision=vision,
+        food_classifier=food_classifier,
+        food_classifier_load_error=food_classifier_load_error,
     )
+
+
+def _task_context(task: CookingTask | None) -> CookingTaskContext | None:
+    if task is None:
+        return None
+    return CookingTaskContext(
+        task_id=task.task_id,
+        query_text=task.query_text,
+        recipe_title=task.recipe.title,
+        servings=task.servings,
+        ingredients=task.recipe.ingredients,
+    )
+
+
+def _recipe_options(tool_history: list[dict[str, object]]) -> list[dict[str, object]]:
+    fields = {
+        "id",
+        "title",
+        "instructions",
+        "ingredients",
+        "source",
+        "source_url",
+        "image_url",
+    }
+    options: list[dict[str, object]] = []
+    for entry in tool_history:
+        if entry.get("tool") != "search_recipes" or not isinstance(
+            entry.get("result"), list
+        ):
+            continue
+        for item in entry["result"]:
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                options.append({key: item.get(key) for key in fields})
+    return options
+
+
+def _has_sourced_inventory_proposal(
+    tool_history: list[dict[str, object]], task_id: str
+) -> bool:
+    allowed_tools = {
+        "propose_replace_inventory_instance",
+        "propose_remove_inventory_instance",
+    }
+    allowed_operations = {"inventory.replace", "inventory.remove"}
+    for entry in tool_history:
+        result = entry.get("result")
+        if (
+            entry.get("tool") in allowed_tools
+            and isinstance(result, dict)
+            and result.get("status") == "pending"
+            and result.get("operation") in allowed_operations
+            and result.get("source_task_id") == task_id
+        ):
+            return True
+    return False
 
 
 def build_proactive_service(pipeline: KitchenPipeline) -> ProactiveService:

@@ -65,6 +65,55 @@ class CapturingAgent:
         return AgentResult(content="已根据上文继续处理。")
 
 
+class RecipeResultAgent(CapturingAgent):
+    def run(self, context: AgentContext, target_language: str = "zh") -> AgentResult:
+        self.contexts.append(context)
+        return AgentResult(
+            content="推荐 Tomato Soup：https://recipes.example/tomato-soup",
+            tool_history=[
+                {
+                    "tool": "search_recipes",
+                    "arguments": {"ingredients": ["tomato"]},
+                    "result": [
+                        {
+                            "id": "recipe-1",
+                            "title": "Tomato Soup",
+                            "instructions": "Simmer.",
+                            "ingredients": ["tomato"],
+                            "source": "example",
+                            "source_url": "https://recipes.example/tomato-soup",
+                            "image_url": None,
+                        }
+                    ],
+                }
+            ],
+        )
+
+
+class ReconciliationProposalAgent(CapturingAgent):
+    def __init__(self, task_id: str) -> None:
+        super().__init__()
+        self.task_id = task_id
+
+    def run(self, context: AgentContext, target_language: str = "zh") -> AgentResult:
+        self.contexts.append(context)
+        return AgentResult(
+            content="已生成待确认操作，确认前库存不会改变。",
+            tool_history=[
+                {
+                    "tool": "propose_remove_inventory_instance",
+                    "arguments": {"instance_id": "inv_" + "1" * 32},
+                    "result": {
+                        "action_id": "act_" + "1" * 32,
+                        "operation": "inventory.remove",
+                        "status": "pending",
+                        "source_task_id": self.task_id,
+                    },
+                }
+            ],
+        )
+
+
 class SummarySpy:
     def __init__(self) -> None:
         self.users: list[str] = []
@@ -133,6 +182,148 @@ def test_pipeline_reserves_segment_id_before_agent_and_persists_same_id(
 
     record = pipeline.history.list_records("u")[-1]
     assert agent.contexts[0].segment_id == record.segment_id
+
+
+def test_pipeline_injects_active_task_without_partitioning_global_history(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    pipeline.history.append(user_id="u", request="global", response="history")
+    evidence = pipeline.history.append(
+        user_id="u",
+        request="用番茄找菜谱",
+        response="找到番茄汤",
+        tool_history=[
+            {
+                "tool": "search_recipes",
+                "arguments": {},
+                "result": [FixedRecipeRouter().search()[0]],
+            }
+        ],
+    )
+    pipeline.tasks.confirm_recipe(
+        user_id="u",
+        segment_id=evidence.segment_id,
+        recipe_id="recipe-1",
+        servings=2,
+        default_context=[],
+        as_new=False,
+        expected_version=None,
+        request_id="confirm-1",
+    )
+    agent = CapturingAgent()
+    pipeline.agent = agent  # type: ignore[assignment]
+    pipeline.food_classifier = RelatedClassifierSpy()  # type: ignore[assignment]
+
+    pipeline.process_request(user_id="u", text="接着说")
+
+    context = agent.contexts[0]
+    assert [item.request for item in context.history_segments] == [
+        "global",
+        "用番茄找菜谱",
+    ]
+    assert context.cooking_task is not None
+    assert context.cooking_task.recipe_title == "Tomato Soup"
+    assert context.cooking_task.servings == 2
+
+
+def test_pipeline_returns_server_derived_recipe_options_and_segment_id(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    agent = RecipeResultAgent()
+    pipeline.agent = agent  # type: ignore[assignment]
+    pipeline.food_classifier = RelatedClassifierSpy()  # type: ignore[assignment]
+
+    result = pipeline.process_request(user_id="u", text="找番茄汤")
+
+    assert result.segment_id.startswith("hist_")
+    assert result.recipe_options[0]["id"] == "recipe-1"
+    persisted = pipeline.history.get_evidence("u", [result.segment_id])[0]
+    assert persisted.tool_history[-1]["tool"] == "search_recipes"
+
+
+def test_reconciliation_request_binds_completed_task_and_closes_after_proposal(
+    tmp_path: Path,
+) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    evidence = pipeline.history.append(
+        user_id="u",
+        request="用番茄找菜谱",
+        response="找到番茄汤",
+        tool_history=[
+            {
+                "tool": "search_recipes",
+                "arguments": {},
+                "result": [FixedRecipeRouter().search()[0]],
+            }
+        ],
+    )
+    active = pipeline.tasks.confirm_recipe(
+        user_id="u",
+        segment_id=evidence.segment_id,
+        recipe_id="recipe-1",
+        servings=1,
+        default_context=[],
+        as_new=False,
+        expected_version=None,
+        request_id="confirm-1",
+    )
+    completed, _ = pipeline.tasks.complete_cooked(
+        user_id="u",
+        task_id=active.task_id,
+        expected_version=active.version,
+        request_id="cooked-1",
+    )
+    agent = ReconciliationProposalAgent(completed.task_id)
+    pipeline.agent = agent  # type: ignore[assignment]
+
+    pipeline.process_request(
+        user_id="u",
+        text="番茄已经用完",
+        reconciliation_task_id=completed.task_id,
+    )
+
+    context = agent.contexts[0]
+    assert context.inventory_source_task_id == completed.task_id
+    assert context.cooking_task is not None
+    assert context.cooking_task.task_id == completed.task_id
+    assert pipeline.tasks.repository.get(completed.task_id).reconciliation_open is False  # type: ignore[union-attr]
+
+
+def test_reconciliation_rejects_active_or_cross_user_task(tmp_path: Path) -> None:
+    pipeline = build_test_pipeline(tmp_path)
+    evidence = pipeline.history.append(
+        user_id="u",
+        request="用番茄找菜谱",
+        response="找到番茄汤",
+        tool_history=[
+            {
+                "tool": "search_recipes",
+                "arguments": {},
+                "result": [FixedRecipeRouter().search()[0]],
+            }
+        ],
+    )
+    active = pipeline.tasks.confirm_recipe(
+        user_id="u",
+        segment_id=evidence.segment_id,
+        recipe_id="recipe-1",
+        servings=1,
+        default_context=[],
+        as_new=False,
+        expected_version=None,
+        request_id="confirm-1",
+    )
+
+    with pytest.raises(ValueError, match="reconciliation"):
+        pipeline.process_request(
+            user_id="u", text="核对", reconciliation_task_id=active.task_id
+        )
+    with pytest.raises(PermissionError, match="another user"):
+        pipeline.process_request(
+            user_id="other", text="核对", reconciliation_task_id=active.task_id
+        )
 
 
 def test_pipeline_checks_profile_summary_after_persisting_result(

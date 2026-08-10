@@ -1,5 +1,12 @@
 const { escapeHtml, renderSafeMarkdown } = globalThis.KitchenMarkdown;
 const { renderProfileProposalCards, profileProposalEndpoint } = globalThis.KitchenProfileProposals;
+const {
+  buildRecipeRequest,
+  reconciliationFields,
+  renderRecipeOptions,
+  renderTaskPanel,
+  taskEndpoint,
+} = globalThis.KitchenTasks;
 const form = document.querySelector("#agent-form");
 const promptInput = document.querySelector("#prompt");
 const charCount = document.querySelector("#char-count");
@@ -13,6 +20,9 @@ const resultSection = document.querySelector("#result-section");
 const resultState = document.querySelector("#result-state");
 const answerContent = document.querySelector("#answer-content");
 const profileProposalList = document.querySelector("#profile-proposal-list");
+const recipeOptions = document.querySelector("#recipe-options");
+const taskList = document.querySelector("#task-list");
+const clearContextButton = document.querySelector("#clear-context");
 const toolTrace = document.querySelector("#tool-trace");
 const inventoryList = document.querySelector("#inventory-list");
 const globalStatus = document.querySelector("#global-status");
@@ -51,6 +61,40 @@ const requestLimits = {
   maxImageBytes: 3 * 1024 * 1024,
 };
 const maxProactiveReminderChars = 100;
+let activeTask = null;
+
+function requestId(prefix) {
+  const suffix = globalThis.crypto && typeof globalThis.crypto.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${prefix}-${suffix}`;
+}
+
+async function requestJson(url, { method = "GET", body = null } = {}) {
+  const options = { method, headers: {} };
+  if (body !== null) {
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(url, options);
+  const data = await response.json();
+  if (!response.ok) {
+    const detail = typeof data.detail === "string" ? data.detail : "task 操作失败";
+    throw new Error(detail);
+  }
+  return data;
+}
+
+async function loadTasks() {
+  try {
+    const data = await requestJson("/api/tasks");
+    const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+    activeTask = tasks.find((task) => task.status === "active") || null;
+    taskList.innerHTML = renderTaskPanel(tasks);
+  } catch (error) {
+    taskList.innerHTML = `<p class="task-empty">${escapeHtml(error.message)}</p>`;
+  }
+}
 
 promptInput.addEventListener("input", () => {
   charCount.textContent = promptInput.value.length;
@@ -417,12 +461,96 @@ discardVisionCandidates.addEventListener("click", async () => {
 
 function renderAgentResult(data) {
   answerContent.innerHTML = renderSafeMarkdown(data.content);
+  recipeOptions.innerHTML = renderRecipeOptions(
+    data.segment_id || "",
+    data.recipe_options || [],
+    activeTask,
+  );
   profileProposalList.innerHTML = renderProfileProposalCards(data.profile_proposals || []);
   profileProposalList.hidden = !(data.profile_proposals || []).length;
   resultState.textContent = data.blocked ? "已拦截" : "完成";
   resultState.classList.toggle("blocked", data.blocked);
   renderExecutionTrace(data.execution_trace || []);
 }
+
+recipeOptions.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-recipe-action]");
+  if (!button) return;
+  const card = button.closest("[data-recipe-id]");
+  const servingsInput = card.querySelector('input[type="number"]');
+  const payload = buildRecipeRequest({
+    segmentId: card.dataset.segmentId,
+    recipeId: card.dataset.recipeId,
+    servings: servingsInput.value,
+    expectedVersion: activeTask ? activeTask.version : null,
+    requestId: requestId("recipe"),
+  });
+  card.querySelectorAll("button, input").forEach((control) => { control.disabled = true; });
+  try {
+    const endpoint = button.dataset.recipeAction === "new"
+      ? "/api/tasks/recipe-as-new"
+      : "/api/tasks/recipe";
+    await requestJson(endpoint, { method: "POST", body: payload });
+    card.classList.add("recipe-confirmed");
+    button.textContent = "已保存到 task";
+    await loadTasks();
+  } catch (error) {
+    button.textContent = error.message;
+    card.querySelectorAll("button, input").forEach((control) => { control.disabled = false; });
+  }
+});
+
+taskList.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-task-action]");
+  if (!button) return;
+  const card = button.closest("[data-task-id]");
+  const action = button.dataset.taskAction;
+  const taskId = card.dataset.taskId;
+  const version = Number(card.dataset.taskVersion);
+  const body = {
+    expected_version: version,
+    request_id: requestId(action),
+  };
+  let method = "POST";
+  if (action === "servings") {
+    method = "PATCH";
+    body.servings = Number(card.querySelector('input[type="number"]').value);
+  }
+  card.querySelectorAll("button, input").forEach((control) => { control.disabled = true; });
+  try {
+    const data = await requestJson(taskEndpoint(taskId, action), { method, body });
+    await loadTasks();
+    if (action === "cooked" && data.start_reconciliation) {
+      const payload = new FormData();
+      Object.entries(reconciliationFields(taskId)).forEach(([key, value]) => {
+        payload.set(key, value);
+      });
+      await submitAgentPayload(payload);
+    }
+  } catch (error) {
+    card.querySelector("small").textContent = error.message;
+    card.querySelectorAll("button, input").forEach((control) => { control.disabled = false; });
+  }
+});
+
+clearContextButton.addEventListener("click", async () => {
+  clearContextButton.disabled = true;
+  try {
+    await requestJson("/api/context/clear", {
+      method: "POST",
+      body: { request_id: requestId("clear") },
+    });
+    resultSection.hidden = true;
+    answerContent.innerHTML = "";
+    recipeOptions.innerHTML = "";
+    toolTrace.innerHTML = "";
+    await loadTasks();
+  } catch (error) {
+    taskList.innerHTML = `<p class="task-empty">${escapeHtml(error.message)}</p>`;
+  } finally {
+    clearContextButton.disabled = false;
+  }
+});
 
 profileProposalList.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-decision]");
@@ -448,19 +576,7 @@ profileProposalList.addEventListener("click", async (event) => {
   }
 });
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const file = imageInput.files[0];
-  const imageIsValid = !file || await updateFile(file);
-  if (
-    !promptInput.value.length
-    || promptInput.value.length > requestLimits.maxTextChars
-    || !imageIsValid
-  ) {
-    promptInput.dispatchEvent(new Event("input"));
-    form.reportValidity();
-    return;
-  }
+async function submitAgentPayload(payload) {
   submitButton.disabled = true;
   resultSection.hidden = false;
   resultState.textContent = "处理中";
@@ -469,8 +585,6 @@ form.addEventListener("submit", async (event) => {
   toolTrace.innerHTML = '<p class="empty-note">等待后端执行轨迹…</p>';
   resultSection.scrollIntoView({ behavior: "smooth", block: "start" });
 
-  const payload = new FormData(form);
-  if (!imageInput.files.length) payload.delete("image");
   try {
     const response = await fetch("/api/process", { method: "POST", body: payload });
     const data = await response.json();
@@ -486,6 +600,7 @@ form.addEventListener("submit", async (event) => {
     visionCheckpoint.hidden = true;
     await loadInventory();
     await loadPendingActions();
+    await loadTasks();
   } catch (error) {
     answerContent.textContent = error.message;
     resultState.textContent = "出错";
@@ -494,6 +609,24 @@ form.addEventListener("submit", async (event) => {
   } finally {
     submitButton.disabled = false;
   }
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const file = imageInput.files[0];
+  const imageIsValid = !file || await updateFile(file);
+  if (
+    !promptInput.value.length
+    || promptInput.value.length > requestLimits.maxTextChars
+    || !imageIsValid
+  ) {
+    promptInput.dispatchEvent(new Event("input"));
+    form.reportValidity();
+    return;
+  }
+  const payload = new FormData(form);
+  if (!imageInput.files.length) payload.delete("image");
+  await submitAgentPayload(payload);
 });
 
 function renderExecutionTrace(trace) {
@@ -632,3 +765,4 @@ loadStatus();
 loadInventory();
 loadPendingActions();
 loadProactiveReminder();
+loadTasks();

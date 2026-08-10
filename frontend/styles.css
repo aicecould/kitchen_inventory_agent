@@ -304,6 +304,32 @@ main { width: min(1240px, calc(100% - 48px)); margin: 0 auto; }
 
 footer { width: min(1240px, calc(100% - 48px)); margin: 0 auto; padding: 24px 0 38px; display: flex; justify-content: space-between; gap: 24px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 10px; letter-spacing: .05em; }
 
+.task-panel { margin: 18px 0 24px; border: 1px solid var(--line); background: rgba(255,255,255,.35); }
+.task-panel-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.task-panel-heading span, .task-copy span, .recipe-option span { color: var(--ink-soft); font-size: 9px; letter-spacing: .13em; }
+.task-panel-heading button, .task-controls button, .recipe-option button { border: 1px solid var(--line); background: transparent; color: var(--ink); padding: 7px 10px; cursor: pointer; }
+.task-panel-heading button:hover, .task-controls button:hover, .recipe-option button:hover { border-color: var(--tomato); color: var(--tomato); }
+.task-panel-heading button:focus-visible, .task-controls button:focus-visible, .recipe-option button:focus-visible, .task-servings input:focus-visible, .recipe-option input:focus-visible { outline: 3px solid rgba(217,75,43,.2); outline-offset: 2px; border-color: var(--tomato); }
+.task-panel button:disabled, .recipe-option button:disabled, .task-panel input:disabled, .recipe-option input:disabled { opacity: .5; cursor: wait; }
+.task-list { display: grid; }
+.task-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 13px 14px; border-bottom: 1px solid var(--line); }
+.task-card:last-child { border-bottom: 0; }
+.task-copy { min-width: 0; display: grid; gap: 3px; }
+.task-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-copy small { color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-controls { display: flex; align-items: end; gap: 8px; }
+.task-controls .task-primary { background: var(--ink); color: var(--paper-light); }
+.task-servings { display: grid; gap: 3px; color: var(--ink-soft); font-size: 9px; }
+.task-servings input, .recipe-option input { width: 78px; border: 1px solid var(--line); background: var(--paper-light); padding: 7px; color: var(--ink); font: inherit; }
+.task-empty { margin: 0; padding: 13px 14px; color: var(--ink-soft); font-size: 11px; }
+.recipe-options { display: grid; gap: 10px; margin-top: 18px; }
+.recipe-option { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 14px; align-items: end; border: 1px solid var(--line); padding: 13px; }
+.recipe-option > div:first-child { min-width: 0; display: grid; gap: 4px; }
+.recipe-option small { color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recipe-option label { display: grid; gap: 4px; color: var(--ink-soft); font-size: 9px; }
+.recipe-option-actions { display: flex; gap: 6px; }
+.recipe-confirmed { border-color: var(--green); }
+
 .reveal { animation: reveal .75s cubic-bezier(.2,.7,.2,1) both; }
 .delay-1 { animation-delay: .14s; }.delay-2 { animation-delay: .26s; }
 @keyframes reveal { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: none; } }
@@ -353,6 +379,8 @@ footer { width: min(1240px, calc(100% - 48px)); margin: 0 auto; padding: 24px 0 
   .inventory-details { grid-template-columns: 1fr 1fr; gap: 8px; }
   .inventory-details div:last-child { grid-column: 1 / -1; }
   .service-card { min-height: 120px; border-right: 0; }
+  .task-card, .recipe-option { grid-template-columns: 1fr; align-items: stretch; }
+  .task-controls, .recipe-option-actions { flex-wrap: wrap; }
   footer { display: block; line-height: 1.7; }
 }
 

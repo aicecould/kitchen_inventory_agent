@@ -31,6 +31,10 @@ _INVENTORY_SNAPSHOT_FIELDS = {
 _UNSAFE_PREVIEW_ERROR = (
     "Structured confirmation preview unavailable; recreate this proposal."
 )
+_PENDING_ACTION_COLUMNS = """
+action_id, user_id, operation, arguments_json, summary, status, created_at,
+expires_at, result_json, error, preview_json, source_task_id
+"""
 
 
 class AddInventoryArguments(BaseModel):
@@ -90,6 +94,14 @@ class PendingAction(BaseModel):
     expires_at: datetime
     result: dict[str, object] | None = None
     error: str | None = None
+    source_task_id: str | None = None
+
+    @field_validator("source_task_id")
+    @classmethod
+    def validate_source_task_id(cls, value: str | None) -> str | None:
+        if value is not None and re.fullmatch(r"task_[0-9a-f]{32}", value) is None:
+            raise ValueError("source task ID is invalid")
+        return value
 
 
 ARGUMENT_MODELS = {
@@ -256,7 +268,8 @@ class PendingActionRepository:
                     expires_at TEXT NOT NULL,
                     result_json TEXT,
                     error TEXT,
-                    preview_json TEXT NOT NULL DEFAULT '{}'
+                    preview_json TEXT NOT NULL DEFAULT '{}',
+                    source_task_id TEXT
                 )
                 """
             )
@@ -270,6 +283,10 @@ class PendingActionRepository:
                 connection.execute(
                     "ALTER TABLE pending_actions ADD COLUMN preview_json "
                     "TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "source_task_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE pending_actions ADD COLUMN source_task_id TEXT"
                 )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_pending_actions_user_status "
@@ -306,6 +323,7 @@ class PendingActionRepository:
         summary: str,
         preview: dict[str, object],
         ttl_minutes: int,
+        source_task_id: str | None = None,
     ) -> PendingAction:
         now = datetime.now(timezone.utc)
         action = PendingAction(
@@ -318,14 +336,15 @@ class PendingActionRepository:
             status="pending",
             created_at=now,
             expires_at=now + timedelta(minutes=ttl_minutes),
+            source_task_id=source_task_id,
         )
         with sqlite3.connect(self.db_path) as connection:
             connection.execute(
                 """
                 INSERT INTO pending_actions(
                     action_id, user_id, operation, arguments_json, summary,
-                    status, created_at, expires_at, preview_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, created_at, expires_at, preview_json, source_task_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     action.action_id,
@@ -337,6 +356,7 @@ class PendingActionRepository:
                     action.created_at.isoformat(),
                     action.expires_at.isoformat(),
                     json.dumps(action.preview, ensure_ascii=False),
+                    action.source_task_id,
                 ),
             )
         return action
@@ -344,7 +364,9 @@ class PendingActionRepository:
     def get(self, action_id: str) -> PendingAction | None:
         with sqlite3.connect(self.db_path) as connection:
             row = connection.execute(
-                "SELECT * FROM pending_actions WHERE action_id = ?", (action_id,)
+                f"SELECT {_PENDING_ACTION_COLUMNS} FROM pending_actions "
+                "WHERE action_id = ?",
+                (action_id,),
             ).fetchone()
         return self._from_row(row) if row else None
 
@@ -352,7 +374,8 @@ class PendingActionRepository:
         self.expire_old_actions()
         with sqlite3.connect(self.db_path) as connection:
             rows = connection.execute(
-                "SELECT * FROM pending_actions WHERE user_id = ? AND status = 'pending' "
+                f"SELECT {_PENDING_ACTION_COLUMNS} FROM pending_actions "
+                "WHERE user_id = ? AND status = 'pending' "
                 "ORDER BY created_at DESC",
                 (user_id,),
             ).fetchall()
@@ -362,7 +385,9 @@ class PendingActionRepository:
         with sqlite3.connect(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT * FROM pending_actions WHERE action_id = ?", (action_id,)
+                f"SELECT {_PENDING_ACTION_COLUMNS} FROM pending_actions "
+                "WHERE action_id = ?",
+                (action_id,),
             ).fetchone()
             if row is None:
                 raise KeyError("Pending action not found")
@@ -420,7 +445,9 @@ class PendingActionRepository:
         with sqlite3.connect(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT * FROM pending_actions WHERE action_id = ?", (action_id,)
+                f"SELECT {_PENDING_ACTION_COLUMNS} FROM pending_actions "
+                "WHERE action_id = ?",
+                (action_id,),
             ).fetchone()
             if row is None:
                 raise KeyError("Pending action not found")
@@ -463,6 +490,9 @@ class PendingActionRepository:
                 if len(row) > 10 and row[10]
                 else {}
             ),
+            source_task_id=(
+                str(row[11]) if len(row) > 11 and row[11] is not None else None
+            ),
         )
 
 
@@ -487,6 +517,7 @@ class InventoryActionService:
         quantity_text: str,
         *,
         user_expires_at: datetime | None = None,
+        source_task_id: str | None = None,
     ) -> PendingAction:
         if user_expires_at is not None:
             expires_at = user_expires_at
@@ -522,10 +553,16 @@ class InventoryActionService:
                 "expires_at": expires_at.isoformat() if expires_at is not None else None,
                 "expiry_source": expiry_source,
             },
+            source_task_id=source_task_id,
         )
 
     def propose(
-        self, user_id: str, operation: str, arguments: dict[str, object]
+        self,
+        user_id: str,
+        operation: str,
+        arguments: dict[str, object],
+        *,
+        source_task_id: str | None = None,
     ) -> PendingAction:
         validated = validate_operation(operation, arguments)
         preview = self._build_preview(operation, validated)
@@ -536,6 +573,7 @@ class InventoryActionService:
             summary=action_summary(operation, validated),
             preview=preview,
             ttl_minutes=self.ttl_minutes,
+            source_task_id=source_task_id,
         )
 
     def confirm(self, action_id: str, user_id: str) -> PendingAction:

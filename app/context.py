@@ -27,6 +27,14 @@ class HistoryExcerpt(BaseModel):
     response: str
 
 
+class CookingTaskContext(BaseModel):
+    task_id: str = Field(pattern=r"^task_[0-9a-f]{32}$")
+    query_text: str
+    recipe_title: str
+    servings: int = Field(gt=0)
+    ingredients: list[str] = Field(default_factory=list)
+
+
 class VisionConfirmationPrompt(BaseModel):
     confirmation_id: str
     candidates: list[Ingredient]
@@ -43,6 +51,10 @@ class AgentContext(BaseModel):
     custom_allergens: list[str] = Field(default_factory=list)
     profile_markdown: str = ""
     history_segments: list[HistoryExcerpt] = Field(default_factory=list, max_length=10)
+    cooking_task: CookingTaskContext | None = None
+    inventory_source_task_id: str | None = Field(
+        default=None, pattern=r"^task_[0-9a-f]{32}$"
+    )
     vision_confirmation_result: dict[str, object] | None = None
 
 
@@ -63,3 +75,5 @@ class AgentResult(BaseModel):
     awaiting_vision_confirmation: bool = False
     vision_confirmation: VisionConfirmationPrompt | None = None
     profile_proposals: list[ProfileProposal] = Field(default_factory=list)
+    segment_id: str = ""
+    recipe_options: list[dict[str, object]] = Field(default_factory=list)

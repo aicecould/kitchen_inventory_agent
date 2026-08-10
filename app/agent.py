@@ -459,6 +459,7 @@ class KitchenAgent:
                         ),
                         "expiry_source": expiry_source,
                     },
+                    source_task_id=context.inventory_source_task_id,
                 ).model_dump(mode="json"),
                 lambda value: f"status={value['status']}",
             )
@@ -474,6 +475,7 @@ class KitchenAgent:
                     context.user_id,
                     "inventory.remove",
                     {"instance_id": instance_id},
+                    source_task_id=context.inventory_source_task_id,
                 ).model_dump(mode="json"),
                 lambda value: f"status={value['status']}",
             )
@@ -698,6 +700,11 @@ class KitchenAgent:
                 segment.model_dump(mode="json")
                 for segment in context.history_segments
             ],
+            "cooking_task": (
+                context.cooking_task.model_dump(mode="json")
+                if context.cooking_task is not None
+                else None
+            ),
             "vision_confirmation_result": context.vision_confirmation_result,
             "target_language": target_language,
         }
