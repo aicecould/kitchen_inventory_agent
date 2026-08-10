@@ -266,6 +266,21 @@ main { width: min(1240px, calc(100% - 48px)); margin: 0 auto; }
 .answer-content pre code { padding: 0; color: inherit; background: transparent; border: 0; }
 .answer-content blockquote { margin: .8em 0 1em; padding-left: 16px; border-left: 3px solid var(--mustard); color: var(--ink-soft); }
 .answer-content hr { margin: 1.2em 0; border: 0; border-top: 1px solid var(--line); }
+.profile-proposal-list { display: grid; gap: 12px; margin-top: 22px; }
+.profile-proposal-card { padding: 16px; border: 1px solid var(--tomato); background: rgba(217,75,43,.05); }
+.profile-proposal-heading { display: flex; justify-content: space-between; gap: 12px; color: var(--tomato); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+.profile-proposal-card dl { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0; }
+.profile-proposal-card dt { color: var(--ink-soft); font-size: 9px; font-weight: 800; }
+.profile-proposal-card dd { margin: 3px 0 0; overflow-wrap: anywhere; }
+.profile-proposal-card p { margin: 10px 0; color: var(--ink-soft); font-size: 12px; }
+.profile-proposal-card small { display: block; overflow-wrap: anywhere; }
+.profile-proposal-card code { color: var(--tomato); font-size: 9px; }
+.profile-proposal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.profile-proposal-actions button { padding: 9px 13px; border: 1px solid var(--ink); background: transparent; cursor: pointer; font-weight: 800; }
+.profile-proposal-actions button:last-child { color: var(--paper-light); background: var(--ink); }
+.profile-proposal-card.confirmed { border-color: #4e8d64; background: rgba(78,141,100,.12); }
+.profile-proposal-card.rejected { opacity: .6; }
+.profile-proposal-status { min-height: 1em; }
 .tool-trace { display: grid; gap: 10px; }
 .trace-entry { padding: 13px; border-left: 3px solid var(--mustard); background: rgba(213,166,41,.08); }
 .trace-entry.trace-failed, .trace-entry.trace-blocked { border-left-color: var(--tomato); }
