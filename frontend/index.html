@@ -95,6 +95,16 @@
             </div>
           </div>
 
+          <section class="task-panel" id="task-panel" aria-label="当前烹饪 task">
+            <div class="task-panel-heading">
+              <span>COOKING TASK</span>
+              <button id="clear-context" type="button">清空上下文与 task</button>
+            </div>
+            <div id="task-list" class="task-list">
+              <p class="task-empty">正在读取 task…</p>
+            </div>
+          </section>
+
           <form id="agent-form">
             <label class="prompt-field" for="prompt">
               <span>给厨房助手留句话</span>
@@ -197,6 +207,7 @@
           <article class="answer-card">
             <div class="answer-label">FINAL ANSWER</div>
             <div id="answer-content" class="answer-content"></div>
+            <div id="recipe-options" class="recipe-options"></div>
             <div id="profile-proposal-list" class="profile-proposal-list" hidden></div>
           </article>
           <article class="trace-card">
@@ -222,6 +233,7 @@
 
     <script src="/static/markdown.js" defer></script>
     <script src="/static/profile-proposals.js" defer></script>
+    <script src="/static/tasks.js" defer></script>
     <script src="/static/app.js" defer></script>
   </body>
 </html>
