@@ -379,25 +379,5 @@ def write_user_allergens(
     allergen_intolerances: list[str],
     custom_allergens: list[str],
 ) -> UserProfile:
-    markdown = load_user_profile(path)
-    target_sections = {"过敏原", "广义过敏原", "自定义过敏食材"}
-    retained: list[str] = []
-    skipping = False
-    for line in markdown.splitlines():
-        if line.startswith("## "):
-            skipping = line[3:].strip() in target_sections
-        if not skipping:
-            retained.append(line)
-
-    cleaned = "\n".join(retained).rstrip()
-    broad_lines = [f"- {value}" for value in allergen_intolerances] or ["- 暂无"]
-    custom_lines = [f"- {value}" for value in custom_allergens] or ["- 暂无"]
-    updated = (
-        f"{cleaned}\n\n## 广义过敏原\n\n"
-        + "\n".join(broad_lines)
-        + "\n\n## 自定义过敏食材\n\n"
-        + "\n".join(custom_lines)
-        + "\n"
-    )
-    path.write_text(updated, encoding="utf-8")
-    return parse_user_profile(updated)
+    del path, allergen_intolerances, custom_allergens
+    raise RuntimeError("Use an audited profile action to update allergens")

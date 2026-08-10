@@ -228,13 +228,7 @@ class ProfileRepository:
 
 def load_user_profile(path: Path) -> str:
     if not path.exists():
-        template = DEFAULT_USER_PROFILE_TEMPLATE.read_text(encoding="utf-8")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with path.open("x", encoding="utf-8", newline="\n") as handle:
-                handle.write(template)
-        except FileExistsError:
-            pass
+        return DEFAULT_USER_PROFILE_TEMPLATE.read_text(encoding="utf-8")
     return path.read_text(encoding="utf-8")
 
 

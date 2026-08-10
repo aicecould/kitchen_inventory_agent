@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from app.profile import ProfileFact, ProfileRepository, ProfileState, UserProfile
+from app.profile import (
+    ProfileAuditEvent,
+    ProfileFact,
+    ProfileRepository,
+    ProfileState,
+    UserProfile,
+)
 from app.profile_actions import (
     ProfileActionService,
     ProfileChangeRequest,
@@ -188,16 +194,79 @@ def test_inference_requires_two_distinct_evidence_segments(tmp_path: Path) -> No
 def test_audit_history_is_bounded_to_two_hundred(tmp_path: Path) -> None:
     service = _service(tmp_path)
     repository = service.repository
-    state = ProfileState(
-        revision=0,
-        audit_events=[],
-    )
+    state = ProfileState(revision=0)
     repository.replace(
         expected_revision=0,
-        state=state.model_copy(update={"revision": 1}),
+        state=state.model_copy(
+            update={
+                "revision": 1,
+                "audit_events": [
+                    ProfileAuditEvent(
+                        operation="initialize_profile_v2",
+                        status="passed",
+                        reason=f"seed {index}",
+                        created_at=NOW,
+                    )
+                    for index in range(200)
+                ],
+            }
+        ),
         audit_passed=True,
     )
-    for index in range(205):
-        service.record_audit_only("u", f"test.{index}")
+    service.propose("u", _request(), [_history_id("1")])
 
     assert len(repository.read().state.audit_events) == 200
+
+
+def test_resolved_proposals_and_superseded_facts_are_bounded(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    repository = service.repository
+    proposal = service.propose("u", _request(), [_history_id("1")])
+    rejected = service.reject(proposal.proposal_id, "u")
+    profile = repository.read()
+    old_fact = ProfileFact(
+        fact_id="fact_" + "f" * 32,
+        category="preference",
+        key="old.preference",
+        value="旧偏好",
+        origin="inferred",
+        status="superseded",
+        evidence_ids=[_history_id("1"), _history_id("2")],
+        reason="旧推断",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    seeded = profile.state.model_copy(
+        update={
+            "revision": profile.state.revision + 1,
+            "proposals": [
+                rejected.model_copy(update={"proposal_id": f"prof_{index:032x}"})
+                for index in range(205)
+            ],
+            "facts": [
+                old_fact.model_copy(
+                    update={
+                        "fact_id": f"fact_{index:032x}",
+                        "key": f"old.preference.{index}",
+                    }
+                )
+                for index in range(205)
+            ],
+        },
+        deep=True,
+    )
+    repository.replace(
+        expected_revision=profile.state.revision,
+        state=seeded,
+        audit_passed=True,
+    )
+
+    service.propose(
+        "u", _request(key="ingredient.potato", value="喜欢土豆"), [_history_id("2")]
+    )
+
+    bounded = repository.read().state
+    assert len(bounded.proposals) == 200
+    assert len(bounded.facts) == 200

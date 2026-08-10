@@ -9,7 +9,10 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.audit import validate_profile_mutation_preview
+from app.audit import (
+    validate_profile_mutation_preview,
+    validate_profile_state_transition,
+)
 from app.profile import (
     ProfileAuditEvent,
     ProfileCategory,
@@ -20,6 +23,7 @@ from app.profile import (
     ProfileProposalStatus,
     ProfileRepository,
     ProfileState,
+    UserProfile,
 )
 
 
@@ -96,11 +100,7 @@ class ProfileActionService:
             now=now,
         )
         self._audit_preview(request, proposal.preview)
-        saved = self.repository.replace(
-            expected_revision=profile.state.revision,
-            state=state,
-            audit_passed=True,
-        )
+        saved = self._commit(profile.state, state, "propose_profile_change")
         return _proposal(saved.state, proposal.proposal_id)
 
     def confirm(self, proposal_id: str, user_id: str) -> ProfileProposal:
@@ -117,9 +117,7 @@ class ProfileActionService:
             proposal.status = ProfileProposalStatus.EXPIRED
             proposal.resolved_at = now
             self._finish_state(state, operation="expire_profile_proposals", subject_id=proposal_id, now=now)
-            self.repository.replace(
-                expected_revision=profile.state.revision, state=state, audit_passed=True
-            )
+            self._commit(profile.state, state, "expire_profile_proposals")
             raise ValueError("Profile proposal has expired")
         current = _active_fact(state, proposal.category, proposal.key)
         if proposal.conflicting_fact_id is not None and (
@@ -146,9 +144,7 @@ class ProfileActionService:
         proposal.resolved_at = now
         proposal.resolved_revision = profile.state.revision + 1
         self._finish_state(state, operation="confirm_profile_change", subject_id=proposal_id, now=now)
-        saved = self.repository.replace(
-            expected_revision=profile.state.revision, state=state, audit_passed=True
-        )
+        saved = self._commit(profile.state, state, "confirm_profile_change")
         return _proposal(saved.state, proposal_id)
 
     def reject(self, proposal_id: str, user_id: str) -> ProfileProposal:
@@ -165,9 +161,7 @@ class ProfileActionService:
         proposal.resolved_at = now
         proposal.resolved_revision = profile.state.revision + 1
         self._finish_state(state, operation="reject_profile_change", subject_id=proposal_id, now=now)
-        saved = self.repository.replace(
-            expected_revision=profile.state.revision, state=state, audit_passed=True
-        )
+        saved = self._commit(profile.state, state, "reject_profile_change")
         return _proposal(saved.state, proposal_id)
 
     def apply_inferred_batch(
@@ -223,20 +217,8 @@ class ProfileActionService:
                 state.facts.append(fact)
         state.last_summarized_segment_id = summarized_through
         self._finish_state(state, operation="apply_inferred_profile_change", subject_id=summarized_through, now=now)
-        saved = self.repository.replace(
-            expected_revision=profile.state.revision, state=state, audit_passed=True
-        )
+        saved = self._commit(profile.state, state, "apply_inferred_profile_change")
         return [_proposal(saved.state, proposal_id) for proposal_id in created]
-
-    def record_audit_only(self, user_id: str, operation: str) -> None:
-        if not user_id:
-            raise ValueError("user_id is required")
-        profile = self.repository.read()
-        state = profile.state.model_copy(deep=True)
-        self._finish_state(state, operation=operation, subject_id=None, now=self._now())
-        self.repository.replace(
-            expected_revision=profile.state.revision, state=state, audit_passed=True
-        )
 
     def replace_confirmed_allergens(
         self,
@@ -245,7 +227,7 @@ class ProfileActionService:
         custom: list[str],
         *,
         evidence_id: str,
-    ) -> object:
+    ) -> UserProfile:
         self._validate_evidence(user_id, [evidence_id])
         if len(broad) + len(custom) > 20:
             raise ValueError("Profile requirement category cannot exceed 20 active facts")
@@ -280,9 +262,24 @@ class ProfileActionService:
             subject_id=evidence_id,
             now=now,
         )
+        return self._commit(profile.state, state, "replace_confirmed_allergens")
+
+    def _commit(
+        self,
+        before: ProfileState,
+        after: ProfileState,
+        operation: str,
+    ) -> UserProfile:
+        reason = validate_profile_state_transition(
+            before.model_dump(mode="json"),
+            after.model_dump(mode="json"),
+            operation,
+        )
+        if reason is not None:
+            raise ValueError(reason)
         return self.repository.replace(
-            expected_revision=profile.state.revision,
-            state=state,
+            expected_revision=before.revision,
+            state=after,
             audit_passed=True,
         )
 
@@ -370,6 +367,32 @@ class ProfileActionService:
             )
         )
         state.audit_events = state.audit_events[-200:]
+        pending = [
+            proposal
+            for proposal in state.proposals
+            if proposal.status == ProfileProposalStatus.PENDING
+        ]
+        if len(pending) > 200:
+            raise ValueError("Profile has too many pending proposals")
+        resolved = [
+            proposal
+            for proposal in state.proposals
+            if proposal.status != ProfileProposalStatus.PENDING
+        ]
+        resolved.sort(key=lambda item: (item.created_at, item.proposal_id))
+        resolved_limit = 200 - len(pending)
+        kept_resolved = resolved[-resolved_limit:] if resolved_limit else []
+        state.proposals = [*kept_resolved, *pending]
+        active_facts = [
+            fact for fact in state.facts if fact.status == ProfileFactStatus.ACTIVE
+        ]
+        inactive_facts = [
+            fact for fact in state.facts if fact.status != ProfileFactStatus.ACTIVE
+        ]
+        inactive_facts.sort(key=lambda item: (item.updated_at, item.fact_id))
+        inactive_limit = max(0, 200 - len(active_facts))
+        kept_inactive = inactive_facts[-inactive_limit:] if inactive_limit else []
+        state.facts = [*kept_inactive, *active_facts]
 
     def _ensure_capacity(self, state: ProfileState, category: ProfileCategory) -> None:
         active = [

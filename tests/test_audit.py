@@ -1,7 +1,13 @@
 import pytest
 
 import app.audit as audit_module
-from app.audit import AuditCode, regex_audit, review_candidate, review_tool_calls
+from app.audit import (
+    AuditCode,
+    regex_audit,
+    review_candidate,
+    review_tool_calls,
+    validate_profile_state_transition,
+)
 
 
 def test_regex_audit_placeholder_blocks_fake_order_claim() -> None:
@@ -624,3 +630,70 @@ def test_profile_proposal_rejects_preview_mismatch() -> None:
 
     assert audit.passed is False
     assert audit.reason == "Profile preview revision is invalid"
+
+
+def test_profile_state_transition_requires_matching_passed_audit_event() -> None:
+    before = {
+        "schema_version": 2,
+        "revision": 4,
+        "facts": [],
+        "proposals": [],
+        "audit_events": [],
+    }
+    after = {
+        **before,
+        "revision": 5,
+        "audit_events": [
+            {
+                "operation": "reject_profile_change",
+                "status": "passed",
+                "reason": "validated",
+                "created_at": "2026-08-10T05:00:00Z",
+            }
+        ],
+    }
+
+    assert (
+        validate_profile_state_transition(before, after, "confirm_profile_change")
+        == "Profile audit event does not match the mutation"
+    )
+
+
+def test_profile_state_transition_blocks_silent_inferred_requirement() -> None:
+    before = {
+        "schema_version": 2,
+        "revision": 0,
+        "facts": [],
+        "proposals": [],
+        "audit_events": [],
+    }
+    after = {
+        **before,
+        "revision": 1,
+        "facts": [
+            {
+                "fact_id": "fact_" + "1" * 32,
+                "category": "requirement",
+                "key": "allergen.peanut",
+                "value": "对花生过敏",
+                "origin": "inferred",
+                "status": "active",
+                "evidence_ids": ["hist_" + "2" * 32, "hist_" + "3" * 32],
+            }
+        ],
+        "audit_events": [
+            {
+                "operation": "apply_inferred_profile_change",
+                "status": "passed",
+                "reason": "validated",
+                "created_at": "2026-08-10T05:00:00Z",
+            }
+        ],
+    }
+
+    assert (
+        validate_profile_state_transition(
+            before, after, "apply_inferred_profile_change"
+        )
+        == "Mandatory profile requirements cannot be inferred silently"
+    )

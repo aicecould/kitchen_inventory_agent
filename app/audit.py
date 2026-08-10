@@ -571,6 +571,91 @@ def validate_profile_mutation_preview(
     return None
 
 
+def validate_profile_state_transition(
+    before: dict[str, object],
+    after: dict[str, object],
+    operation: str,
+) -> str | None:
+    """Apply the existing deterministic audit contract to every profile write."""
+
+    allowed_operations = {
+        "initialize_profile_v2",
+        "propose_profile_change",
+        "confirm_profile_change",
+        "reject_profile_change",
+        "expire_profile_proposals",
+        "apply_inferred_profile_change",
+        "replace_confirmed_allergens",
+        "prune_profile_state",
+    }
+    if operation not in allowed_operations:
+        return "Profile mutation operation is not allowlisted"
+    before_revision = before.get("revision")
+    after_revision = after.get("revision")
+    if (
+        not isinstance(before_revision, int)
+        or isinstance(before_revision, bool)
+        or not isinstance(after_revision, int)
+        or isinstance(after_revision, bool)
+        or after_revision != before_revision + 1
+    ):
+        return "Profile state revision is invalid"
+    if after.get("schema_version") != 2:
+        return "Profile state schema version is invalid"
+    audit_events = after.get("audit_events")
+    if not isinstance(audit_events, list) or not audit_events:
+        return "Profile mutation has no audit event"
+    event = audit_events[-1]
+    if (
+        not isinstance(event, dict)
+        or event.get("operation") != operation
+        or event.get("status") != "passed"
+    ):
+        return "Profile audit event does not match the mutation"
+    before_facts = {
+        str(item.get("fact_id")): item
+        for item in before.get("facts", [])
+        if isinstance(item, dict)
+    } if isinstance(before.get("facts"), list) else {}
+    after_facts = after.get("facts")
+    if not isinstance(after_facts, list):
+        return "Profile facts are not structured"
+    for item in after_facts:
+        if not isinstance(item, dict):
+            return "Profile fact is not structured"
+        fact_id = str(item.get("fact_id", ""))
+        evidence = item.get("evidence_ids")
+        if fact_id not in before_facts and (
+            not isinstance(evidence, list)
+            or not evidence
+            or any(not isinstance(value, str) or _HISTORY_ID.fullmatch(value) is None for value in evidence)
+        ):
+            return "New profile fact has no valid evidence"
+        if (
+            operation == "apply_inferred_profile_change"
+            and item.get("category") == "requirement"
+            and item.get("origin") == "inferred"
+            and fact_id not in before_facts
+        ):
+            return "Mandatory profile requirements cannot be inferred silently"
+    if operation == "apply_inferred_profile_change":
+        after_by_id = {
+            str(item.get("fact_id")): item
+            for item in after_facts
+            if isinstance(item, dict)
+        }
+        for fact_id, old in before_facts.items():
+            current = after_by_id.get(fact_id)
+            if (
+                old.get("origin") == "user_confirmed"
+                and old.get("status") == "active"
+                and isinstance(current, dict)
+                and current.get("status") != "active"
+            ):
+                return "Confirmed profile fact cannot be silently replaced"
+    return None
+
+
 def _canonical_response_from_calls(
     parsed_calls: list[dict[str, object]],
     target_language: str = "zh",
