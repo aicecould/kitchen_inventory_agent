@@ -68,3 +68,25 @@ def test_complex_search_requires_ingredients() -> None:
             intolerances=[],
             exclude_ingredients=[],
         )
+
+
+def test_default_ranking_omits_sort_parameter(monkeypatch: Any) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_get(url: str, **kwargs: object) -> FakeResponse:
+        captured["params"] = kwargs["params"]
+        return FakeResponse()
+
+    monkeypatch.setattr("app.adapters.recipe_api.httpx.get", fake_get)
+    client = SpoonacularClient("https://api.spoonacular.com", "secret")
+    client.search(
+        ingredients=["tomato"],
+        intolerances=[],
+        exclude_ingredients=[],
+        ranking="default",
+        limit=3,
+    )
+
+    params = captured["params"]
+    assert isinstance(params, dict)
+    assert "sort" not in params
