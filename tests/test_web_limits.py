@@ -245,6 +245,46 @@ def test_status_exposes_request_limits() -> None:
     }
 
 
+def test_status_reports_local_recipe_search_without_changing_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.web as web
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    db_path = tmp_path / "recipes.db"
+    faiss_path = tmp_path / "recipes.faiss"
+    metadata_path = tmp_path / "metadata.json"
+    for path in (db_path, faiss_path, metadata_path):
+        path.write_text("artifact", encoding="utf-8")
+    settings = replace(
+        get_settings(),
+        deepseek_api_key="",
+        recommender_enabled=True,
+        recommender_db_path=db_path,
+        recommender_faiss_path=faiss_path,
+        recommender_metadata_path=metadata_path,
+        recommender_model_path=model_dir,
+    )
+    monkeypatch.setattr(web, "get_settings", lambda: settings)
+
+    payload = web.service_status()
+
+    assert payload["services"]["local_recipe_search"] is True
+    assert payload["ready"] is False
+
+    monkeypatch.setattr(
+        web,
+        "get_settings",
+        lambda: replace(settings, recommender_enabled=False),
+    )
+    degraded = web.service_status()
+
+    assert degraded["services"]["local_recipe_search"] is False
+    assert degraded["ready"] is False
+
+
 def test_backend_rejects_oversized_text() -> None:
     response = client.post(
         "/api/process",

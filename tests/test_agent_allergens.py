@@ -68,6 +68,7 @@ def inventory_tools(
         inventory=inventory,
         recipes=RecipeRouter(
             None,
+            None,
             TheMealDbClient("https://example.invalid", timeout=1),
         ),
         actions=actions,
@@ -89,6 +90,7 @@ def test_profile_tool_binds_trusted_user_and_current_segment(tmp_path: Path) -> 
         model=None,  # type: ignore[arg-type]
         inventory=inventory,
         recipes=RecipeRouter(
+            None,
             None,
             TheMealDbClient("https://example.invalid", timeout=1),
         ),
@@ -313,6 +315,7 @@ def test_exact_get_cannot_choose_duplicate_from_history_without_user_id_selectio
         inventory=inventory,
         recipes=RecipeRouter(
             None,
+            None,
             TheMealDbClient("https://example.invalid", timeout=1),
         ),
         actions=actions,
@@ -387,13 +390,12 @@ def test_recipe_tool_requires_all_configured_allergens() -> None:
     recipes = FakeRecipeRouter()
     tool = recipe_tool(context, recipes)
 
-    with pytest.raises(ValueError, match="MISSING_ALLERGEN_FILTER"):
+    with pytest.raises(ValueError, match="MISSING_INGREDIENT_MAPPING"):
         tool.invoke(  # type: ignore[attr-defined]
             {
                 "ingredients": ["tomato"],
-                "intolerances": ["Peanut"],
+                "ingredient_mapping": [],
                 "exclude_ingredients": [],
-                "custom_allergen_mapping": [],
             }
         )
 
@@ -412,17 +414,17 @@ def test_recipe_tool_passes_broad_and_custom_allergens_to_router() -> None:
     tool.invoke(  # type: ignore[attr-defined]
         {
             "ingredients": ["tomato"],
-            "intolerances": ["Peanut"],
-            "exclude_ingredients": ["onion"],
-            "custom_allergen_mapping": [
+            "ingredient_mapping": [
                 {"original": "腰果", "api_term": "cashew"}
             ],
+            "exclude_ingredients": ["onion"],
         }
     )
 
     assert recipes.kwargs is not None
-    assert recipes.kwargs["intolerances"] == ["Peanut"]
-    assert recipes.kwargs["exclude_ingredients"] == ["onion", "cashew"]
+    assert recipes.kwargs["allergen_categories"] == ["Peanut"]
+    assert recipes.kwargs["custom_allergens"] == ["腰果"]
+    assert recipes.kwargs["exclude_ingredients"] == ["onion"]
 
 
 def test_recipe_tool_rejects_non_english_api_term() -> None:
@@ -438,10 +440,41 @@ def test_recipe_tool_rejects_non_english_api_term() -> None:
         tool.invoke(  # type: ignore[attr-defined]
             {
                 "ingredients": ["tomato"],
-                "intolerances": [],
-                "exclude_ingredients": [],
-                "custom_allergen_mapping": [
+                "ingredient_mapping": [
                     {"original": "腰果", "api_term": "腰果"}
                 ],
+                "exclude_ingredients": [],
             }
         )
+
+
+def test_recipe_tool_schema_uses_generic_ingredient_mapping() -> None:
+    context = AgentContext(
+        user_id="test",
+        request_text="推荐菜谱",
+        allergens=["Peanut", "腰果"],
+        allergen_intolerances=["Peanut"],
+        custom_allergens=["腰果"],
+    )
+    recipes = FakeRecipeRouter()
+    tool = recipe_tool(context, recipes)
+
+    assert "ingredient_mapping" in tool.args
+    assert "custom_allergen_mapping" not in tool.args
+    assert "intolerances" not in tool.args
+
+    tool.invoke(  # type: ignore[attr-defined]
+        {
+            "ingredients": ["西红柿", "egg"],
+            "ingredient_mapping": [
+                {"original": "西红柿", "api_term": "tomato"},
+                {"original": "腰果", "api_term": "cashew"},
+            ],
+            "exclude_ingredients": [],
+            "ranking": "default",
+        }
+    )
+
+    assert recipes.kwargs is not None
+    assert recipes.kwargs["allergen_categories"] == ["Peanut"]
+    assert recipes.kwargs["custom_allergens"] == ["腰果"]

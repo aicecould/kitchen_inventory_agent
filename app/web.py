@@ -144,6 +144,13 @@ def service_status() -> dict[str, object]:
             and settings.food_classifier_model_path.is_file()
             and settings.food_classifier_metadata_path.is_file()
         ),
+        "local_recipe_search": (
+            settings.recommender_enabled
+            and settings.recommender_db_path.is_file()
+            and settings.recommender_faiss_path.is_file()
+            and settings.recommender_metadata_path.is_file()
+            and settings.recommender_model_path.is_dir()
+        ),
     }
     return {
         "ready": services["deepseek"],

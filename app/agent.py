@@ -18,7 +18,6 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from app.actions import InventoryActionService
-from app.allergens import AllergenIntolerance
 from app.audit import (
     AuditCode,
     AuditResult,
@@ -54,16 +53,8 @@ from app.supervisor import (
 from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
 from app.trace import TraceRecorder, elapsed_ms
-
-
-class AllergenTranslation(BaseModel):
-    original: str = Field(min_length=1, max_length=100)
-    api_term: str = Field(min_length=1, max_length=100)
-
-    @field_validator("original", "api_term")
-    @classmethod
-    def strip_value(cls, value: str) -> str:
-        return value.strip()
+from recommender.ingredients import normalize_search_request
+from recommender.models import IngredientTranslation, RecipeRanking
 
 
 class HistoryTimeRangeInput(BaseModel):
@@ -85,8 +76,9 @@ class HistoryTimeRangeInput(BaseModel):
 _ENGLISH_API_TERM = re.compile(r"^[A-Za-z][A-Za-z0-9 '&()/.+-]*$")
 _ALLERGEN_TOOL_ERRORS = frozenset(
     {
-        "MISSING_ALLERGEN_FILTER",
-        "UNEXPECTED_ALLERGEN_MAPPING",
+        "MISSING_INGREDIENT_MAPPING",
+        "UNEXPECTED_INGREDIENT_MAPPING",
+        "DUPLICATE_INGREDIENT_MAPPING",
         "INVALID_ENGLISH_API_TERM",
     }
 )
@@ -102,7 +94,7 @@ class KitchenAgent:
     profile_actions: ProfileActionService | None = None
     application_timezone: str = "Asia/Shanghai"
     recursion_limit: int = 10
-    max_input_chars: int = 12000
+    max_input_chars: int = 60000
     repair_decider: (
         Callable[[SupervisorRequest, AuditResult], RepairDecision] | None
     ) = None
@@ -514,38 +506,23 @@ class KitchenAgent:
         @tool
         def search_recipes(
             ingredients: list[str],
-            intolerances: list[AllergenIntolerance],
-            exclude_ingredients: list[str],
-            custom_allergen_mapping: list[AllergenTranslation],
+            ingredient_mapping: list[IngredientTranslation],
+            exclude_ingredients: list[str] | None = None,
             diet: str | None = None,
             cuisine: str | None = None,
             meal_type: str | None = None,
             max_ready_time: int | None = None,
             ranking: Literal[
-                "max-used-ingredients", "min-missing-ingredients"
-            ] = "max-used-ingredients",
+                "default",
+                "max-used-ingredients",
+                "min-missing-ingredients",
+            ] = "default",
         ) -> list[dict[str, object]]:
-            """Search safe recipes using English API terms and explicit custom-allergen translations."""
+            """Search safe recipes with a complete Chinese-to-English ingredient mapping."""
             if not ingredients:
                 raise ValueError("At least one ingredient is required")
-            missing_broad = set(context.allergen_intolerances) - set(intolerances)
-            configured_custom = {
-                value.strip().casefold(): value for value in context.custom_allergens
-            }
-            translated_custom = {
-                item.original.casefold(): item.api_term
-                for item in custom_allergen_mapping
-            }
-            missing_custom = set(configured_custom) - set(translated_custom)
-            if missing_broad or missing_custom:
-                raise ValueError("MISSING_ALLERGEN_FILTER")
-            if set(translated_custom) - set(configured_custom):
-                raise ValueError("UNEXPECTED_ALLERGEN_MAPPING")
             english_terms = [
-                *ingredients,
-                *exclude_ingredients,
-                *translated_custom.values(),
-                *(value for value in (diet, cuisine, meal_type) if value is not None),
+                value for value in (diet, cuisine, meal_type) if value is not None
             ]
             if any(
                 _ENGLISH_API_TERM.fullmatch(value) is None
@@ -554,18 +531,29 @@ class KitchenAgent:
                 raise ValueError("INVALID_ENGLISH_API_TERM")
             if max_ready_time is not None and max_ready_time <= 0:
                 raise ValueError("max_ready_time must be positive")
-            api_exclusions = list(
-                dict.fromkeys([*exclude_ingredients, *translated_custom.values()])
-            )
-            return recipe_router.search(
+            normalize_search_request(
                 ingredients=ingredients,
-                intolerances=intolerances,
-                exclude_ingredients=api_exclusions,
+                ingredient_mapping=ingredient_mapping,
+                allergen_categories=list(context.allergen_intolerances),
+                custom_allergens=list(context.custom_allergens),
+                exclude_ingredients=exclude_ingredients or [],
                 diet=diet,
                 cuisine=cuisine,
                 meal_type=meal_type,
                 max_ready_time=max_ready_time,
-                ranking=ranking,
+                ranking=RecipeRanking(ranking),
+            )
+            return recipe_router.search(
+                ingredients=ingredients,
+                ingredient_mapping=ingredient_mapping,
+                allergen_categories=list(context.allergen_intolerances),
+                custom_allergens=list(context.custom_allergens),
+                exclude_ingredients=exclude_ingredients or [],
+                diet=diet,
+                cuisine=cuisine,
+                meal_type=meal_type,
+                max_ready_time=max_ready_time,
+                ranking=RecipeRanking(ranking),
                 trace=trace.record,
             )
 

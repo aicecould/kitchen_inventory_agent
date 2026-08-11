@@ -19,6 +19,11 @@ class Recipe:
     source: str = ""
     source_url: str | None = None
     image_url: str | None = None
+    used_ingredient_count: int | None = None
+    missing_ingredient_count: int | None = None
+    rrf_score: float | None = None
+    fts_rank: int | None = None
+    semantic_rank: int | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -29,6 +34,11 @@ class Recipe:
             "source": self.source,
             "source_url": self.source_url,
             "image_url": self.image_url,
+            "used_ingredient_count": self.used_ingredient_count,
+            "missing_ingredient_count": self.missing_ingredient_count,
+            "rrf_score": self.rrf_score,
+            "fts_rank": self.fts_rank,
+            "semantic_rank": self.semantic_rank,
         }
 
 
@@ -220,13 +230,14 @@ class SpoonacularClient:
             "includeIngredients": ",".join(ingredients),
             "instructionsRequired": True,
             "ignorePantry": True,
-            "sort": ranking,
             "number": limit,
             "addRecipeInformation": True,
             "addRecipeInstructions": True,
             "addRecipeNutrition": False,
             "fillIngredients": False,
         }
+        if ranking != "default":
+            params["sort"] = ranking
         if intolerances:
             params["intolerances"] = ",".join(intolerances)
         if exclude_ingredients:

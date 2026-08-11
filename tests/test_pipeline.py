@@ -406,6 +406,7 @@ def install_scripted_agent(
     model = ScriptedChatModel(responses=responses)
     recipe_router = recipes or RecipeRouter(
         None,
+        None,
         TheMealDbClient(
             base_url=pipeline.settings.themealdb_base_url,
             api_key=pipeline.settings.themealdb_api_key,
@@ -528,9 +529,8 @@ def test_missing_recipe_tool_retries_main_with_search_recipes_only(
                         "name": "search_recipes",
                         "args": {
                             "ingredients": ["tomato"],
-                            "intolerances": [],
+                            "ingredient_mapping": [],
                             "exclude_ingredients": [],
-                            "custom_allergen_mapping": [],
                         },
                         "id": "call-recipe-retry",
                         "type": "tool_call",
@@ -1217,9 +1217,8 @@ def test_agent_mixed_inventory_recipe_response_is_canonical_and_useful(
                         "name": "search_recipes",
                         "args": {
                             "ingredients": ["tomato"],
-                            "intolerances": [],
+                            "ingredient_mapping": [],
                             "exclude_ingredients": [],
-                            "custom_allergen_mapping": [],
                         },
                         "id": "call-recipe",
                         "type": "tool_call",
@@ -1378,3 +1377,84 @@ def test_undecided_request_invokes_classifier_once(tmp_path: Path) -> None:
         "deterministic_route",
         "food_query_classifier",
     ]
+
+
+def test_build_runtime_recommender_respects_disabled_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.pipeline import build_runtime_recommender
+
+    settings = replace(get_settings(), recommender_enabled=False)
+    calls: list[object] = []
+    monkeypatch.setattr(
+        "app.pipeline.load_recommender",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    assert build_runtime_recommender(settings) is None
+    assert calls == []
+
+
+def test_build_runtime_recommender_returns_none_for_missing_artifacts(
+    tmp_path: Path,
+) -> None:
+    from app.pipeline import build_runtime_recommender
+
+    settings = replace(
+        get_settings(),
+        recommender_enabled=True,
+        recommender_db_path=tmp_path / "missing.db",
+        recommender_faiss_path=tmp_path / "missing.faiss",
+        recommender_metadata_path=tmp_path / "missing.json",
+        recommender_model_path=tmp_path / "missing-model",
+    )
+
+    assert build_runtime_recommender(settings) is None
+
+
+def test_build_runtime_recommender_injects_successful_local_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.pipeline import build_runtime_recommender
+
+    fake = object()
+    settings = replace(get_settings(), recommender_enabled=True)
+    monkeypatch.setattr(
+        "app.pipeline.load_recommender",
+        lambda **kwargs: fake,
+    )
+
+    assert build_runtime_recommender(settings) is fake
+
+
+def test_build_pipeline_injects_local_recommender(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.pipeline import build_pipeline
+
+    profile_path = tmp_path / "profile.md"
+    profile_path.write_text("# 用户画像\n", encoding="utf-8")
+    settings = replace(
+        get_settings(),
+        deepseek_api_key="test-key",
+        deepseek_base_url="https://api.deepseek.com",
+        inventory_db_path=tmp_path / "inventory.db",
+        user_profile_path=profile_path,
+    )
+    fake_local = object()
+    monkeypatch.setattr(
+        "app.pipeline.build_runtime_recommender",
+        lambda settings_arg: fake_local,
+    )
+
+    pipeline = build_pipeline(settings)
+
+    assert pipeline.agent is not None
+    assert pipeline.agent.recipes.local is fake_local
+
+
+def test_pipeline_source_never_imports_build_entrypoint() -> None:
+    source = Path("app/pipeline.py").read_text(encoding="utf-8")
+    assert "recommender.build" not in source
+    assert "python -m recommender.build" not in source

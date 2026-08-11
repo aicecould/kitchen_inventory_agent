@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
@@ -61,6 +62,28 @@ from app.tasks import CookingTask, CookingTaskRepository, CookingTaskService
 from app.trace import TraceRecorder
 from app.vision import recognize_ingredients
 from app.vision_confirmations import VisionConfirmationRepository
+from recommender.models import RecommenderArtifactsError
+from recommender.search import LocalRecipeRecommender, load_recommender
+
+
+def build_runtime_recommender(settings: Settings) -> LocalRecipeRecommender | None:
+    """Load read-only local artifacts once; never build, download, or repair them."""
+    if not settings.recommender_enabled:
+        return None
+    try:
+        return load_recommender(
+            db_path=settings.recommender_db_path,
+            faiss_path=settings.recommender_faiss_path,
+            metadata_path=settings.recommender_metadata_path,
+            model_path=settings.recommender_model_path,
+            expected_model_revision=settings.recommender_model_revision,
+        )
+    except (RecommenderArtifactsError, OSError, RuntimeError, ImportError) as exc:
+        logging.getLogger(__name__).warning(
+            "local recipe recommender unavailable: %s",
+            type(exc).__name__,
+        )
+        return None
 
 
 @dataclass(slots=True)
@@ -907,7 +930,12 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
         if settings.deepseek_api_key
         else None
     )
-    recipes = RecipeRouter(spoonacular, themealdb, web_search)
+    recipes = RecipeRouter(
+        build_runtime_recommender(settings),
+        spoonacular,
+        themealdb,
+        web_search,
+    )
     agent = (
         build_agent(settings, inventory, recipes, actions, history, profile_actions)
         if settings.deepseek_api_key
