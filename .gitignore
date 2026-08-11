@@ -11,3 +11,5 @@ docs/
 classifier/artifacts/*.vec
 classifier/artifacts/training/
 recommender/artifacts/
+recommender/dataset/
+recommender/model/
