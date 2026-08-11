@@ -10,3 +10,4 @@ data/
 docs/
 classifier/artifacts/*.vec
 classifier/artifacts/training/
+recommender/artifacts/
