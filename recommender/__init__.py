@@ -9,13 +9,21 @@ from recommender.models import (
     RrfEntry,
     StoredRecipe,
 )
+from recommender.search import (
+    LocalRecipeRecommender,
+    LocalRecipeSearchError,
+    reciprocal_rank_fusion,
+)
 
 __all__ = [
     "BuildMetadata",
     "IngredientTranslation",
+    "LocalRecipeRecommender",
+    "LocalRecipeSearchError",
     "NormalizedRecipeRequest",
     "RecipeRanking",
     "RecommenderArtifactsError",
     "RrfEntry",
     "StoredRecipe",
+    "reciprocal_rank_fusion",
 ]
