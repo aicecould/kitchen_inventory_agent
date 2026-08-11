@@ -34,6 +34,9 @@ class RecipeRepository:
         ).fetchall()
         return [row[0] for row in rows]
 
+    def count_recipes(self) -> int:
+        return self._connection.execute("SELECT COUNT(*) FROM recipes").fetchone()[0]
+
     def get_many(self, recipe_ids: Sequence[int]) -> dict[int, StoredRecipe]:
         if not recipe_ids:
             return {}

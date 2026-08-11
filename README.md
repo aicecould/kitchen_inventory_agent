@@ -17,7 +17,7 @@ Kitchen Inventory Agent 解决的不是“把食材名称存进数据库”这�
 | 主动库存建议 | 页面访问触发检查；距该用户上次访问严格超过 24 小时才扫描过期、3 天内临期、超过 14 天未确认和可能缺货线索，只展示一句固定安全文案 |
 | 请求路由 | 问候、明确库存指令和依赖上文的追问先走确定性／上下文规则；仍未决的文本才交给原有 FastText 二分类器 |
 | 图片识别 | 接入百度果蔬识别 API，校验图片格式、尺寸和长宽比，并按置信度分层处理结果 |
-| 菜谱检索 | Spoonacular 主检索、TheMealDB 回退、DeepSeek 官方 Web Search 最终兜底，统一结果并执行过敏原过滤 |
+| 菜谱检索 | 本地 SQLite FTS5 + FAISS + RRF 优先，本地不足 3 条时 Spoonacular、TheMealDB、DeepSeek Web Search 依次补齐，统一过滤和去重 |
 | 对话记忆 | 完整交互永久追加到 SQLite；Agent 自动上下文仅注入最近 10 段相关对话的输入与输出，并支持按时间范围显式召回 |
 | 单一活动 task | 菜谱确认后保存一个结构化烹饪挂件；可修改份数、暂停切换、标记已烹饪，且不划分或替换对话上下文 |
 | 长期用户画像 | Markdown v2 保存厨房情况、偏好、必须要求和默认情景；明确陈述二次点击确认，十段历史总结携带证据并只静默替换推断事实 |
@@ -49,7 +49,7 @@ flowchart TD
     H --> M
     M --> N["实例读取 / 库存提案 / 菜谱搜索 / 历史召回"]
     N --> E
-    N --> O["Spoonacular → TheMealDB → DeepSeek Web Search"]
+    N --> O["本地混合检索 → Spoonacular → TheMealDB → DeepSeek Web Search"]
 
     D --> S["工具结果规范化渲染 + 正则与结构审核"]
     E --> S
@@ -191,15 +191,17 @@ Agent 负责理解请求、形成完整的新数量文本、生成英文菜谱 A
 
 当前 Agent 仍由工具调用过程隐式编排，没有独立的结构化 Plan、任务依赖图或前端步骤状态模型。
 
-### 7. Spoonacular、TheMealDB 与 DeepSeek Web Search 菜谱路由
+### 7. 本地混合菜谱路由与外部补齐
 
-菜谱工具至少要求一个英文食材参数。配置 Spoonacular 密钥时先调用 `/recipes/complexSearch`，映射食材、饮食、菜系、餐型、最大制作时间、排序和过敏原；结果统一为标题、步骤、原料、来源链接和图片链接，并执行去重与过敏原字符串过滤。Spoonacular 失败或没有安全结果时，系统使用 TheMealDB 搜索第一个食材并读取详情。两者均无安全结果且已配置 `DEEPSEEK_API_KEY` 时，系统通过 DeepSeek 官方 Anthropic 兼容端点调用服务端 Web Search；网页召回结果必须带有效 HTTP(S) 来源链接，并再次执行相同的去重和过敏原过滤。
+菜谱检索优先使用本地 `recommender/` 产物。运行时读取部署前构建的 SQLite/FTS5 与 FAISS，FTS5 和 FAISS 各召回 top 100，以 RRF `k=60` 融合，再执行过敏原和排除食材硬过滤、特征计算与三种排序，本地最多返回 10 条。
 
-Spoonacular 当前支持 `max-used-ingredients` 和 `min-missing-ingredients` 两种 API 排序方式。DeepSeek Web Search 每次兜底最多发起一次搜索，并会产生额外模型与搜索费用。系统没有本地菜谱数据集、向量召回或多因素融合排序，候选质量仍主要依赖外部 API。
+本地至少 3 条安全结果时不再调用外部服务；本地只有 1–2 条时保留本地结果，依次用 Spoonacular、TheMealDB 和 DeepSeek Web Search 补齐到 3 条。跨来源先按 URL、`(source, id)`、规范化标题去重，所有真实来源仍不足 3 条时只返回实际结果并标记 degraded，不虚构菜谱。
+
+`default` 排序直接按 RRF；`max-used-ingredients` 优先命中数；`min-missing-ingredients` 优先缺失数。Spoonacular 在 `default` 时不发送 `sort=default`，另外两种排序继续映射为其支持的 API 排序。DeepSeek Web Search 每次兜底最多发起一次搜索，并会产生额外模型与搜索费用。
 
 ### 8. 结构化过敏原约束
 
-用户画像把过敏原分成 Spoonacular 官方支持的 12 类 intolerance，以及腰果、虾皮等自定义具体食材。调用菜谱工具时，确定性代码要求完整传入所有官方类别；每个自定义食材必须同时提供原文和英文 API 映射，不能遗漏或夹带未配置项目。英文名称合并到 `excludeIngredients`，返回后再次扫描标题、步骤和原料。
+用户画像把过敏原分成 Spoonacular 官方支持的 12 类 intolerance，以及腰果、虾皮等自定义具体食材。官方类别由确定性代码展开，不需要模型翻译；调用菜谱工具时，所有中文已有食材、排除食材和自定义过敏原都必须出现在 `ingredient_mapping` 中，每个映射提供原文和英文 API 名称，不能遗漏、重复或夹带未配置项目。自定义和排除食材的英文名称合并到 `excludeIngredients`，返回后再次扫描标题、步骤和原料。
 
 这把“不要漏掉过敏原”从 Prompt 要求提升成工具参数校验。自定义映射仍由模型生成，当前没有独立的食材别名、衍生物和未知成分知识库。
 
@@ -339,7 +341,7 @@ pytest 自动化覆盖重点包括：
 | 主动建议 | 访问节流、候选优先级、受约束模型选择、固定安全模板 | 只在页面访问时检查；没有后台调度、外部通知或任何代执行能力 |
 | 路由 | 确定性／上下文优先，未决请求使用 FastText，分类失败时 fail-open | 规则语言覆盖有限，二分类数据规模与边界精度仍需提升 |
 | 图片确认 | 持久化候选、编辑／放弃、原请求恢复和结果保存 | 恢复执行尚缺原子领取与更完整的并发保护 |
-| 菜谱检索 | 两个外部源、过敏原工具校验、结果过滤，以及规范化中英文详情／空结果和安全来源链接 | 没有本地检索、向量召回、营养求解或多日菜单规划 |
+| 菜谱检索 | 本地 FTS5/FAISS/RRF、过敏原与排除硬过滤、三种排序、外部逐级补齐、跨来源去重和真实结果降级 | 没有 bge-reranker、营养求解或多日菜单规划；饮食类型和制作时间只影响语义排序，不做结构化硬保证 |
 | 对话与审计 | 永久追加完整历史、十段相关输入／输出窗口、时间范围召回、实例工具记录和关键事实一致性审核 | 没有关键词／语义检索、历史压缩或用户可操作的删除策略；审核不覆盖任意自然语言事实 |
 
 此外，当前仍没有多活动 task、自动话题切换、食材／营养标准化 API、菜谱原料自动缩放、数量扣减或单位换算、通用网页搜索，展示接口也没有账户登录与多租户鉴权。
@@ -374,6 +376,7 @@ app/
 └── web.py                    # FastAPI 接口
 
 classifier/                   # 未改动的 FastText 数据、训练、评估与运行时
+recommender/                  # 本地菜谱构建、只读 SQLite/FTS5、FAISS 与 RRF 检索
 frontend/                     # 页面、task 挂件、实例库存、主动便笺和执行轨迹
 scripts/                      # Linux Bash 启停脚本
 tests/                        # pytest 自动化测试
@@ -400,7 +403,7 @@ cp .env.example .env
 | `DEEPSEEK_MODEL` | `deepseek-v4-flash` | OpenAI 兼容模型名称 |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | 模型 API 地址 |
 | `DEEPSEEK_MAX_OUTPUT_TOKENS` | `800` | 单次模型最大输出 Token |
-| `DEEPSEEK_MAX_INPUT_CHARS` | `12000` | Agent 与主动选择负载的字符上限 |
+| `DEEPSEEK_MAX_INPUT_CHARS` | `60000` | Agent 与主动选择负载的字符上限 |
 | `AGENT_RECURSION_LIMIT` | `10` | LangChain Agent 递归上限 |
 | `BAIDU_IMAGE_API_KEY` | 空 | 图片食材识别所需 |
 | `BAIDU_IMAGE_SECRET_KEY` | 空 | 图片食材识别所需 |
@@ -422,6 +425,12 @@ cp .env.example .env
 | `FOOD_CLASSIFIER_ENABLED` | `true` | 是否启用领域分类器 |
 | `FOOD_CLASSIFIER_MODEL_PATH` | `classifier/artifacts/food_query.bin` | FastText 模型路径 |
 | `FOOD_CLASSIFIER_METADATA_PATH` | `classifier/artifacts/metadata.json` | 分类阈值和预处理元数据 |
+| `RECOMMENDER_ENABLED` | `true` | 是否尝试加载本地菜谱检索产物；不可用时自动降级到外部 API |
+| `RECOMMENDER_DB_PATH` | `recommender/artifacts/recipes.db` | 本地 SQLite/FTS5 只读路径 |
+| `RECOMMENDER_FAISS_PATH` | `recommender/artifacts/recipes.faiss` | 本地 FAISS 只读路径 |
+| `RECOMMENDER_METADATA_PATH` | `recommender/artifacts/metadata.json` | 本地构建元数据路径 |
+| `RECOMMENDER_MODEL_PATH` | `.run/models/bge-m3` | 部署前准备的 `BAAI/bge-m3` 本地目录 |
+| `RECOMMENDER_MODEL_REVISION` | `5617a9f61b028005a4858fdac845db406aefb181` | 固定 embedding 模型 revision |
 
 当用户画像不存在时，应用从受版本控制的 `app/templates/user_profile.md` 创建基础文件，已有画像不会被覆盖。
 
