@@ -214,10 +214,10 @@ def test_load_recommender_rejects_model_revision_mismatch(tmp_path: Path) -> Non
         "source_sha256": "a" * 64,
         "sqlite_sha256": "b" * 64,
         "license": "CC BY-SA 3.0",
-        "embedding_model": "BAAI/bge-m3",
+        "embedding_model": "BAAI/bge-small-en-v1.5",
         "embedding_model_revision": "wrong-revision",
-        "embedding_max_seq_length": 2048,
-        "embedding_dimension": 1024,
+        "embedding_max_seq_length": 512,
+        "embedding_dimension": 384,
         "recipe_count": 1,
         "built_at": "2026-08-11T00:00:00Z",
     }
@@ -229,5 +229,35 @@ def test_load_recommender_rejects_model_revision_mismatch(tmp_path: Path) -> Non
             faiss_path=tmp_path / "recipes.faiss",
             metadata_path=tmp_path / "metadata.json",
             model_path=tmp_path / "missing-model",
-            expected_model_revision="5617a9f61b028005a4858fdac845db406aefb181",
+            expected_model_revision="5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+        )
+
+
+def test_load_recommender_rejects_embedding_model_mismatch(tmp_path: Path) -> None:
+    (tmp_path / "recipes.db").write_bytes(b"db")
+    (tmp_path / "recipes.faiss").write_bytes(b"faiss")
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    metadata = {
+        "schema_version": 1,
+        "source_commit": "c5a1e8dab69d46841d914be1f20cca6fbe4b6260",
+        "source_sha256": "a" * 64,
+        "sqlite_sha256": "b" * 64,
+        "license": "CC BY-SA 3.0",
+        "embedding_model": "BAAI/bge-m3",
+        "embedding_model_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+        "embedding_max_seq_length": 2048,
+        "embedding_dimension": 1024,
+        "recipe_count": 1,
+        "built_at": "2026-08-11T00:00:00Z",
+    }
+    (tmp_path / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(RecommenderArtifactsError, match="Unsupported embedding model"):
+        load_recommender(
+            db_path=tmp_path / "recipes.db",
+            faiss_path=tmp_path / "recipes.faiss",
+            metadata_path=tmp_path / "metadata.json",
+            model_path=model_path,
+            expected_model_revision="5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
         )

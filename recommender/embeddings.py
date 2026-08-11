@@ -1,4 +1,4 @@
-"""Local-only bge-m3 encoding used by the recommender runtime."""
+"""Local-only sentence encoder used by the recommender runtime."""
 
 from __future__ import annotations
 
@@ -8,6 +8,12 @@ from typing import Protocol
 
 import numpy as np
 
+from recommender.model_config import (
+    EMBEDDING_MAX_SEQ_LENGTH,
+    EMBEDDING_MODEL,
+    EMBEDDING_MODEL_REVISION,
+)
+
 
 class DocumentEncoder(Protocol):
     model_id: str
@@ -15,8 +21,8 @@ class DocumentEncoder(Protocol):
     encode_documents: Callable[[Sequence[str]], np.ndarray]
 
 
-class BgeM3Encoder:
-    model_id = "BAAI/bge-m3"
+class LocalSentenceEncoder:
+    model_id = EMBEDDING_MODEL
 
     def __init__(self, model_path: Path, *, local_files_only: bool) -> None:
         from sentence_transformers import SentenceTransformer
@@ -25,12 +31,12 @@ class BgeM3Encoder:
             str(model_path),
             local_files_only=local_files_only,
         )
-        self._model.max_seq_length = 2048
+        self._model.max_seq_length = EMBEDDING_MAX_SEQ_LENGTH
         self.model_revision = (
             self._model.model_card_data.base_model_revision
             if getattr(self._model, "model_card_data", None) is not None
             and getattr(self._model.model_card_data, "base_model_revision", None)
-            else "5617a9f61b028005a4858fdac845db406aefb181"
+            else EMBEDDING_MODEL_REVISION
         )
 
     def encode_documents(self, texts: Sequence[str]) -> np.ndarray:

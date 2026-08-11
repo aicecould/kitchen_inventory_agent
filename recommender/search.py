@@ -9,7 +9,8 @@ from time import perf_counter
 import faiss
 import numpy as np
 
-from recommender.embeddings import BgeM3Encoder
+from recommender.embeddings import LocalSentenceEncoder
+from recommender.model_config import EMBEDDING_MODEL
 from recommender.models import (
     NormalizedRecipeRequest,
     RecipeRanking,
@@ -64,7 +65,7 @@ class LocalRecipeRecommender:
         self,
         repository: RecipeRepository,
         faiss_index: faiss.IndexIDMap2,
-        encoder: BgeM3Encoder,
+        encoder: LocalSentenceEncoder,
         *,
         rrf_fuser: Callable[
             [Sequence[int], Sequence[int]],
@@ -217,8 +218,8 @@ def load_recommender(
             raise RecommenderArtifactsError(
                 f"Recommender artifact is missing: {path}"
             )
-    metadata = load_metadata(metadata_path)
-    if metadata.embedding_model != "BAAI/bge-m3":
+    metadata = load_metadata(metadata_path, expected_embedding_model=EMBEDDING_MODEL)
+    if metadata.embedding_model != EMBEDDING_MODEL:
         raise RecommenderArtifactsError("Unsupported embedding model in metadata")
     if metadata.embedding_model_revision != expected_model_revision:
         raise RecommenderArtifactsError("Embedding model revision mismatch")
@@ -231,7 +232,7 @@ def load_recommender(
     if index.d != metadata.embedding_dimension or index.ntotal != metadata.recipe_count:
         raise RecommenderArtifactsError("FAISS index does not match metadata")
     try:
-        encoder = BgeM3Encoder(model_path, local_files_only=True)
+        encoder = LocalSentenceEncoder(model_path, local_files_only=True)
     except Exception as exc:
         raise RecommenderArtifactsError(
             f"Local embedding model failed to load: {type(exc).__name__}"

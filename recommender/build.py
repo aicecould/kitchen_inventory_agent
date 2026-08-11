@@ -16,9 +16,14 @@ from pathlib import Path
 import faiss
 import numpy as np
 
-from recommender.embeddings import BgeM3Encoder, DocumentEncoder
+from recommender.embeddings import DocumentEncoder, LocalSentenceEncoder
 from recommender.ingredients import parse_ingredient_lines
 from recommender.models import BuildMetadata
+from recommender.model_config import (
+    EMBEDDING_MAX_SEQ_LENGTH,
+    EMBEDDING_MODEL,
+    EMBEDDING_MODEL_REVISION,
+)
 
 
 class BuildInputError(ValueError):
@@ -33,8 +38,6 @@ REQUIRED_COLUMNS = (
     "Cleaned_Ingredients",
 )
 SOURCE_COMMIT = "c5a1e8dab69d46841d914be1f20cca6fbe4b6260"
-EMBEDDING_MODEL = "BAAI/bge-m3"
-EMBEDDING_MODEL_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
 
 
 def build_sqlite(source: Path, destination: Path) -> int:
@@ -213,7 +216,7 @@ def build_artifacts(source: Path, model_path: Path, output_dir: Path) -> None:
         metadata_path = temp_dir / "metadata.json"
         recipe_count = build_sqlite(source, database)
         validate_sqlite(database, expected_count=recipe_count)
-        encoder = BgeM3Encoder(model_path, local_files_only=True)
+        encoder = LocalSentenceEncoder(model_path, local_files_only=True)
         dimension, encoded_count = build_faiss(database, faiss_path, encoder)
         if encoded_count != recipe_count:
             raise ValueError("FAISS and SQLite recipe counts differ")
@@ -223,7 +226,7 @@ def build_artifacts(source: Path, model_path: Path, output_dir: Path) -> None:
             sqlite_sha256=_sha256_file(database),
             embedding_model=EMBEDDING_MODEL,
             embedding_model_revision=EMBEDDING_MODEL_REVISION,
-            embedding_max_seq_length=2048,
+            embedding_max_seq_length=EMBEDDING_MAX_SEQ_LENGTH,
             embedding_dimension=dimension,
             recipe_count=recipe_count,
             built_at=datetime.now(UTC),

@@ -134,7 +134,7 @@ def test_main_pipeline_source_never_imports_build_logic() -> None:
 
 
 class FakeEncoder:
-    model_id = "BAAI/bge-m3"
+    model_id = "BAAI/bge-small-en-v1.5"
     model_revision = "test-revision"
 
     def encode_documents(self, texts: Sequence[str]) -> np.ndarray:

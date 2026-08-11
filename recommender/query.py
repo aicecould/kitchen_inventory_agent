@@ -37,10 +37,22 @@ def build_semantic_query(request: NormalizedRecipeRequest) -> str:
     return "; ".join(parts) + "."
 
 
-def load_metadata(path: Path) -> BuildMetadata:
+def load_metadata(
+    path: Path,
+    *,
+    expected_embedding_model: str | None = None,
+) -> BuildMetadata:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            expected_embedding_model is not None
+            and isinstance(raw, dict)
+            and raw.get("embedding_model") != expected_embedding_model
+        ):
+            raise RecommenderArtifactsError("Unsupported embedding model in metadata")
         return BuildMetadata.model_validate(raw)
+    except RecommenderArtifactsError:
+        raise
     except (OSError, ValueError, ValidationError) as exc:
         raise RecommenderArtifactsError(
             f"Recipe metadata is missing or invalid: {type(exc).__name__}"
