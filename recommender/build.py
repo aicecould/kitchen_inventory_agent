@@ -224,6 +224,7 @@ def build_artifacts(source: Path, model_path: Path, output_dir: Path) -> None:
             source_commit=SOURCE_COMMIT,
             source_sha256=_sha256_file(source),
             sqlite_sha256=_sha256_file(database),
+            license="CC BY-SA 3.0",
             embedding_model=EMBEDDING_MODEL,
             embedding_model_revision=EMBEDDING_MODEL_REVISION,
             embedding_max_seq_length=EMBEDDING_MAX_SEQ_LENGTH,
