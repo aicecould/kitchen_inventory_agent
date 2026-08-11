@@ -101,6 +101,7 @@ class KitchenPipeline:
     vision: VisionApiClient | None
     food_classifier: FoodQueryClassifier | None
     food_classifier_load_error: str | None = None
+    local_recipe_search_available: bool = False
 
     def process_request(
         self,
@@ -930,8 +931,9 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
         if settings.deepseek_api_key
         else None
     )
+    local_recommender = build_runtime_recommender(settings)
     recipes = RecipeRouter(
-        build_runtime_recommender(settings),
+        local_recommender,
         spoonacular,
         themealdb,
         web_search,
@@ -981,6 +983,7 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
         vision=vision,
         food_classifier=food_classifier,
         food_classifier_load_error=food_classifier_load_error,
+        local_recipe_search_available=local_recommender is not None,
     )
 
 

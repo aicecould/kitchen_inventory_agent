@@ -132,6 +132,8 @@ def _record_failure(
 @app.get("/api/status")
 def service_status() -> dict[str, object]:
     settings = get_settings()
+    with _pipeline_lock:
+        pipeline = _pipeline
     services = {
         "deepseek": bool(settings.deepseek_api_key),
         "baidu_vision": bool(
@@ -145,11 +147,8 @@ def service_status() -> dict[str, object]:
             and settings.food_classifier_metadata_path.is_file()
         ),
         "local_recipe_search": (
-            settings.recommender_enabled
-            and settings.recommender_db_path.is_file()
-            and settings.recommender_faiss_path.is_file()
-            and settings.recommender_metadata_path.is_file()
-            and settings.recommender_model_path.is_dir()
+            pipeline is not None
+            and pipeline.local_recipe_search_available
         ),
     }
     return {

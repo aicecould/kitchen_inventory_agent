@@ -27,13 +27,17 @@ python -m recommender.build \
 
 embedding 模型固定为 `BAAI/bge-small-en-v1.5` revision `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`，最大序列长度 512，向量维度 384。运行时只从部署前准备好的本地模型目录加载，并使用 `local_files_only=True`，不会隐式联网下载。
 
+模型目录内的 `model-manifest.json` 通过 `config.json`、`model.safetensors`、`tokenizer.json`、`modules.json` 和 `1_Pooling/config.json` 的 SHA-256 绑定模型 ID/revision。构建和运行时会拒绝缺文件、哈希不一致、错误身份或路径穿越。
+
 ## 运行时行为
 
 - FTS5 与 FAISS 各召回 top 100。
 - RRF 固定 `k=60`，rank 从 1 开始。
 - 排序支持 `default`、`max-used-ingredients`、`min-missing-ingredients`。
-- 过敏原与排除食材在 RRF 后执行结构化硬过滤。
+- 过敏原与排除食材在 RRF 后执行 canonical token/phrase 结构化硬过滤；复合食材、有限复数正确命中，但不因 `egg` 子串误伤 `eggplant`。
 - 饮食类型、菜系、餐型和制作时间只进入语义查询文本，不执行结构化硬过滤。
 - 本地至少 3 条时不调用外部来源；本地 1–2 条时保留本地结果并由 API/Web Search 补齐。
 - 全部来源不足 3 条时返回真实可用结果并标记 degraded，不虚构菜谱。
 - 本阶段不实现 `bge-reranker`，也不保留空调用。
+
+启动加载按 metadata、SQLite SHA-256、只读计数、FAISS、local-only encoder、模型身份和查询探测的顺序 fail closed。任一校验失败时 Pipeline 不持有本地 recommender，状态接口只报告已初始化 Pipeline 的真实 `local_recipe_search_available` 值。

@@ -17,7 +17,9 @@ class RecipeRepository:
     @classmethod
     def open_readonly(cls, path: Path) -> "RecipeRepository":
         if not path.is_file():
-            raise RecommenderArtifactsError(f"Recipe database is missing: {path}")
+            raise RecommenderArtifactsError(
+                f"Recipe database is missing: {path.name}"
+            )
         connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         return cls(connection)
 

@@ -12,7 +12,11 @@ from app.adapters.recipe_api import (
     SpoonacularClient,
     TheMealDbClient,
 )
-from recommender.ingredients import expand_allergen_categories, normalize_search_request
+from recommender.ingredients import (
+    contains_blocked_ingredient,
+    expand_allergen_categories,
+    normalize_search_request,
+)
 from recommender.models import IngredientTranslation, RecipeRanking
 from recommender.search import LocalRecipeRecommender
 
@@ -303,13 +307,9 @@ class RecipeRouter:
 
     @staticmethod
     def _contains_allergen(recipe: Recipe, allergens: list[str]) -> bool:
-        haystack = " ".join(
-            [recipe.title, recipe.instructions, *recipe.ingredients]
-        ).lower()
-        return any(
-            allergen.strip().lower() in haystack
-            for allergen in allergens
-            if allergen.strip()
+        return contains_blocked_ingredient(
+            [recipe.title, recipe.instructions, *recipe.ingredients],
+            allergens,
         )
 
     @classmethod

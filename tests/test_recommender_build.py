@@ -9,11 +9,13 @@ import pytest
 
 from recommender.build import (
     BuildInputError,
+    build_artifacts,
     build_faiss,
     build_sqlite,
     publish_artifacts,
     validate_sqlite,
 )
+from recommender.model_config import EMBEDDING_MODEL, EMBEDDING_MODEL_REVISION
 
 
 def write_recipe_csv(path: Path) -> None:
@@ -134,8 +136,8 @@ def test_main_pipeline_source_never_imports_build_logic() -> None:
 
 
 class FakeEncoder:
-    model_id = "BAAI/bge-small-en-v1.5"
-    model_revision = "test-revision"
+    model_id = EMBEDDING_MODEL
+    model_revision = EMBEDDING_MODEL_REVISION
 
     def encode_documents(self, texts: Sequence[str]) -> np.ndarray:
         vectors = np.zeros((len(texts), 3), dtype=np.float32)
@@ -147,6 +149,14 @@ class FakeEncoder:
 class NaNFakeEncoder(FakeEncoder):
     def encode_documents(self, texts: Sequence[str]) -> np.ndarray:
         return np.full((len(texts), 3), np.nan, dtype=np.float32)
+
+
+class WrongModelIdEncoder(FakeEncoder):
+    model_id = "BAAI/wrong-model"
+
+
+class WrongRevisionEncoder(FakeEncoder):
+    model_revision = "wrong-revision"
 
 
 def test_build_faiss_writes_id_mapped_index(tmp_path: Path) -> None:
@@ -197,3 +207,36 @@ def test_publish_artifacts_is_atomic_and_cleans_temp(tmp_path: Path) -> None:
     assert (output_dir / "recipes.faiss").read_text(encoding="utf-8") == "old-faiss"
     assert (output_dir / "metadata.json").read_text(encoding="utf-8") == "old-metadata"
     assert not temp_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "encoder_type",
+    [WrongModelIdEncoder, WrongRevisionEncoder],
+)
+def test_build_artifacts_rejects_unverified_encoder_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    encoder_type: type[FakeEncoder],
+) -> None:
+    source = tmp_path / "recipes.csv"
+    write_recipe_csv(source)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "recipes.db").write_text("old-db", encoding="utf-8")
+    (output_dir / "recipes.faiss").write_text("old-faiss", encoding="utf-8")
+    (output_dir / "metadata.json").write_text("old-metadata", encoding="utf-8")
+    monkeypatch.setattr(
+        "recommender.build.LocalSentenceEncoder",
+        lambda model_path, *, local_files_only: encoder_type(),
+    )
+
+    with pytest.raises(BuildInputError):
+        build_artifacts(
+            source=source,
+            model_path=tmp_path / "model",
+            output_dir=output_dir,
+        )
+
+    assert (output_dir / "recipes.db").read_text(encoding="utf-8") == "old-db"
+    assert (output_dir / "recipes.faiss").read_text(encoding="utf-8") == "old-faiss"
+    assert (output_dir / "metadata.json").read_text(encoding="utf-8") == "old-metadata"

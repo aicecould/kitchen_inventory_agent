@@ -1,3 +1,5 @@
+import pytest
+
 from app.adapters.recipe_api import Recipe
 from app.tools.recipe import RecipeRouter
 from recommender.models import IngredientTranslation
@@ -169,6 +171,44 @@ def test_deepseek_web_search_results_still_apply_allergen_filter() -> None:
 
     assert search(router) == []
     assert web.calls == 1
+
+
+def test_router_does_not_block_partial_token_match() -> None:
+    eggplant = recipe("eggplant", "themealdb")
+    eggplant.title = "Eggplant Parmesan"
+    eggplant.ingredients = ["eggplant", "tomato"]
+    router = RecipeRouter(
+        None,
+        FakeSpoonacular([]),
+        FakeMealDb([eggplant]),
+    )  # type: ignore[arg-type]
+
+    results = router.search(
+        ingredients=["tomato"],
+        ingredient_mapping=[],
+        allergen_categories=["Egg"],
+        custom_allergens=[],
+        exclude_ingredients=[],
+    )
+
+    assert [item["source"] for item in results] == ["themealdb"]
+
+
+def test_router_uses_shared_blocked_ingredient_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unsafe = recipe("unsafe", "spoonacular")
+    unsafe.ingredients = ["peanut butter", "tomato"]
+    calls: list[tuple[object, object]] = []
+    monkeypatch.setattr(
+        "app.tools.recipe.contains_blocked_ingredient",
+        lambda recipe, blocked: calls.append((recipe, blocked)) or True,
+    )
+
+    results = search(RecipeRouter(None, FakeSpoonacular([unsafe]), FakeMealDb([])))  # type: ignore[arg-type]
+
+    assert results == []
+    assert calls
 
 
 def test_deepseek_web_search_is_used_after_both_recipe_apis_fail() -> None:

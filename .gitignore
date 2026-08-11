@@ -12,4 +12,5 @@ classifier/artifacts/*.vec
 classifier/artifacts/training/
 recommender/artifacts/
 recommender/dataset/
-recommender/model/
+recommender/model/*
+!recommender/model/model-manifest.json

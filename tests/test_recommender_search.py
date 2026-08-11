@@ -1,11 +1,15 @@
+import hashlib
 import json
+import sqlite3
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import faiss
 import numpy as np
 import pytest
 
+from recommender.embeddings import EMBEDDING_MODEL, EMBEDDING_MODEL_REVISION
 from recommender.models import (
     NormalizedRecipeRequest,
     RecipeRanking,
@@ -87,6 +91,98 @@ def stored_recipe(
     )
 
 
+def _sha256(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def write_runtime_artifacts(
+    tmp_path: Path,
+    *,
+    sqlite_sha256: str | None = None,
+    dimension: int = 3,
+) -> Path:
+    db_path = tmp_path / "recipes.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("CREATE TABLE recipes (id INTEGER PRIMARY KEY)")
+    connection.execute("INSERT INTO recipes (id) VALUES (1)")
+    connection.commit()
+    connection.close()
+
+    faiss_path = tmp_path / "recipes.faiss"
+    index = faiss.IndexIDMap2(faiss.IndexFlatIP(dimension))
+    index.add_with_ids(
+        np.zeros((1, dimension), dtype=np.float32),
+        np.array([1], dtype=np.int64),
+    )
+    faiss.write_index(index, str(faiss_path))
+
+    metadata = {
+        "schema_version": 1,
+        "source_commit": "c5a1e8dab69d46841d914be1f20cca6fbe4b6260",
+        "source_sha256": "a" * 64,
+        "sqlite_sha256": sqlite_sha256 or _sha256(db_path.read_bytes()),
+        "license": "CC BY-SA 3.0",
+        "embedding_model": EMBEDDING_MODEL,
+        "embedding_model_revision": EMBEDDING_MODEL_REVISION,
+        "embedding_max_seq_length": 512,
+        "embedding_dimension": dimension,
+        "recipe_count": 1,
+        "built_at": "2026-08-11T00:00:00Z",
+    }
+    (tmp_path / "metadata.json").write_text(
+        json.dumps(metadata),
+        encoding="utf-8",
+    )
+    (tmp_path / "model").mkdir()
+    return tmp_path
+
+
+class ValidatingEncoder:
+    model_id = EMBEDDING_MODEL
+    model_revision = EMBEDDING_MODEL_REVISION
+
+    def __init__(self, model_path: Path, *, local_files_only: bool) -> None:
+        assert local_files_only is True
+
+    def encode_query(self, text: str) -> np.ndarray:
+        return np.zeros((1, 3), dtype=np.float32)
+
+
+class WrongRevisionEncoder(ValidatingEncoder):
+    model_revision = "wrong-revision"
+
+
+class WrongDimensionEncoder(ValidatingEncoder):
+    def encode_query(self, text: str) -> np.ndarray:
+        return np.zeros((1, 4), dtype=np.float32)
+
+
+class NonFiniteEncoder(ValidatingEncoder):
+    def encode_query(self, text: str) -> np.ndarray:
+        return np.array([[np.nan, np.inf, 1.0]], dtype=np.float32)
+
+
+def call_load_recommender(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    encoder_type: type[ValidatingEncoder] = ValidatingEncoder,
+) -> LocalRecipeRecommender:
+    import recommender.search as search_module
+
+    monkeypatch.setattr(
+        search_module,
+        "LocalSentenceEncoder",
+        encoder_type,
+    )
+    return load_recommender(
+        db_path=artifact_dir / "recipes.db",
+        faiss_path=artifact_dir / "recipes.faiss",
+        metadata_path=artifact_dir / "metadata.json",
+        model_path=artifact_dir / "model",
+        expected_model_revision=EMBEDDING_MODEL_REVISION,
+    )
+
+
 def recommender(
     repository: FakeRepository,
     encoder: FakeEncoder,
@@ -131,6 +227,48 @@ def test_search_uses_top_100_and_applies_blocked_filter(tmp_path: Path) -> None:
     assert results[0]["missing_ingredient_count"] == 1
     assert results[0]["source"] == "local_recipe_dataset"
     assert results[0]["rrf_score"] > 0
+
+
+def test_search_blocks_compound_ingredient_phrase(tmp_path: Path) -> None:
+    repository = FakeRepository(
+        [1],
+        [stored_recipe(1, {"peanut butter"})],
+    )
+    encoder = FakeEncoder()
+    index = FakeFaissIndex([1])
+    request = NormalizedRecipeRequest(
+        ingredients=("tomato",),
+        blocked_ingredients=frozenset({"peanut"}),
+    )
+
+    results = recommender(repository, encoder, index).search(request)
+
+    assert results == []
+
+
+def test_search_uses_shared_blocked_ingredient_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = FakeRepository(
+        [1],
+        [stored_recipe(1, {"peanut butter"})],
+    )
+    encoder = FakeEncoder()
+    index = FakeFaissIndex([1])
+    request = NormalizedRecipeRequest(
+        ingredients=("tomato",),
+        blocked_ingredients=frozenset({"peanut"}),
+    )
+    calls: list[tuple[object, object]] = []
+    monkeypatch.setattr(
+        "recommender.search.contains_blocked_ingredient",
+        lambda recipe, blocked: calls.append((recipe, blocked)) or False,
+    )
+
+    recommender(repository, encoder, index).search(request)
+
+    assert calls
 
 
 def _sort_fixture() -> tuple[
@@ -260,4 +398,59 @@ def test_load_recommender_rejects_embedding_model_mismatch(tmp_path: Path) -> No
             metadata_path=tmp_path / "metadata.json",
             model_path=model_path,
             expected_model_revision="5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+        )
+
+
+def test_load_recommender_rejects_sqlite_sha256_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_dir = write_runtime_artifacts(
+        tmp_path,
+        sqlite_sha256="f" * 64,
+    )
+
+    with pytest.raises(RecommenderArtifactsError):
+        call_load_recommender(artifact_dir, monkeypatch)
+
+
+def test_load_recommender_rejects_encoder_revision_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_dir = write_runtime_artifacts(tmp_path)
+
+    with pytest.raises(RecommenderArtifactsError):
+        call_load_recommender(
+            artifact_dir,
+            monkeypatch,
+            WrongRevisionEncoder,
+        )
+
+
+def test_load_recommender_rejects_query_dimension_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_dir = write_runtime_artifacts(tmp_path)
+
+    with pytest.raises(RecommenderArtifactsError):
+        call_load_recommender(
+            artifact_dir,
+            monkeypatch,
+            WrongDimensionEncoder,
+        )
+
+
+def test_load_recommender_rejects_nonfinite_query_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_dir = write_runtime_artifacts(tmp_path)
+
+    with pytest.raises(RecommenderArtifactsError):
+        call_load_recommender(
+            artifact_dir,
+            monkeypatch,
+            NonFiniteEncoder,
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from time import perf_counter
@@ -10,6 +11,7 @@ import faiss
 import numpy as np
 
 from recommender.embeddings import LocalSentenceEncoder
+from recommender.ingredients import contains_blocked_ingredient
 from recommender.model_config import EMBEDDING_MODEL
 from recommender.models import (
     NormalizedRecipeRequest,
@@ -147,7 +149,10 @@ class LocalRecipeRecommender:
         ranked: list[dict[str, object]] = []
         for recipe_id, entry in fused.items():
             recipe = stored[recipe_id]
-            if recipe.normalized_ingredients & request.blocked_ingredients:
+            if contains_blocked_ingredient(
+                recipe.normalized_ingredients,
+                request.blocked_ingredients,
+            ):
                 continue
             available = set(request.ingredients)
             used = len(available & recipe.normalized_ingredients)
@@ -213,16 +218,45 @@ def load_recommender(
     model_path: Path,
     expected_model_revision: str,
 ) -> LocalRecipeRecommender:
-    for path in (db_path, faiss_path, metadata_path, model_path):
-        if not path.exists():
-            raise RecommenderArtifactsError(
-                f"Recommender artifact is missing: {path}"
-            )
+    try:
+        return _load_recommender_checked(
+            db_path=db_path,
+            faiss_path=faiss_path,
+            metadata_path=metadata_path,
+            model_path=model_path,
+            expected_model_revision=expected_model_revision,
+        )
+    except RecommenderArtifactsError:
+        raise
+    except Exception as exc:
+        raise RecommenderArtifactsError(
+            "Recommender startup validation failed"
+        ) from exc
+
+
+def _load_recommender_checked(
+    *,
+    db_path: Path,
+    faiss_path: Path,
+    metadata_path: Path,
+    model_path: Path,
+    expected_model_revision: str,
+) -> LocalRecipeRecommender:
+    if not db_path.is_file():
+        raise RecommenderArtifactsError("Recommender SQLite artifact is missing")
+    if not faiss_path.is_file():
+        raise RecommenderArtifactsError("Recommender FAISS artifact is missing")
+    if not metadata_path.is_file():
+        raise RecommenderArtifactsError("Recommender metadata artifact is missing")
+    if not model_path.is_dir():
+        raise RecommenderArtifactsError("Recommender model directory is missing")
     metadata = load_metadata(metadata_path, expected_embedding_model=EMBEDDING_MODEL)
     if metadata.embedding_model != EMBEDDING_MODEL:
         raise RecommenderArtifactsError("Unsupported embedding model in metadata")
     if metadata.embedding_model_revision != expected_model_revision:
         raise RecommenderArtifactsError("Embedding model revision mismatch")
+    if _sha256_file(db_path) != metadata.sqlite_sha256:
+        raise RecommenderArtifactsError("SQLite SHA-256 does not match metadata")
     repository = RecipeRepository.open_readonly(db_path)
     if repository.count_recipes() != metadata.recipe_count:
         raise RecommenderArtifactsError("SQLite recipe count does not match metadata")
@@ -239,7 +273,33 @@ def load_recommender(
         ) from exc
     if encoder.model_id != metadata.embedding_model:
         raise RecommenderArtifactsError("Embedding model ID does not match metadata")
+    if encoder.model_revision != metadata.embedding_model_revision:
+        raise RecommenderArtifactsError(
+            "Embedding model revision does not match metadata"
+        )
+    probe = encoder.encode_query("dimension probe")
+    if (
+        not isinstance(probe, np.ndarray)
+        or probe.ndim != 2
+        or probe.shape[0] != 1
+        or probe.shape[1] != index.d
+    ):
+        raise RecommenderArtifactsError(
+            "Embedding query dimension does not match FAISS index"
+        )
+    if not np.isfinite(probe).all():
+        raise RecommenderArtifactsError(
+            "Embedding query probe contains NaN or Inf values"
+        )
     return LocalRecipeRecommender(repository, index, encoder)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _sort_key(
