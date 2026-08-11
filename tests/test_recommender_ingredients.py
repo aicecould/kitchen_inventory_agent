@@ -4,6 +4,7 @@ import pytest
 
 from recommender.ingredients import (
     ALLERGEN_INGREDIENTS,
+    contains_blocked_ingredient,
     expand_allergen_categories,
     normalize_english_ingredient,
     normalize_search_request,
@@ -133,3 +134,27 @@ def test_allergen_categories_are_complete_and_expand_representatives() -> None:
     }
     expanded = expand_allergen_categories(["Dairy", "Peanut", "Tree Nut"])
     assert {"milk", "butter", "peanut", "groundnut", "almond", "cashew"} <= expanded
+
+
+@pytest.mark.parametrize(
+    ("blocked", "ingredients", "expected"),
+    [
+        ("peanut", ["peanuts"], True),
+        ("peanut", ["peanut butter"], True),
+        ("soy", ["soy sauce"], True),
+        ("almond", ["almond flour"], True),
+        ("cheese", ["parmesan cheese"], True),
+        ("egg", ["eggplant"], False),
+        ("ham", ["graham flour"], False),
+    ],
+)
+def test_contains_blocked_ingredient_matches_structured_phrases(
+    blocked: str,
+    ingredients: list[str],
+    expected: bool,
+) -> None:
+    assert contains_blocked_ingredient(ingredients, [blocked]) is expected
+
+
+def test_contains_blocked_ingredient_does_not_match_across_fields() -> None:
+    assert contains_blocked_ingredient(["peanut", "butter"], ["peanut butter"]) is False

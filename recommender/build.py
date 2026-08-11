@@ -217,6 +217,14 @@ def build_artifacts(source: Path, model_path: Path, output_dir: Path) -> None:
         recipe_count = build_sqlite(source, database)
         validate_sqlite(database, expected_count=recipe_count)
         encoder = LocalSentenceEncoder(model_path, local_files_only=True)
+        if encoder.model_id != EMBEDDING_MODEL:
+            raise BuildInputError(
+                "Encoder model ID does not match pinned embedding configuration"
+            )
+        if encoder.model_revision != EMBEDDING_MODEL_REVISION:
+            raise BuildInputError(
+                "Encoder model revision does not match pinned embedding configuration"
+            )
         dimension, encoded_count = build_faiss(database, faiss_path, encoder)
         if encoded_count != recipe_count:
             raise ValueError("FAISS and SQLite recipe counts differ")
@@ -225,8 +233,8 @@ def build_artifacts(source: Path, model_path: Path, output_dir: Path) -> None:
             source_sha256=_sha256_file(source),
             sqlite_sha256=_sha256_file(database),
             license="CC BY-SA 3.0",
-            embedding_model=EMBEDDING_MODEL,
-            embedding_model_revision=EMBEDDING_MODEL_REVISION,
+            embedding_model=encoder.model_id,
+            embedding_model_revision=encoder.model_revision,
             embedding_max_seq_length=EMBEDDING_MAX_SEQ_LENGTH,
             embedding_dimension=dimension,
             recipe_count=recipe_count,

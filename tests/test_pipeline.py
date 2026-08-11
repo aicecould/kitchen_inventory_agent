@@ -1454,6 +1454,30 @@ def test_build_pipeline_injects_local_recommender(
     assert pipeline.agent.recipes.local is fake_local
 
 
+def test_build_pipeline_records_local_recommender_availability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.pipeline import build_pipeline
+
+    profile_path = tmp_path / "profile.md"
+    profile_path.write_text("# 用户画像\n", encoding="utf-8")
+    settings = replace(
+        get_settings(),
+        deepseek_api_key="",
+        inventory_db_path=tmp_path / "inventory.db",
+        user_profile_path=profile_path,
+    )
+    monkeypatch.setattr(
+        "app.pipeline.build_runtime_recommender",
+        lambda settings_arg: object(),
+    )
+
+    pipeline = build_pipeline(settings)
+
+    assert pipeline.local_recipe_search_available is True
+
+
 def test_pipeline_source_never_imports_build_entrypoint() -> None:
     source = Path("app/pipeline.py").read_text(encoding="utf-8")
     assert "recommender.build" not in source

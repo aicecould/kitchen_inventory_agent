@@ -3,6 +3,7 @@
 from recommender.models import (
     BuildMetadata,
     IngredientTranslation,
+    ModelManifest,
     NormalizedRecipeRequest,
     RecipeRanking,
     RecommenderArtifactsError,
@@ -20,6 +21,7 @@ __all__ = [
     "IngredientTranslation",
     "LocalRecipeRecommender",
     "LocalRecipeSearchError",
+    "ModelManifest",
     "NormalizedRecipeRequest",
     "RecipeRanking",
     "RecommenderArtifactsError",

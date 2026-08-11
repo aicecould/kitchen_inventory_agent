@@ -80,5 +80,12 @@ class BuildMetadata(BaseModel):
     built_at: AwareDatetime
 
 
+class ModelManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model_id: str = Field(min_length=1, max_length=200)
+    revision: str = Field(min_length=1, max_length=200)
+    files: dict[str, str]
+
+
 class RecommenderArtifactsError(RuntimeError):
     """Runtime artifacts are missing, inconsistent, or unreadable."""

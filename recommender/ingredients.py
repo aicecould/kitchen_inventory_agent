@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Collection, Iterable, Sequence
 
 from app.allergens import OFFICIAL_INTOLERANCE_SET
 from recommender.models import (
@@ -34,6 +34,7 @@ _UNITS = re.compile(
     r"stalks?|sprigs?|sticks?)\b"
 )
 _TRAILING_CLOVE = re.compile(r"\bcloves?\s*$")
+_ENGLISH_TOKEN = re.compile(r"[A-Za-z0-9]+")
 
 IRREGULAR_PLURALS = {
     "tomatoes": "tomato",
@@ -135,6 +136,42 @@ def parse_ingredient_lines(raw: str) -> list[str]:
         if normalized is not None and normalized not in cleaned:
             cleaned.append(normalized)
     return cleaned
+
+
+def contains_blocked_ingredient(
+    recipe_ingredients: Iterable[str],
+    blocked: Collection[str],
+) -> bool:
+    """Match blocker phrases as contiguous token sequences inside one field."""
+    for blocker in blocked:
+        blocker_tokens = _matching_tokens(blocker)
+        if not blocker_tokens:
+            continue
+        for field in recipe_ingredients:
+            field_tokens = _matching_tokens(field)
+            for start in range(len(field_tokens) - len(blocker_tokens) + 1):
+                if all(
+                    _token_matches(
+                        field_tokens[start + offset],
+                        blocker_tokens[offset],
+                    )
+                    for offset in range(len(blocker_tokens))
+                ):
+                    return True
+    return False
+
+
+def _matching_tokens(value: str) -> list[str]:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return _ENGLISH_TOKEN.findall(normalized)
+
+
+def _token_matches(actual: str, expected: str) -> bool:
+    if actual == expected:
+        return True
+    if len(actual) > 3 and actual.endswith("s") and actual[:-1] == expected:
+        return True
+    return len(expected) > 3 and expected.endswith("s") and expected[:-1] == actual
 
 
 def normalize_english_ingredient(value: str) -> str | None:

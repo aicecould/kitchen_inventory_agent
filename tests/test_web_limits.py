@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,6 +51,100 @@ def test_frontend_loads_safe_markdown_renderer_before_the_application() -> None:
     markdown_position = response.text.index('/static/markdown.js')
     app_position = response.text.index('/static/app.js')
     assert markdown_position < app_position
+
+
+def test_service_status_does_not_initialize_pipeline_for_local_search(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.web as web
+
+    settings = replace(
+        get_settings(),
+        deepseek_api_key="test-key",
+        recommender_enabled=True,
+        recommender_db_path=tmp_path / "recipes.db",
+        recommender_faiss_path=tmp_path / "recipes.faiss",
+        recommender_metadata_path=tmp_path / "metadata.json",
+        recommender_model_path=tmp_path / "model",
+    )
+    (tmp_path / "recipes.db").write_bytes(b"db")
+    (tmp_path / "recipes.faiss").write_bytes(b"faiss")
+    (tmp_path / "metadata.json").write_bytes(b"metadata")
+    (tmp_path / "model").mkdir()
+    calls: list[object] = []
+    monkeypatch.setattr(web, "get_settings", lambda: settings)
+    monkeypatch.setattr(web, "_pipeline", None)
+    monkeypatch.setattr(
+        web,
+        "build_pipeline",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or object(),
+    )
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    assert response.json()["services"]["local_recipe_search"] is False
+    assert response.json()["ready"] is True
+    assert calls == []
+
+
+def test_service_status_reflects_initialized_pipeline_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.web as web
+
+    settings = replace(
+        get_settings(),
+        deepseek_api_key="test-key",
+        recommender_enabled=True,
+        recommender_db_path=Path("/missing/recipes.db"),
+        recommender_faiss_path=Path("/missing/recipes.faiss"),
+        recommender_metadata_path=Path("/missing/metadata.json"),
+        recommender_model_path=Path("/missing/model"),
+    )
+    monkeypatch.setattr(web, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        web,
+        "_pipeline",
+        SimpleNamespace(local_recipe_search_available=True),
+    )
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    assert response.json()["services"]["local_recipe_search"] is True
+
+
+def test_service_status_reflects_initialized_pipeline_false(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.web as web
+
+    settings = replace(
+        get_settings(),
+        recommender_enabled=True,
+        recommender_db_path=tmp_path / "recipes.db",
+        recommender_faiss_path=tmp_path / "recipes.faiss",
+        recommender_metadata_path=tmp_path / "metadata.json",
+        recommender_model_path=tmp_path / "model",
+    )
+    (tmp_path / "recipes.db").write_bytes(b"db")
+    (tmp_path / "recipes.faiss").write_bytes(b"faiss")
+    (tmp_path / "metadata.json").write_bytes(b"metadata")
+    (tmp_path / "model").mkdir()
+    monkeypatch.setattr(web, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        web,
+        "_pipeline",
+        SimpleNamespace(local_recipe_search_available=False),
+    )
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    assert response.json()["services"]["local_recipe_search"] is False
 
 
 def test_inventory_api_serves_duplicate_instances_with_display_metadata(
@@ -251,23 +346,17 @@ def test_status_reports_local_recipe_search_without_changing_ready(
 ) -> None:
     import app.web as web
 
-    model_dir = tmp_path / "model"
-    model_dir.mkdir()
-    db_path = tmp_path / "recipes.db"
-    faiss_path = tmp_path / "recipes.faiss"
-    metadata_path = tmp_path / "metadata.json"
-    for path in (db_path, faiss_path, metadata_path):
-        path.write_text("artifact", encoding="utf-8")
     settings = replace(
         get_settings(),
         deepseek_api_key="",
         recommender_enabled=True,
-        recommender_db_path=db_path,
-        recommender_faiss_path=faiss_path,
-        recommender_metadata_path=metadata_path,
-        recommender_model_path=model_dir,
     )
     monkeypatch.setattr(web, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        web,
+        "_pipeline",
+        SimpleNamespace(local_recipe_search_available=True),
+    )
 
     payload = web.service_status()
 
@@ -276,8 +365,8 @@ def test_status_reports_local_recipe_search_without_changing_ready(
 
     monkeypatch.setattr(
         web,
-        "get_settings",
-        lambda: replace(settings, recommender_enabled=False),
+        "_pipeline",
+        SimpleNamespace(local_recipe_search_available=False),
     )
     degraded = web.service_status()
 
