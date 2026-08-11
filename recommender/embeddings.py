@@ -43,7 +43,7 @@ class LocalSentenceEncoder:
         return self._encode(texts, batch_size=32)
 
     def encode_query(self, text: str) -> np.ndarray:
-        return self._encode([text], batch_size=1)[0]
+        return self._encode([text], batch_size=1)
 
     def _encode(self, texts: Sequence[str], *, batch_size: int) -> np.ndarray:
         vectors = self._model.encode(
