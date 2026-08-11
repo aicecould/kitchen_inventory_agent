@@ -429,8 +429,8 @@ cp .env.example .env
 | `RECOMMENDER_DB_PATH` | `recommender/artifacts/recipes.db` | 本地 SQLite/FTS5 只读路径 |
 | `RECOMMENDER_FAISS_PATH` | `recommender/artifacts/recipes.faiss` | 本地 FAISS 只读路径 |
 | `RECOMMENDER_METADATA_PATH` | `recommender/artifacts/metadata.json` | 本地构建元数据路径 |
-| `RECOMMENDER_MODEL_PATH` | `.run/models/bge-m3` | 部署前准备的 `BAAI/bge-m3` 本地目录 |
-| `RECOMMENDER_MODEL_REVISION` | `5617a9f61b028005a4858fdac845db406aefb181` | 固定 embedding 模型 revision |
+| `RECOMMENDER_MODEL_PATH` | `recommender/model` | 部署前准备的 `BAAI/bge-small-en-v1.5` 本地目录 |
+| `RECOMMENDER_MODEL_REVISION` | `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a` | 固定 embedding 模型 revision |
 
 当用户画像不存在时，应用从受版本控制的 `app/templates/user_profile.md` 创建基础文件，已有画像不会被覆盖。
 

@@ -15,7 +15,7 @@
 ```bash
 python -m recommender.build \
   --source /absolute/path/to/13k-recipes.csv \
-  --model /absolute/path/to/bge-m3 \
+  --model /absolute/path/to/bge-small-en-v1.5 \
   --output-dir recommender/artifacts
 ```
 
@@ -25,7 +25,7 @@ python -m recommender.build \
 - `recipes.faiss`：以 SQLite recipe ID 为外部 ID 的 FAISS `IndexIDMap2`；
 - `metadata.json`：模型、版本、哈希、维度、数量和 UTC 构建时间。
 
-embedding 模型固定为 `BAAI/bge-m3` revision `5617a9f61b028005a4858fdac845db406aefb181`。运行时只从部署前准备好的本地模型目录加载，并使用 `local_files_only=True`，不会隐式联网下载。
+embedding 模型固定为 `BAAI/bge-small-en-v1.5` revision `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`，最大序列长度 512，向量维度 384。运行时只从部署前准备好的本地模型目录加载，并使用 `local_files_only=True`，不会隐式联网下载。
 
 ## 运行时行为
 
