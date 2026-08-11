@@ -4,12 +4,34 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from langchain_core.messages import AIMessage
+from langchain_core.tools import tool
 
 from app.agent import KitchenAgent
 from app.config import get_settings
 from app.context import AgentContext, HistoryExcerpt
 from app.memory import ConversationHistoryRepository
 from app.trace import TraceRecorder
+
+
+class BoundaryChatModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def bind_tools(self, tools: list[object], **kwargs: object):
+        return self
+
+    def invoke(self, input: object, **kwargs: object):
+        self.calls += 1
+        return {"messages": [AIMessage(content="ok")]}
+
+
+class FakeAgentExecutor:
+    calls = 0
+
+    def invoke(self, input: object, config: object = None):
+        type(self).calls += 1
+        return {"messages": [AIMessage(content="ok")]}
 
 
 def test_deepseek_limits_have_conservative_defaults() -> None:
@@ -28,6 +50,67 @@ def test_agent_rejects_oversized_input_before_model_call() -> None:
         max_input_chars=100,
     )
     context = AgentContext(user_id="test", request_text="番茄" * 100)
+
+    with pytest.raises(ValueError, match="Agent input is too long"):
+        agent.run(context)
+
+
+def test_agent_allows_exact_sixty_thousand_character_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = BoundaryChatModel()
+    agent = KitchenAgent(
+        model=model,  # type: ignore[arg-type]
+        inventory=None,  # type: ignore[arg-type]
+        recipes=None,  # type: ignore[arg-type]
+        actions=None,  # type: ignore[arg-type]
+        max_input_chars=60000,
+    )
+    context = AgentContext(user_id="test", request_text="")
+
+    @tool
+    def noop() -> str:
+        """Return a fixed no-op response."""
+        return "ok"
+
+    monkeypatch.setattr(
+        KitchenAgent,
+        "_user_message",
+        staticmethod(lambda *args, **kwargs: "x" * 60000),
+    )
+    monkeypatch.setattr(
+        KitchenAgent,
+        "_create_tools",
+        lambda self, context_arg, trace_arg: [noop],
+    )
+    monkeypatch.setattr(
+        "app.agent.create_agent",
+        lambda model, tools, system_prompt: FakeAgentExecutor(),
+    )
+
+    result = agent.run(context)
+
+    assert result.content == "ok"
+    assert FakeAgentExecutor.calls == 1
+
+
+def test_agent_rejects_sixty_thousand_one_character_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = BoundaryChatModel()
+    agent = KitchenAgent(
+        model=model,  # type: ignore[arg-type]
+        inventory=None,  # type: ignore[arg-type]
+        recipes=None,  # type: ignore[arg-type]
+        actions=None,  # type: ignore[arg-type]
+        max_input_chars=60000,
+    )
+    context = AgentContext(user_id="test", request_text="")
+    monkeypatch.setattr(
+        KitchenAgent,
+        "_user_message",
+        staticmethod(lambda *args, **kwargs: "x" * 60001),
+    )
 
     with pytest.raises(ValueError, match="Agent input is too long"):
         agent.run(context)

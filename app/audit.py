@@ -421,13 +421,36 @@ def _validate_tool_record(entry: dict[str, object]) -> str | None:
         requested_ingredients = arguments.get("ingredients")
         if not isinstance(requested_ingredients, list) or not requested_ingredients:
             return "Recipe search has invalid ingredient parameters"
+        if "ingredient_mapping" not in arguments or not isinstance(
+            arguments["ingredient_mapping"], list
+        ):
+            return "Recipe search has invalid ingredient mapping parameters"
+        if "intolerances" in arguments or "custom_allergen_mapping" in arguments:
+            return "Recipe search uses removed allergen parameters"
         if not isinstance(result, list):
             return "Recipe search result is not structured"
-        if any(
-            not isinstance(item, dict) or not str(item.get("title", "")).strip()
-            for item in result
-        ):
-            return "Recipe search returned an invalid recipe record"
+        for item in result:
+            if not isinstance(item, dict):
+                return "Recipe search returned an invalid recipe record"
+            if (
+                not isinstance(item.get("id"), str)
+                or not item["id"].strip()
+                or not str(item.get("title", "")).strip()
+            ):
+                return "Recipe search returned an invalid recipe record"
+            for field in ("used_ingredient_count", "missing_ingredient_count"):
+                value = item.get(field)
+                if value is not None and (not isinstance(value, int) or value < 0):
+                    return "Recipe search returned an invalid ingredient-count field"
+            rrf_score = item.get("rrf_score")
+            if rrf_score is not None and (
+                not isinstance(rrf_score, (int, float)) or rrf_score <= 0
+            ):
+                return "Recipe search returned an invalid RRF field"
+            for field in ("fts_rank", "semantic_rank"):
+                value = item.get(field)
+                if value is not None and (not isinstance(value, int) or value <= 0):
+                    return "Recipe search returned an invalid rank field"
     return None
 
 

@@ -53,7 +53,11 @@ def test_recipe_recommendation_must_match_tool_result() -> None:
         [
             {
                 "tool": "search_recipes",
-                "arguments": {"ingredients": ["tomato"]},
+                "arguments": {
+                    "ingredients": ["tomato"],
+                    "ingredient_mapping": [],
+                    "exclude_ingredients": [],
+                },
                 "result": [
                     {
                         "id": "recipe-1",
@@ -452,9 +456,8 @@ def test_canonical_mixed_response_appends_recipe_titles_and_source_links() -> No
             "tool": "search_recipes",
             "arguments": {
                 "ingredients": ["tomato"],
-                "intolerances": [],
+                "ingredient_mapping": [],
                 "exclude_ingredients": [],
-                "custom_allergen_mapping": [],
             },
             "result": [
                 {
@@ -493,9 +496,8 @@ def test_canonical_mixed_response_discloses_an_empty_recipe_result() -> None:
             "tool": "search_recipes",
             "arguments": {
                 "ingredients": ["tomato"],
-                "intolerances": [],
+                "ingredient_mapping": [],
                 "exclude_ingredients": [],
-                "custom_allergen_mapping": [],
             },
             "result": [],
         },
@@ -520,9 +522,8 @@ def test_canonical_mixed_response_honors_english_target_language() -> None:
             "tool": "search_recipes",
             "arguments": {
                 "ingredients": ["tomato"],
-                "intolerances": [],
+                "ingredient_mapping": [],
                 "exclude_ingredients": [],
-                "custom_allergen_mapping": [],
             },
             "result": [
                 {
