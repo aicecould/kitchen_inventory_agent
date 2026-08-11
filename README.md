@@ -386,6 +386,16 @@ tests/                        # pytest 自动化测试
 main.py                       # CLI 入口
 ```
 
+## 使用的数据集与模型
+
+以下三个开源项目用于分类器数据构建与本地菜谱检索，来源、固定版本和许可信息如下。
+
+| 类型 | 项目 | 用途 | 固定版本 / 本地路径 | 许可 |
+| --- | --- | --- | --- | --- |
+| 数据集 | [MASSIVE](https://huggingface.co/datasets/AmazonScience/massive) | 分类器中文领域外文本来源，本地保留 `zh-CN` 的 train/validation/test 分区 | Hugging Face `AmazonScience/massive`；`classifier/dataset/massive/` | CC BY 4.0 |
+| 数据集 | [josephrmartinez/recipe-dataset](https://github.com/josephrmartinez/recipe-dataset) | 本地菜谱检索输入，使用完整 `13k-recipes.csv` 构建 SQLite/FTS5 与 FAISS | commit `c5a1e8dab69d46841d914be1f20cca6fbe4b6260`；`recommender/dataset/` | CC BY-SA 3.0 |
+| 模型 | [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) | 菜谱查询与文档 embedding，输出 384 维向量 | revision `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`；`recommender/model/` | MIT |
+
 ## 环境要求与安装
 
 项目使用 `enum.StrEnum`，需要 **Python 3.11 或更高版本**。

@@ -10,6 +10,7 @@ data/
 docs/
 classifier/artifacts/*.vec
 classifier/artifacts/training/
+classifier/dataset/massive/
 recommender/artifacts/
 recommender/dataset/
 recommender/model/*
