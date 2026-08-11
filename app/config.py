@@ -8,6 +8,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from recommender.model_config import EMBEDDING_MODEL_REVISION
+
 load_dotenv()
 
 
@@ -114,11 +116,11 @@ def get_settings() -> Settings:
             )
         ),
         recommender_model_path=Path(
-            os.getenv("RECOMMENDER_MODEL_PATH", ".run/models/bge-m3")
+            os.getenv("RECOMMENDER_MODEL_PATH", "recommender/model")
         ),
         recommender_model_revision=os.getenv(
             "RECOMMENDER_MODEL_REVISION",
-            "5617a9f61b028005a4858fdac845db406aefb181",
+            EMBEDDING_MODEL_REVISION,
         ),
     )
 

@@ -9,6 +9,11 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 from app.allergens import AllergenIntolerance
+from recommender.model_config import (
+    EMBEDDING_MAX_SEQ_LENGTH,
+    EMBEDDING_MODEL,
+    EMBEDDING_MODEL_REVISION,
+)
 
 
 class RecipeRanking(StrEnum):
@@ -67,11 +72,9 @@ class BuildMetadata(BaseModel):
     source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     sqlite_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     license: Literal["CC BY-SA 3.0"]
-    embedding_model: Literal["BAAI/bge-m3"]
-    embedding_model_revision: Literal[
-        "5617a9f61b028005a4858fdac845db406aefb181"
-    ]
-    embedding_max_seq_length: Literal[2048]
+    embedding_model: Literal[EMBEDDING_MODEL]
+    embedding_model_revision: Literal[EMBEDDING_MODEL_REVISION]
+    embedding_max_seq_length: Literal[EMBEDDING_MAX_SEQ_LENGTH]
     embedding_dimension: int = Field(gt=0)
     recipe_count: int = Field(gt=0)
     built_at: AwareDatetime

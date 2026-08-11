@@ -112,10 +112,10 @@ def _metadata_dict(**overrides: object) -> dict[str, object]:
         "source_sha256": "a" * 64,
         "sqlite_sha256": "b" * 64,
         "license": "CC BY-SA 3.0",
-        "embedding_model": "BAAI/bge-m3",
-        "embedding_model_revision": "5617a9f61b028005a4858fdac845db406aefb181",
-        "embedding_max_seq_length": 2048,
-        "embedding_dimension": 1024,
+        "embedding_model": "BAAI/bge-small-en-v1.5",
+        "embedding_model_revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+        "embedding_max_seq_length": 512,
+        "embedding_dimension": 384,
         "recipe_count": 2,
         "built_at": "2026-08-11T00:00:00Z",
     }
@@ -130,7 +130,7 @@ def test_load_metadata_accepts_valid_metadata(tmp_path: Path) -> None:
     metadata = load_metadata(path)
 
     assert isinstance(metadata, BuildMetadata)
-    assert metadata.embedding_dimension == 1024
+    assert metadata.embedding_dimension == 384
     assert metadata.recipe_count == 2
     assert metadata.built_at.tzinfo is not None
 
