@@ -34,6 +34,12 @@ class Settings:
     food_classifier_enabled: bool
     food_classifier_model_path: Path
     food_classifier_metadata_path: Path
+    recommender_enabled: bool
+    recommender_db_path: Path
+    recommender_faiss_path: Path
+    recommender_metadata_path: Path
+    recommender_model_path: Path
+    recommender_model_revision: str
 
     def require(self, *names: str) -> None:
         missing = [name for name in names if not str(getattr(self, name, "")).strip()]
@@ -71,7 +77,7 @@ def get_settings() -> Settings:
         deepseek_max_output_tokens=int(
             os.getenv("DEEPSEEK_MAX_OUTPUT_TOKENS", "800")
         ),
-        deepseek_max_input_chars=int(os.getenv("DEEPSEEK_MAX_INPUT_CHARS", "12000")),
+        deepseek_max_input_chars=int(os.getenv("DEEPSEEK_MAX_INPUT_CHARS", "60000")),
         pending_action_ttl_minutes=int(
             os.getenv("PENDING_ACTION_TTL_MINUTES", "15")
         ),
@@ -87,6 +93,32 @@ def get_settings() -> Settings:
                 "FOOD_CLASSIFIER_METADATA_PATH",
                 "classifier/artifacts/metadata.json",
             )
+        ),
+        recommender_enabled=_env_bool("RECOMMENDER_ENABLED", True),
+        recommender_db_path=Path(
+            os.getenv(
+                "RECOMMENDER_DB_PATH",
+                "recommender/artifacts/recipes.db",
+            )
+        ),
+        recommender_faiss_path=Path(
+            os.getenv(
+                "RECOMMENDER_FAISS_PATH",
+                "recommender/artifacts/recipes.faiss",
+            )
+        ),
+        recommender_metadata_path=Path(
+            os.getenv(
+                "RECOMMENDER_METADATA_PATH",
+                "recommender/artifacts/metadata.json",
+            )
+        ),
+        recommender_model_path=Path(
+            os.getenv("RECOMMENDER_MODEL_PATH", ".run/models/bge-m3")
+        ),
+        recommender_model_revision=os.getenv(
+            "RECOMMENDER_MODEL_REVISION",
+            "5617a9f61b028005a4858fdac845db406aefb181",
         ),
     )
 

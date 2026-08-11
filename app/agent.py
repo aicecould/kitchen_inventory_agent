@@ -102,7 +102,7 @@ class KitchenAgent:
     profile_actions: ProfileActionService | None = None
     application_timezone: str = "Asia/Shanghai"
     recursion_limit: int = 10
-    max_input_chars: int = 12000
+    max_input_chars: int = 60000
     repair_decider: (
         Callable[[SupervisorRequest, AuditResult], RepairDecision] | None
     ) = None
