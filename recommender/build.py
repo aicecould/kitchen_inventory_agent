@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
+import hashlib
 import json
+import os
+import shutil
 import sqlite3
+import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
+import faiss
+import numpy as np
+
+from recommender.embeddings import BgeM3Encoder, DocumentEncoder
 from recommender.ingredients import parse_ingredient_lines
+from recommender.models import BuildMetadata
 
 
 class BuildInputError(ValueError):
@@ -21,6 +32,9 @@ REQUIRED_COLUMNS = (
     "Image_Name",
     "Cleaned_Ingredients",
 )
+SOURCE_COMMIT = "c5a1e8dab69d46841d914be1f20cca6fbe4b6260"
+EMBEDDING_MODEL = "BAAI/bge-m3"
+EMBEDDING_MODEL_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
 
 
 def build_sqlite(source: Path, destination: Path) -> int:
@@ -136,3 +150,112 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         INSERT INTO schema_versions (version) VALUES (1);
         """
     )
+
+
+def build_faiss(
+    db_path: Path,
+    destination: Path,
+    encoder: DocumentEncoder,
+) -> tuple[int, int]:
+    """Build a FAISS IndexIDMap2 keyed by SQLite recipe IDs."""
+    connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, title, ingredient_search_text, instructions
+            FROM recipes
+            ORDER BY id
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    if not rows:
+        raise ValueError("Cannot build FAISS from an empty recipe database")
+    ids = np.array([row[0] for row in rows], dtype=np.int64)
+    texts = [
+        f"Title: {row[1]}\nIngredients: {row[2]}\nInstructions: {row[3]}"
+        for row in rows
+    ]
+    vectors = encoder.encode_documents(texts)
+    if vectors.ndim != 2 or vectors.shape[0] != len(rows):
+        raise ValueError("Encoder returned vectors incompatible with recipe rows")
+    if not np.isfinite(vectors).all():
+        raise ValueError("Encoder returned NaN or Inf vectors")
+    dimension = vectors.shape[1]
+    index = faiss.IndexIDMap2(faiss.IndexFlatIP(dimension))
+    index.add_with_ids(vectors.astype(np.float32), ids)
+    faiss.write_index(index, str(destination))
+    return dimension, len(rows)
+
+
+def publish_artifacts(temp_dir: Path, output_dir: Path) -> None:
+    """Atomically publish validated artifacts, replacing metadata last."""
+    try:
+        expected = ("recipes.db", "recipes.faiss", "metadata.json")
+        for name in expected:
+            if not (temp_dir / name).is_file():
+                raise RuntimeError(f"Temporary artifact is missing: {name}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        os.replace(temp_dir / "recipes.db", output_dir / "recipes.db")
+        os.replace(temp_dir / "recipes.faiss", output_dir / "recipes.faiss")
+        os.replace(temp_dir / "metadata.json", output_dir / "metadata.json")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def build_artifacts(source: Path, model_path: Path, output_dir: Path) -> None:
+    """Build all runtime artifacts and publish them atomically."""
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=output_dir.parent) as raw_temp:
+        temp_dir = Path(raw_temp)
+        database = temp_dir / "recipes.db"
+        faiss_path = temp_dir / "recipes.faiss"
+        metadata_path = temp_dir / "metadata.json"
+        recipe_count = build_sqlite(source, database)
+        validate_sqlite(database, expected_count=recipe_count)
+        encoder = BgeM3Encoder(model_path, local_files_only=True)
+        dimension, encoded_count = build_faiss(database, faiss_path, encoder)
+        if encoded_count != recipe_count:
+            raise ValueError("FAISS and SQLite recipe counts differ")
+        metadata = BuildMetadata(
+            source_commit=SOURCE_COMMIT,
+            source_sha256=_sha256_file(source),
+            sqlite_sha256=_sha256_file(database),
+            embedding_model=EMBEDDING_MODEL,
+            embedding_model_revision=EMBEDDING_MODEL_REVISION,
+            embedding_max_seq_length=2048,
+            embedding_dimension=dimension,
+            recipe_count=recipe_count,
+            built_at=datetime.now(UTC),
+        )
+        metadata_path.write_text(
+            metadata.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+        publish_artifacts(temp_dir, output_dir)
+    print(
+        f"Published {recipe_count} recipes, dimension {dimension} to {output_dir}"
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Build local recipe SQLite/FTS5, FAISS, and metadata artifacts."
+    )
+    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    args = parser.parse_args()
+    build_artifacts(args.source, args.model, args.output_dir)
+
+
+if __name__ == "__main__":
+    main()
