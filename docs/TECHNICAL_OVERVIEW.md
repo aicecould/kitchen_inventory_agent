@@ -1,6 +1,6 @@
 # Kitchen Inventory Agent 技术说明
 
-本文按模块说明 Kitchen Inventory Agent 的职责、内部架构、关键工程决策和验证结果。它是 [README](README.md) 的技术展开版；运行数据统一引用 [最终快速评测报告](evaluation/results/20260812T053146Z-final.md)。
+本文按模块说明 Kitchen Inventory Agent 的职责、内部架构、关键工程决策和验证结果。它是 [README](../README.md) 的技术展开版；运行数据统一引用 [最终快速评测报告](快速评测报告.md)。
 
 ## 1. 请求编排与领域门禁
 

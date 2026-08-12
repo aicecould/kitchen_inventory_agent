@@ -96,7 +96,7 @@ inventory.confirm
 
 ## 验证与指标
 
-项目提供可重复的分层评估，覆盖分类与路由、本地混合检索、确定性审核、修复子 Agent、Cooking Session 和端到端路径。最终证据见 [快速评测报告](evaluation/results/20260812T053146Z-final.md)。
+项目提供可重复的分层评估，覆盖分类与路由、本地混合检索、确定性审核、修复子 Agent、Cooking Session 和端到端路径。最终证据见 [快速评测报告](docs/快速评测报告.md)。
 
 ### 结果概览
 
@@ -170,8 +170,8 @@ app/
 ├── vision.py                 # 图片校验与置信度分层
 └── web.py                    # FastAPI 接口
 
-classifier/                   # FastText 数据、训练、评估与运行时
-recommender/                  # SQLite/FTS5、FAISS 与 RRF 检索
+classifier/                   # FastText 数据、训练、评估与运行时，[README.md](classifier/README.md)
+recommender/                  # SQLite/FTS5、FAISS 与 RRF 检索，[README.md](recommender/README.md)
 evaluation/                   # 可重复的分层系统评估
 frontend/                     # 展示页、库存、task 与执行轨迹
 tests/                        # pytest 自动化测试
