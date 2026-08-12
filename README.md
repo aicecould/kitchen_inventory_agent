@@ -1,128 +1,66 @@
 # Kitchen Inventory Agent
 
-Kitchen Inventory Agent 解决的不是“把食材名称存进数据库”这么简单的问题，而是家庭库存里更真实、也更容易被 Agent 误处理的状态：同名食材可能来自不同批次，“半袋”“约 400g–500g”不能安全换算，删除与修改不能在模型猜测后立即生效，临期提醒也不应偷偷替用户执行操作。
+Kitchen Inventory Agent 是一个面向家庭厨房场景的可审计 Agent。它处理的不只是“记录食材名称”，还包括同名食材的不同批次、无法安全换算的自然语言数量、需要用户确认的库存变更、受过敏原约束的菜谱检索，以及烹饪前后持续变化的上下文。
 
-当前版本已经形成一条可运行、可确认、可审查的请求链路：库存以独立实例保存原始数量文本；新增、整项替换、单实例删除、同名批量删除和“我刚确认过”校准全部先生成持久化提案；菜谱可确认到唯一活动的轻量 task 挂件，完成烹饪后再生成独立库存替换／删除提案；长期画像以版本化 Markdown 保存事实、证据与冲突状态；确定性与上下文路由先于未改动的 FastText 二分类器；用户再次访问页面且距上次访问严格超过 24 小时时，系统最多展示一句 100 个 Unicode 字符以内的只读库存建议。
-
-## 快速系统评测
-
-项目提供小规模、可重复的分层 benchmark，用于量化分类/路由、本地混合检索、确定性审核、修复子 Agent、结构化烹饪任务和混合请求路径：
-
-```bash
-python -m evaluation.run --suite quick --offline
-python -m evaluation.run --suite quick
-```
-
-离线模式不会发送网络请求；在线模式最多运行 3 个领域门禁 DeepSeek 成本探针和 6 个修复子 Agent 样本。外部菜谱客户端的 Spoonacular 硬预算为每次运行 5 次。报告写入 `evaluation/results/`，同时包含逐样本 JSON 和答辩可引用的 Markdown。
-
-结果按 `measured`、`paired_estimate`、`fault_injection`、`unavailable` 和 `skipped` 标记真实性。故障注入检出率不代表生产事故率，检索目标集也偏向本地已收录菜谱；报告会保留这些局限和所有在线失败。
-
-安全边界同样明确：语言模型不能直接写 SQLite，主动建议不会创建提案、删除食材、补充库存或发送后台通知。模型负责理解、选择受约束的工具和辅助判断保质期；代码负责完整实例身份、原文保持、确认预览、确认门、优先级、固定提醒模板，以及从结构化工具结果生成可审计回答。
-
-## 核心能力
-
-| 能力 | 当前实现 |
-| --- | --- |
-| 真实库存语义 | 每次购入保存为带 `instance_id` 的库存实例；同名实例彼此独立，不合并、不做数据库数量运算 |
-| 原始数量表达 | `quantity_text` 是不透明的单行文本，从仓库、API、工具、Agent 上下文到审核均保持原文 |
-| 保质期与校准 | 新增时优先采用用户给出的日期，否则使用 LLM 结构化推断；失败、过去时间或无时区结果安全回退为 `unknown`；记录 `last_confirmed_at` |
-| 人工确认 | 五类写操作都只创建持久化提案；提案保存并由 API／页面展示新增值、当前与拟替换值、完整目标 ID 或批量目标与预计数量，确认后才写库 |
-| 主动库存建议 | 页面访问触发检查；距该用户上次访问严格超过 24 小时才扫描过期、3 天内临期、超过 14 天未确认和可能缺货线索，只展示一句固定安全文案 |
-| 请求路由 | 问候、明确库存指令和依赖上文的追问先走确定性／上下文规则；仍未决的文本才交给原有 FastText 二分类器 |
-| 图片识别 | 接入百度果蔬识别 API，校验图片格式、尺寸和长宽比，并按置信度分层处理结果 |
-| 菜谱检索 | 本地 SQLite FTS5 + FAISS + RRF 优先，本地不足 3 条时 Spoonacular、TheMealDB、DeepSeek Web Search 依次补齐，统一过滤和去重 |
-| 对话记忆 | 完整交互永久追加到 SQLite；Agent 自动上下文仅注入最近 10 段相关对话的输入与输出，并支持按时间范围显式召回 |
-| 单一活动 task | 菜谱确认后保存一个结构化烹饪挂件；可修改份数、暂停切换、标记已烹饪，且不划分或替换对话上下文 |
-| 长期用户画像 | Markdown v2 保存厨房情况、偏好、必须要求和默认情景；明确陈述二次点击确认，十段历史总结携带证据并只静默替换推断事实 |
-| 输出审核与轨迹 | 工具快照生成固定库存回答；受限子 Agent 可修复一次表达问题，主 Agent 最多重试一次，随后固定安全兜底 |
+系统将语言模型用于意图理解、候选选择和受约束的工具调用，将实例身份、原始数量、状态转换、确认执行与事实审核交给确定性代码。任何库存写操作都先生成持久化提案，用户确认后才会执行；主动建议只读，不会代替用户修改库存。
 
 ## 系统架构
 
 ```mermaid
 flowchart TD
-    A["用户文本 / 图片"] --> B["输入与图片校验"]
-
-    B -->|纯文本| C["确定性与上下文路由"]
-    C -->|问候 / 明确领域外边界| C1["返回边界提示"]
-    C -->|库存列表 / 按名称查询| D["实例级 SQLite 只读"]
-    C -->|删除全部同名实例 / 完整 ID 替换、删除、校准| E["创建待确认提案 + 结构化预览"]
-    C -->|依赖上文| F["携带最近历史进入 Agent"]
-    C -->|仍未决| G["未改动的 FastText 二分类器"]
-    G -->|领域外| C1
-    G -->|厨房相关或 fail-open| H["意图匹配 / Agent"]
-
-    B -->|包含图片| I["百度食材识别"]
-    I --> J["置信度分层"]
-    J -->|低置信度| K["持久化图片确认点"]
-    K --> L["选择 / 修改 / 放弃后恢复原请求"]
-    J -->|无需低置信度确认| H
-    L --> H
-
-    F --> M["10 个受约束工具"]
-    H --> M
-    M --> N["实例读取 / 库存提案 / 菜谱搜索 / 历史召回"]
-    N --> E
-    N --> O["本地混合检索 → Spoonacular → TheMealDB → DeepSeek Web Search"]
-
-    D --> S["工具结果规范化渲染 + 正则与结构审核"]
-    E --> S
-    O --> S
-    S --> T["记录原请求历史 + 已审核响应与执行轨迹"]
-
-    E --> P["后续确认 / 取消 HTTP 请求"]
-    P -->|确认| Q["允许列表执行器写库"]
-    P -->|取消| R["记录取消结果"]
-    Q --> T1["返回结构化 action + 记录确认结果"]
-    R --> T1
-
-    U["页面访问"] --> V["原子更新用户访问时间"]
-    V -->|严格超过 24 小时| W["只读扫描库存与近期历史"]
-    W --> X["LLM 结构化选择 / 确定性回退"]
-    X --> Y["固定模板：单句、单行、≤ 100 字符"]
-    Y --> Z["页面便笺；无后台推送、无业务动作"]
+    A["文本 / 图片请求"] --> B["输入校验与请求路由"]
+    B --> C["确定性与上下文规则"]
+    B --> D["图片识别与人工确认"]
+    C -->|"明确库存请求"| E["实例级库存服务"]
+    C -->|"未决请求"| F["FastText 领域门禁"]
+    F --> G["LangChain Agent"]
+    D --> G
+    G --> H["受约束工具"]
+    H --> E
+    H --> I["本地 FTS5 + FAISS + RRF"]
+    I -->|"结果不足"| J["外部菜谱源逐级补齐"]
+    E --> K["待确认提案"]
+    K -->|"用户确认"| L["允许列表执行器"]
+    E --> M["结构化回答"]
+    J --> M
+    M --> N["确定性审核与有界修复"]
+    N --> O["回答、执行轨迹与追加式历史"]
 ```
 
-这条架构刻意把“模型建议”和“状态变化”分开。Agent 只能调用预先定义的工具，库存写工具只生成带 `preview` 的 `pending` 提案；主动检查甚至不会生成提案，只返回可选的页面文案。库存读取或提案一旦出现在 Agent 工具历史中，模型撰写的库存段落会被丢弃，改由程序从结构化结果生成固定回答；后续 `/api/actions/{action_id}/confirm` 与 `/api/actions/{action_id}/cancel` 直接返回序列化 action，并把确认或取消结果写入历史。取消接口还返回固定文案“库存操作已取消，库存未发生变化”。
+这条链路围绕三个边界设计：
 
-## 已实现功能
+- **模型不直接写数据库**：Agent 只能调用预先定义的工具，库存写工具仅创建带真实状态预览的 `pending` 提案。
+- **事实不依赖模型复述**：库存查询与提案结果由程序根据结构化工具输出生成，并再次接受字段级审核。
+- **降级不绕过安全约束**：分类器、保质期推断、菜谱服务或修复流程不可用时，系统会保留请求、回退或返回安全结果，但不会跳过确认门。
 
-### 1. 实例级 SQLite 库存
+## 核心能力
 
-库存表当前保存以下字段：
+| 能力 | 当前实现 |
+| --- | --- |
+| 实例级库存 | 每次购入保存为独立 `instance_id`；同名批次不合并，查询、预览和回答均展示完整 ID |
+| 原始数量表达 | `quantity_text` 作为不透明单行文本保存，不擅自解析、换算或累加“半袋”“约 400g–500g”等表达 |
+| 保质期与校准 | 用户日期优先；否则使用结构化模型推断，无效结果安全回退为 `unknown`；`last_confirmed_at` 独立记录人工核对时间 |
+| 确认式写入 | 新增、整项替换、单实例删除、同名批量删除和库存校准均先生成持久化提案，确认后才执行 |
+| 请求路由 | 问候、明确库存指令和上下文追问优先走确定性规则；仍未决的纯文本再进入 FastText 领域门禁 |
+| 图片识别 | 接入百度果蔬识别，校验格式、尺寸与长宽比，并按置信度接受、提醒确认或暂停等待人工选择 |
+| 菜谱检索 | 本地 SQLite FTS5 与 FAISS 双路召回、RRF 融合；本地结果不足时依次由 Spoonacular、TheMealDB 和 DeepSeek Web Search 补齐 |
+| 过敏原约束 | 官方类别确定性展开，自定义过敏原和排除食材进入结构化参数校验，并对返回标题、步骤和原料逐字段过滤 |
+| Cooking Session | 每位用户维护一个活动烹饪 task；菜谱确认、份数调整、暂停切换和烹饪后库存核对均保留结构化状态 |
+| 对话与画像 | 完整交互追加保存到 SQLite；Agent 自动注入最近 10 段相关对话；长期画像以版本化 Markdown 保存事实、证据与冲突状态 |
+| 主动建议 | 页面访问间隔严格超过 24 小时时执行只读扫描，最多展示一句固定模板建议，不生成提案或后台通知 |
+| 回答监督 | 确定性审核失败后，受限子 Agent 可重写一次，主 Agent最多重试一次，随后使用固定安全兜底 |
+| 执行轨迹 | 请求按阶段记录路由、工具、外部服务、审核、修复和降级结果，并与最终回答一起持久化 |
+
+### 库存状态与写入
+
+库存实例包含以下核心字段：
 
 ```text
 instance_id / name / quantity_text / stocked_at / expires_at /
 expiry_source / last_confirmed_at
 ```
 
-这里有三项关键语义：
-
-- **同名不等于同一项**：两次购入“牛奶”会获得两个不同的 `instance_id`，按名称查询返回全部匹配实例。直接回答、Agent 规范化回答、提案摘要、确认预览和库存卡片都展示完整 ID；短前缀不被任何修改入口接受为权限。
-- **`quantity_text` 不透明**：系统只校验非空、单行和长度边界，不解析、不换算、不累加，也不会把“半袋”“大约 100 个”改写成数值。相对用量只有在 Agent 能可靠形成新的完整文本并确定唯一实例后，才可生成整项替换提案；否则要求用户澄清。
-- **替换而非算术更新**：`inventory.replace` 一次提交目标实例的新 `quantity_text`、`expires_at` 和 `expiry_source`。数据库没有部分扣减或单位合并逻辑。
-
-列表使用 `ORDER BY name, stocked_at, instance_id`，并分别为 `name`、`expires_at`、`last_confirmed_at` 建立索引。所有日期写入前转换为 UTC ISO 8601；库存 API 只返回上面的七字段 v2 合约。
-
-#### 一次性的破坏性旧数据迁移
-
-这一版本没有尝试猜测旧聚合库存中的批次、原始表达或日期。初始化通过 `PRAGMA table_xinfo` 比较有序的列名、规范化声明类型、`NOT NULL`、默认值、主键位置和隐藏列状态，并同时核对规范化的 `sqlite_master` 建表 SQL。只有原实现的完整旧签名——`name TEXT PRIMARY KEY, quantity REAL NOT NULL CHECK (quantity >= 0), unit TEXT NOT NULL`，且不存在 `schema_versions` 表——才会在同一 `BEGIN IMMEDIATE` 事务中删除旧表并建立 v2；该已知旧格式的数据会永久清空，部署前应自行备份。
-
-精确 v2 只有在库存表定义、`schema_versions(version INTEGER PRIMARY KEY)` 定义和唯一版本标记 `2` 三者一致时才有效并原样保留。旧表旁出现 v2 标记、v2 缺少标记、类型／约束／默认值／主键不同、额外表约束、额外或缺失列、重排列、局部状态、未知版本表或未来版本号都会抛出清晰的 `InventorySchemaError` 并回滚初始化，不删除原表或数据。全新空数据库仍会正常建立完整 v2；新增使用显式 `INSERT` 列表，避免列顺序变化导致错位写入。
-
-### 2. 保质期推断与最后确认时间
-
-新增实例的过期信息遵循保守顺序：
-
-1. 用户明确提供带时区的 `expires_at` 时直接采用，并标记 `expiry_source=user`；
-2. 未提供时，DeepSeek 通过结构化输出仅返回可选日期；
-3. 只有带时区且晚于当前时间的结果才标记为 `llm`；
-4. 模型未配置、调用失败、返回空值、过去时间或无时区时间时，保存 `expires_at=null`、`expiry_source=unknown`，提案流程继续进行；直接与 Agent 新增路径同时记录 `expiry_inference: degraded` 的安全轨迹，只说明日期未知，不保存供应商响应或异常详情。
-
-`last_confirmed_at` 在实例创建时初始化。“这个库存还在”的校准使用独立 `inventory.confirm` 提案，用户确认执行后才刷新时间；普通替换不会把库存误记为刚刚人工核对。这个字段也用于识别严格超过 14 天未确认的实例。
-
-### 3. 两阶段库存写入
-
-当前允许列表包含：
+当前允许的库存操作为：
 
 ```text
 inventory.add
@@ -132,286 +70,123 @@ inventory.remove_all
 inventory.confirm
 ```
 
-所有操作，包括按名称删除全部实例和刷新最后确认时间，都采用同一流程：
+提案保存操作参数、目标实例和创建时的真实库存预览，默认有效期为 15 分钟。确认时，服务端会重新校验持久化预览并原子领取执行权；重复确认已执行提案只返回原结果，不重复写入。替换操作提交一份新的完整状态，不在数据库中进行部分扣减或单位运算。
 
-1. Pydantic 拒绝额外字段、无效来源、无时区日期和越界文本；
-2. 提案以 `pending` 状态持久化，并设置默认 15 分钟有效期；`preview_json` 通过安全的加列迁移兼容已有提案表；迁移时，缺失、空、损坏或与参数不一致的旧库存预览会被标为 `failed` 并要求重新创建，已执行历史保持不变；
-3. 确认时先在服务端重新校验持久化预览，再使用 `BEGIN IMMEDIATE` 原子领取执行权并把状态变为 `executing`；
-4. 允许列表执行器针对具体实例或精确名称写库；
-5. 结构化快照写入提案结果，状态变为 `executed`；
-6. 对已执行提案重复确认会返回原结果，不重复新增、删除或校准。
+### 菜谱检索与安全过滤
 
-`preview` 来自提案创建当时的真实仓库状态：新增展示食材、数量、日期和来源；替换并列当前与拟替换值；删除和校准展示完整当前实例；同名全部删除展示精确名称、每条完整实例和预计数量。未知实例以及无匹配的批量删除在提案持久化前失败。`GET /api/actions` 原样返回这些结构，页面为五类操作提供明确标签和可复制的完整 ID；收到空预览时页面隐藏并禁用确认按钮，服务端仍会独立拒绝确认，不能依赖前端作为唯一防线。
+本地检索从 SQLite/FTS5 和 FAISS 各召回 top 100，使用 RRF `k=60` 融合，再执行过敏原与排除食材硬过滤。构建产物通过模型 revision、SHA-256、数据计数和向量维度校验；校验失败时不加载不完整的本地检索器，而是降级到外部菜谱源。
 
-提案还支持 `cancelled`、`expired` 和 `failed`，并检查所属 `user_id`。提案状态与实际库存写入目前仍是两个 SQLite 事务；进程恰好在二者之间崩溃时，没有完整的自动恢复协议，这是当前明确保留的边界。
+本地至少返回 3 条安全结果时停止外部请求；不足时保留已有结果并逐级补齐。跨来源按 URL、来源 ID 和规范化标题去重；所有来源都不足时只返回真实结果，不虚构菜谱。
 
-### 4. 确定性／上下文路由先行，FastText 保持不变
+### 记忆、任务与主动建议
 
-纯文本不会一律先送入分类器。当前顺序是：
+完整对话按用户永久追加保存，短期上下文仅注入最近 10 段相关输入与输出；按时间召回可以查询更早记录。长期画像区分用户确认事实与自动推断事实，并保存证据、版本和审核事件。明确的长期偏好先生成画像提案，经用户确认后生效。
 
-1. `route_deterministically` 先识别单独问候、库存列表、按精确名称查询、格式明确的新增、按名称删除全部实例、锚定的完整 ID 替换／删除／校准，以及“下一步呢”“用了一半”“删掉它”等上下文依赖表达；
-2. 单独问候直接返回领域边界；明确读取和上述五类写入直接走真实仓库或提案服务；完整 ID 替换保留不透明的新数量文本并沿用目标实例的日期信息；上下文依赖表达携带最近历史进入 Agent；这些路径均跳过 FastText；
-3. 其余未决文本才调用现有二分类器，包括编程、天气、订单、购物车和支付类请求；分类器判为领域外时停止，判为相关或发生 fail-open 时继续到意图／Agent；
-4. 图片请求跳过纯文本分类，进入图片处理链路。
+菜谱确认会创建结构化 Cooking Session。用户标记“已烹饪”后，系统进入库存核对：全部用完时生成删除提案，仍有剩余时生成整项替换提案；每项变更仍需单独确认。
 
-执行轨迹对此采用两种表达：确定性和上下文文本路径记录 `deterministic_route`，但不追加 `food_query_classifier` 事件，因此是否绕过分类器需要从前者推断；只有图片请求会显式记录 `food_query_classifier: skipped`。未决文本实际调用分类器时才会出现其成功、`unavailable` 或 `fail-open` 相关事件。
+主动建议只在页面访问时检查。系统按已过期、3 天内临期、超过 14 天未确认和可能缺货的顺序选择候选，最终只展示一条单行、100 个 Unicode 字符以内的固定模板文案。
 
-FastText 的模型、数据、训练与推理文件没有因这套路由调整而修改。应用启动时仍只加载一次模型；模型文件缺失、版本不兼容或预测异常时，请求继续处理，并在执行轨迹中记录 `unavailable` 或 `fail-open`。
+### 回答审核与有界修复
 
-分类器本身仍执行 NFKC 规范化、英文小写和 jieba 分词，使用 FastText supervised 模型与 softmax 损失；训练／验证／测试划分、阈值选择和离线指标保持原样。
+只要工具历史中出现库存读取或提案，程序就会从结构化结果重新生成库存段落，避免模型省略完整 ID、改写数量或错误声称操作已经执行。菜谱回答同样校验工具调用、标题、原料、步骤与来源链接的一致性。
 
-### 5. 图片识别、置信度分层与人工确认
-
-图片进入百度果蔬识别 API 前执行确定性校验：
-
-- 最大文件大小 3 MiB；
-- 仅接受 JPEG、PNG 和 BMP；
-- 图片边长 15–4096 px；
-- 长宽比不超过 3:1；
-- Pillow 必须能够解码图片内容。
-
-识别结果按置信度处理：
-
-| 置信度 | 状态 | 处理方式 |
-| --- | --- | --- |
-| `>= 0.85` | `accepted` | 直接进入当前请求上下文 |
-| `>= 0.50` 且 `< 0.85` | `needs_confirmation` | 可以进入上下文，但程序确定性追加核对提醒 |
-| `< 0.50` | `rejected` | 暂不进入 Agent，先创建持久化人工确认点 |
-
-低置信度确认点保存原请求、目标语言、全部识别结果、有效期和状态。用户可以选择、修改或放弃候选；确认后的 `user_confirmed` 项必须能在确认记录中找到，系统随后恢复原请求。已完成确认保存最终结果，重复读取时返回已保存结果。
-
-### 6. LangChain Agent 与实例工具边界
-
-复杂请求由基于 `ChatOpenAI` 兼容接口的 DeepSeek 模型处理，并通过 LangChain `create_agent` 组织以下 11 个工具：
-
-```text
-list_inventory_instances
-find_inventory_instances
-get_inventory_instance
-propose_add_inventory_instance
-propose_replace_inventory_instance
-propose_remove_inventory_instance
-propose_remove_all_inventory_instances
-propose_confirm_inventory_instance
-search_recipes
-search_conversation_history_by_time
-propose_profile_change
-```
-
-实例写工具还有一层调用期约束：替换、删除和校准前必须读取真实实例。同名查询只有一个结果时可以确定目标；存在多个同名实例时会标记歧义，必须由用户提供完整实例 ID 后才能提出单实例变更。即使两个 UUID 共享旧版显示前缀，短前缀也不会解除歧义。按名称删除全部实例也要求先查到该名称。
-
-Agent 负责理解请求、形成完整的新数量文本、生成英文菜谱 API 参数并组织回答；代码负责工具允许列表、实例查找状态、确认执行、过敏原完整性、图片状态和最终审核。Agent 设置了最大输入字符数、最大输出 Token、HTTP 超时、有限重试和递归上限。
-
-当前 Agent 仍由工具调用过程隐式编排，没有独立的结构化 Plan、任务依赖图或前端步骤状态模型。
-
-### 7. 本地混合菜谱路由与外部补齐
-
-菜谱检索优先使用本地 `recommender/` 产物。运行时读取部署前构建的 SQLite/FTS5 与 FAISS，FTS5 和 FAISS 各召回 top 100，以 RRF `k=60` 融合，再执行过敏原和排除食材硬过滤、特征计算与三种排序，本地最多返回 10 条。本地模型通过 `recommender/model/model-manifest.json` 记录 BGE-small revision 并校验关键文件 SHA-256；启动加载会校验 SQLite 哈希、只读计数、FAISS、模型身份和查询维度，任一不一致时自动降级到外部 API，不会暴露半初始化 recommender。
-
-`/api/status` 的 `services.local_recipe_search` 只反映当前进程已成功持有的真实 Pipeline 状态，不因本地文件存在而误报，也不会为了读取状态而初始化 Pipeline 或加载 embedding 模型。
-
-本地至少 3 条安全结果时不再调用外部服务；本地只有 1–2 条时保留本地结果，依次用 Spoonacular、TheMealDB 和 DeepSeek Web Search 补齐到 3 条。跨来源先按 URL、`(source, id)`、规范化标题去重，所有真实来源仍不足 3 条时只返回实际结果并标记 degraded，不虚构菜谱。
-
-`default` 排序直接按 RRF；`max-used-ingredients` 优先命中数；`min-missing-ingredients` 优先缺失数。Spoonacular 在 `default` 时不发送 `sort=default`，另外两种排序继续映射为其支持的 API 排序。DeepSeek Web Search 每次兜底最多发起一次搜索，并会产生额外模型与搜索费用。
-
-### 8. 结构化过敏原约束
-
-用户画像把过敏原分成 Spoonacular 官方支持的 12 类 intolerance，以及腰果、虾皮等自定义具体食材。官方类别由确定性代码展开，不需要模型翻译；调用菜谱工具时，所有中文已有食材、排除食材和自定义过敏原都必须出现在 `ingredient_mapping` 中，每个映射提供原文和英文 API 名称，不能遗漏、重复或夹带未配置项目。自定义和排除食材的英文名称合并到 `excludeIngredients`，返回后对标题、步骤和每条原料分别执行 canonical token/phrase 匹配，不使用裸子串，也不把字段拼成一个长文本形成跨字段伪 phrase。
-
-这把“不要漏掉过敏原”从 Prompt 要求提升成工具参数校验。自定义映射仍由模型生成，当前没有独立的食材别名、衍生物和未知成分知识库。
-
-### 9. 访问触发的主动库存建议
-
-前端加载时调用 `POST /api/proactive-check`。后端在 SQLite 中按用户保存 `last_visited_at`，并用 `BEGIN IMMEDIATE` 完成“读取旧时间 + 写入本次时间”：
-
-- 首次访问只建立基线，不展示建议；
-- 与上次访问正好相隔 24 小时仍不展示；
-- 严格超过 24 小时才扫描；
-- 每次调用都会刷新访问时间，因此立即刷新页面不会重复展示，并发调用也最多一个拿到本轮检查资格。
-
-候选优先级固定为：已过期、未来 3 天内临期、严格超过 14 天未确认、可能需要补充。LLM 只能结构化选择 `category` 和真实库存中的 `item_name`，必须服从前三类的最高优先级；应用不会显示模型自由文本，而是按类别渲染固定模板。模型异常、无效选择或服务失败不会阻塞库存接口或页面访问：有确定性候选时回退到对应安全模板，没有候选时返回 `null`。
-
-最终建议必须是固定允许集合中的一句话、单行、带句末标点且不超过 100 个 Unicode 字符。文案不会插入不受信任的食材名、Markdown、操作 ID 或执行声明。
-
-这不是常驻调度器：没有定时后台任务、浏览器推送、邮件或移动通知，也不会因建议而修改库存、生成待确认操作、改写对话历史、丢弃过期食材或代为采购。
-
-### 10. 追加式对话历史与十段短期上下文
-
-长期用户画像保存在 Markdown 中；完整对话使用 SQLite 按用户和 UTC 时间永久追加，不会因上下文窗口而删除。每条内部记录保存请求、最终回答、工具记录、确认结果、审核原因、结果类型、相关性、拦截状态和最终执行轨迹。旧版本已经裁剪掉的记录无法通过迁移恢复，仍存在的旧记录会以增量加列方式保留。
-
-Agent 自动上下文先过滤 `food_query_irrelevant`，再取最近 10 段相关记录并按时间正序注入；每段只有用户输入和最终输出，不含工具、审核或确认结构。领域外响应本身仍会永久保存。库存确认／取消、图片等待与恢复、安全兜底以及应用可控失败也统一形成独立历史记录；内部重试草稿不会单独写入。`conversation_context_state` 保存每个用户最近一次清空的 SQLite 行游标，窗口只读取游标之后的记录；清空不会删除历史，也不影响按时间召回或画像总结。
-
-`search_conversation_history_by_time` 接收带时区的起止时间，按半开区间查询当前用户的完整历史，默认返回最新 20 段、最多 100 段。显式召回可以包含被标记为无关的历史，但只向 Agent 返回 `created_at`、输入和输出；`user_id` 由当前上下文绑定，模型不能指定其他用户。相对日期依据带时区的当前时间和 `APP_TIMEZONE`（默认 `Asia/Shanghai`）转换。
-
-### 11. 单一活动烹饪 task 与菜谱确认
-
-`cooking_tasks` 在现有 SQLite 中保存菜谱快照、原始查询、目标份数、状态、版本和核对标记。部分唯一索引强制每位用户最多一个 `active` task；其余状态只有 `paused` 和 `completed`。task 只是单独注入 Prompt 的补充信息挂件，不向 `conversation_history` 增加 task ID；切换、修改或完成 task 都不会改变最近十段上下文。
-
-页面从 `/api/process` 返回的服务端 `recipe_options` 渲染确认按钮。确认请求只提交历史 `segment_id`、菜谱 ID、份数和版本；后端必须从该用户已持久化的 `search_recipes` 工具结果中重新取得完整菜谱，拒绝前端伪造内容。份数优先采用本次输入，其次解析长期画像默认情景，最后回退到一人份；原始食材文本不会自动缩放。
-
-已有活动 task 时可以更新当前菜谱，或选择“作为新 task”原子暂停旧 task。暂停 task 可手动切回，普通话题变化不会自动创建或切换 task。“已烹饪”会完成 task 并开启库存核对，但不直接改库存；全部用完生成现有 `inventory.remove` 提案，仍有剩余则以完整的新 `quantity_text` 生成 `inventory.replace` 提案。不明确时 Agent 在聊天中集中询问，不解析数量或做单位换算。每条提案独立确认，并以 nullable `source_task_id` 关联来源 task。
-
-“清空上下文与 task”是一个用户操作、两个独立领域效果：同一 SQLite 事务推进短期窗口游标，并把活动 task 以 `context_cleared` 原因完成。task 切换不会触发清空，单独完成 task 也不会触发清空；永久历史始终保留。
-
-### 12. 带确认、证据与冲突更新的长期画像
-
-`user_profile.md` 仍是唯一画像状态源。文件前半部分只展示当前生效的厨房情况、饮食偏好、必须要求和默认情景；末尾隐藏的 `kitchen-profile-state:v2` JSON 注释保存 revision、事实来源、提案、最多五个历史 `segment_id` 证据、总结游标和最近 200 条画像审核事件。旧 Markdown 在读取时只做虚拟迁移，不静默改文件；首次实际写入时才生成 v2。
-
-用户明确表达“以后”“永久”或“默认”时，Agent 只能调用 `propose_profile_change` 创建 30 天有效的 pending 提案。`/api/process` 将提案作为结构化 `profile_proposals` 返回，页面在当前回答下方显示“确认写入／拒绝”卡片；对应接口为 `POST /api/profile-proposals/{proposal_id}/confirm` 和 `/reject`。确认、拒绝、过期、过敏原设置和自动推断全部形成审核事件与执行轨迹，确认点击还会写入追加式对话历史。
-
-每累计十段新的、相关且成功完成的历史，结构化总结器读取完整输入输出并把历史当作不可信数据。普通厨房情况、偏好和默认情景可凭至少两个真实证据自动写入；自动更新只能替换旧的 `inferred` 事实。必须要求以及与 `user_confirmed` 事实冲突的候选只生成提案，原确认事实继续生效。每类最多 20 条生效事实，证据最多 5 条，待确认提案 30 天过期，审核记录最多 200 条；完整对话证据不受画像裁剪影响。
-
-所有画像写入复用 `app/audit.py` 的确定性工具与状态迁移审核。写入前校验 revision、证据格式、状态变化、确认事实优先级、安全类别和对应 passed 审核事件；Markdown 在同目录临时写入、刷新后原子替换。损坏的 v2 状态会阻止写入，不会被默认模板覆盖。Agent Prompt 只接收生效事实的可读投影，不接收待确认、已替代、审计或游标数据。
-
-### 13. 规范化库存回答与实例级工具审核
-
-审核不再尝试用单一正则从任意模型文案中“猜”库存事实。只要 Agent 工具历史包含任一库存读取或提案，程序会丢弃模型撰写的库存／待确认段落，并从结构化结果生成固定 Markdown：
-
-- `list`、`find`、`get` 逐实例展示完整 `instance_id`、原始 `quantity_text`、`stocked_at`、过期时间、来源和最后确认时间；
-- 五类 `propose_*` 固定展示 `status=pending（尚未执行）`、完整 action ID 和持久化 `preview`，不会保留模型声称“已经添加／删除”的文案；
-- 混合库存与菜谱请求会追加 `search_recipes` 结果中的原始标题、完整原料、步骤、来源和经工具审核的 HTTP(S) 来源链接；空结果会明确说明没有匹配菜谱，不会静默消失；
-- 规范化渲染接收 `target_language`：中文使用中文标题和 pending 提示，英语及其他非中文值使用安全的英文回退；模型库存文案仍不会重新进入结果；
-- 页面在 HTML 转义后只把 HTTP(S) Markdown 来源转换为带 `noopener noreferrer` 的真实链接，其他协议保持为不可执行文本；
-- 审核重新计算同一规范输出并要求精确匹配，因此自然语言散文、Markdown 表格、引用块、省略 ID、短 ID 或英文执行声明都不能绕过；
-- 工具参数、结果字段、UTC 时间、完整 ID、提案 operation、参数与预览仍逐项校验；图片置信度与用户确认记录沿用原有约束。
-
-没有库存工具历史时，普通回答仍经过空输出、提示注入式语句和不支持付款／下单声明的正则检查，以及菜谱来源和图片记录审核。菜谱意图出现推荐但没有 `search_recipes` 工具记录时会被标记为工具缺失；菜谱标题或链接超出工具结果时会被标记为结果不一致。库存提案之后的确认／取消接口仍受用户归属、状态转换、允许列表和历史记录约束。
-
-### 14. 有界回答监督与纠错子 Agent
-
-审核失败不再一律立即返回 blocked。确定性 `ResponseSupervisor` 持有请求级重试状态：事实受工具记录支持但表达违规时，无工具的纠错子 Agent 可重写一次；重写仍失败时，主 Agent 在 `answer_rewrite` 模式下无工具重写一次。菜谱缺少工具调用或与工具结果不一致时，纠错子 Agent只生成错误反馈，主 Agent 在 `recipe_recovery` 模式下仅能调用 `search_recipes` 一次。任何路径都不能进行第三次生成、创建重复库存提案或修改既有工具记录。
-
-用户明确输入“取消”“不要了”等表达时走确定性取消响应；确认卡片点击取消仍由 HTTP 状态转换处理，不调用模型。首次 Agent调用无法完成、纠错输出结构无效或最终重试仍不通过时，系统返回固定安全文案。中间草稿和模型推理不写入历史。
-
-### 15. 可视化执行轨迹
-
-`/api/process` 请求以 `stage / name / status / detail / duration_ms` 记录实际执行阶段。轨迹显示 `deterministic_route` 是否命中，以及未决文本的 FastText 调用、`unavailable` 或 `fail-open`；确定性／上下文文本路径没有单独的 classifier-skipped 事件，其绕过行为由 `deterministic_route` 推断，图片请求才显式记录分类器 `skipped`。进入相应链路后，轨迹还包含实例读取、提案创建、外部 API、DeepSeek Agent、正则审核和工具调用审核；触发恢复时额外记录 `response_audit`、`supervisor_classification`、`subagent_rewrite`、`subagent_reaudit`、`main_agent_retry` 和 `final_fallback`。新增日期无法推断时记录安全的 `expiry_inference / degraded / unknown expiry` 事件。
-
-异常轨迹只保存异常类型和安全摘要，避免把密钥或原始服务响应返回浏览器。最终轨迹既随单次响应返回，也随该次完整历史记录写入 SQLite；系统仍没有跨请求统计聚合，也没有 Token、费用或首字延迟指标。
-
-## 关键设计取舍
-
-### 模型负责理解，代码负责约束
-
-模型适合处理“用了一半”这样的上下文、英文 API 词项和候选选择；它不适合猜测哪个同名批次应该被删除，也不应把“半袋”强制转换成小数。实例身份、数量原文、确认状态和提醒模板因此留在确定性代码中。
-
-### 可恢复的确认点
-
-库存提案和图片确认都持久化到 SQLite。服务重启后仍可按 ID 找到记录；库存确认通过原子状态领取避免重复执行。图片确认保存最终结果，但恢复原请求前还没有同等级别的原子领取，并发恢复保护仍可增强。
-
-### 外部服务安全降级
-
-分类器不可用时 fail-open；保质期推断失败时保存 `unknown` 并留下无供应商详情的降级轨迹；Spoonacular 失败时回退 TheMealDB，两者无安全结果时再回退 DeepSeek Web Search；主动建议选择失败时使用固定模板或返回空。降级不会绕过库存确认，也不会把外部异常变成隐式写操作。
+表达层问题可交给无工具的修复子 Agent 重写一次；若问题涉及缺少菜谱工具调用或结果不一致，则要求主 Agent 在受限模式下重试。任何路径都不能进行第三次生成、创建重复库存提案或改变既有工具记录。
 
 ## 验证与指标
 
-### 自动化测试
+项目提供可重复的分层评估，覆盖分类与路由、本地混合检索、确定性审核、修复子 Agent、Cooking Session 和端到端路径。最终证据见 [快速评测报告](evaluation/results/20260812T053146Z-final.md)。
 
-当前完整测试套件为 **447 项通过测试**。全量验证使用：
+### 结果概览
 
-```bash
-pytest -s -q
-```
+| 范围 | 证据类型 | 结果 |
+| --- | --- | --- |
+| 全量自动化测试 | `measured` | **484/484 通过**，耗时 **51.85 秒** |
+| 完整离线评估 | `measured` | 全部评估成功，无 `skipped` 或 `unavailable` |
+| 确定性审核器 | `fault_injection` | **30/30** 风险回答被拦截，**15/15** 合法回答被放行 |
+| 快速评测分类器 | `measured` | 准确率 **96.30%**，食物召回率 **95.71%** |
+| 路由挑战集 | `measured` | 食物误拦率 **21.74%**；作为后续增强重点保留 |
+| 本地混合检索 | `measured` | RRF Recall@10 **93.33%**；总体 Recall 与最佳单路持平 |
+| 双路检索互补性 | `measured` | FTS 贡献 **2** 个独占命中，FAISS 贡献 **1** 个独占命中 |
+| 修复子 Agent | `measured` | **6/6** 有效决策：4 次成功重写，2 次正确要求主 Agent 重试 |
+| 修复子 Agent 成本 | `measured` | 累计实际消耗 **3,658 tokens**，包含首次失败与定向补跑 |
+| Cooking Session | `measured` | 事实保留率由仅依赖历史的 **20%** 提升至结构化状态的 **100%** |
+| 分类拦截成本探针 | `paired_estimate` | 3 个在线样本中，每次拦截平均估算节省 **192.67 tokens** |
+| 端到端路径 | `measured` | **12/12** 路径成功，使用隔离临时数据库且无网络调用 |
 
-pytest 自动化覆盖重点包括：
-
-- 同名实例独立、`quantity_text` 原文保持、完整旧签名破坏性迁移、v2 重启存活，以及类型、空值约束、默认值、主键、附加表约束、版本矛盾、缺失标记、额外／重排／未来 schema 拒绝且数据保留；
-- `stocked_at` 七字段 API、三项索引、稳定排序和显式插入列；
-- 新增保质期的用户值优先、LLM 结构化推断、`unknown` 回退与直接／Agent 安全降级轨迹；
-- 五类库存操作的参数、完整 ID、持久化预览和目标语义，包括无匹配提案前拒绝、旧空／损坏预览迁移失败、确认期二次预览校验、已执行历史保留、重复确认幂等、整项替换、单实例删除、精确名称批量删除和校准执行；
-- 确定性／上下文路由绕过分类器，完整 ID 替换／删除／校准直接创建 pending，未决领域请求进入未改动的 FastText；
-- 共享短前缀歧义、Agent 完整 ID 授权、相对用量整项替换，以及规范化审核拒绝散文、表格、引用、省略 ID、篡改数量和中英文执行声明；
-- 严格 24 小时访问边界、并发抑制、候选优先级、100 字符单句模板和只读副作用检查；
-- 图片格式与置信度、过敏原参数、菜谱主备路由、混合结果的中英文原料／步骤／来源与空结果、用户画像初始化与过敏原读写、十段相关输入／输出上下文、按时间召回、完整交互持久化及主动检查的只读性、HTTP 输入限制、前端静态壳与实例 API 响应、Node 执行的安全 Markdown 链接渲染，以及 Linux 脚本契约。
-- 本地 recommender 的模型 manifest 哈希与身份校验、BGE 查询 instruction、SQLite/FAISS/encoder 启动 fail-closed、构建侧 encoder 身份门禁、canonical 复合食材与复数过滤、Router 共用 helper，以及 `/api/status` 不初始化 Pipeline 的真实状态语义。
-
-当前 pytest 已直接覆盖文本取消、确认区取消、最终审核码、永久追加迁移、同时间稳定顺序、十段相关窗口、时区与半开时间边界、用户隔离、等待确认、恢复请求和应用可控失败的持久化；尚未直接覆盖提案到期或跨用户确认／取消。它会在 Node 中执行独立 Markdown 渲染器并验证 action JSON 和前端静态契约，但仍不会执行整个 `frontend/app.js` 观察真实 DOM。
-
-本轮另用隔离数据库启动 Uvicorn，并以真实 headless Chromium 执行页面脚本。渲染后的 DOM 同时出现 `inventory.add`、`replace`、`remove`、`remove_all`、`confirm` 五类有效预览，包含两个同名实例、两个完整可见 ID、拟新增／拟替换数量、日期来源、上次确认时间和预计删除数量。追加的异常场景通过 API 注入一个空预览：对应卡片呈现 `data-preview-ready=false`，确认按钮同时带 `disabled`、`hidden` 和 `aria-disabled=true`；自动提交的混合结果把审核过的 `https://recipes.example/tomato-soup` 渲染为带 `_blank` 和 `noopener noreferrer` 的真实锚点，并保留英文原料和步骤。页面加载日志只有一次 `POST /api/proactive-check`，`markdown.js`、`app.js` 和自动提交均返回 200，Chromium 输出没有 JavaScript `SyntaxError`、`ReferenceError`、`TypeError` 或 `Uncaught`。这是真实运行烟雾证据，但完整 `frontend/app.js` 场景尚未纳入可重复的 CI 浏览器测试，仍是已知覆盖缺口。
+`fault_injection` 衡量已知风险样本的检出能力，不代表生产事故率；`paired_estimate` 是小样本成本估算，不外推为生产流量结论。检索目标来自本地已收录菜谱，因此更适合验证当前检索链路，而非代表开放域搜索效果。
 
 ### 分类器数据与效果
 
-训练读取逻辑会读取 `classifier/dataset` 目录下所有符合规范的 CSV，支持 UTF-8 逗号分隔和 GBK Tab 分隔；当前合并去重后共 1621 条。部署模型使用训练集和验证集共 1376 条样本重新训练，独立测试集不参与训练或阈值选择。
+分类器训练读取 `classifier/dataset/` 下的规范 CSV，支持 UTF-8 逗号分隔和 GBK Tab 分隔。当前合并去重后共 1,621 条；部署模型使用训练集与验证集共 1,376 条重新训练，独立测试集不参与训练或阈值选择。
 
 | 数据集 | 样本数 | 准确率 | 精确率 | 召回率 | 假阳性率 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | 验证集 | 242 | 100.00% | 100.00% | 100.00% | 0.00% |
 | 独立测试集 | 245 | 93.88% | 84.81% | 95.71% | 6.86% |
 
-| 用途 | 样本数 |
-| --- | ---: |
-| 初始训练集 | 1134 |
-| 验证集 | 242 |
-| 独立测试集 | 245 |
-| 部署模型训练集 | 1376 |
+该表是分类器自身的既有离线评估；上方 96.30% 是快速系统评测中的分类器结果，两者来自不同评估口径。系统通过“确定性路由优先、分类器处理未决请求”的组合降低对单一二分类边界的依赖。
 
-分类器提供保守的领域门禁；阈值在部署模型验证集上按 F1 优先选择，并设置最低置信度 0.1。当前独立测试集准确率约 93.88%、正类召回率约 95.71%、假阳性率约 6.86%，后续仍需继续补充困难负样本和显式不确定路径。新的确定性先行路由并不改变这些离线指标。
+### 复现评估
 
-## 当前能力边界与提升空间
+```bash
+python -m pytest -q -s
+python -m evaluation.run --suite quick --offline
+python -m evaluation.run --suite quick
+```
 
-| 方向 | 已有基础 | 当前边界 |
+离线模式不发送网络请求。在线模式最多运行 3 个 DeepSeek 领域门禁成本探针和 6 个修复子 Agent 样本；Spoonacular 每轮运行最多调用 5 次。评估产物写入 `evaluation/results/`，同时保存逐样本 JSON 和 Markdown 报告。
+
+## 当前边界与演进方向
+
+| 方向 | 当前范围 | 演进方向 |
 | --- | --- | --- |
-| 库存语义 | 实例 ID、同名多实例、原始数量文本、日期来源和最后确认时间 | 没有数量解析、单位换算、合并、部分扣减或数据库库存算术 |
-| 数据迁移 | 按完整有序属性、建表约束和版本状态只破坏性识别已知旧签名；未知／未来／矛盾状态 fail closed | 已知旧聚合库存仍被清空，没有自动转换或恢复工具；旧的非标准 schema 需要人工迁移 |
-| 写入安全 | 五类持久化提案、真实状态预览、旧无效预览失效、确认期复验、完整 ID、用户隔离、原子领取和重复确认幂等 | 提案状态与库存写入之间缺少跨事务崩溃恢复和追加式事件日志 |
-| 主动建议 | 访问节流、候选优先级、受约束模型选择、固定安全模板 | 只在页面访问时检查；没有后台调度、外部通知或任何代执行能力 |
-| 路由 | 确定性／上下文优先，未决请求使用 FastText，分类失败时 fail-open | 规则语言覆盖有限，二分类数据规模与边界精度仍需提升 |
-| 图片确认 | 持久化候选、编辑／放弃、原请求恢复和结果保存 | 恢复执行尚缺原子领取与更完整的并发保护 |
-| 菜谱检索 | 本地 FTS5/FAISS/RRF、manifest 模型身份绑定、fail-closed 启动校验、canonical 过敏原与排除硬过滤、三种排序、外部逐级补齐、跨来源去重和真实结果降级 | 可继续扩充不规则复数、别名和复合食材词表，并引入 bge-reranker、营养求解或多日菜单规划；面向更严格的部署环境，还可扩展独立模型信任锚、FAISS 内容校验和版本化原子切换。饮食类型和制作时间仍只影响语义排序，不做结构化硬保证 |
-| 对话与审计 | 永久追加完整历史、十段相关输入／输出窗口、时间范围召回、实例工具记录和关键事实一致性审核 | 没有关键词／语义检索、历史压缩或用户可操作的删除策略；审核不覆盖任意自然语言事实 |
-
-此外，当前仍没有多活动 task、自动话题切换、食材／营养标准化 API、菜谱原料自动缩放、数量扣减或单位换算、通用网页搜索，展示接口也没有账户登录与多租户鉴权。
+| 数量语义 | 保存原始文本，整项替换，不做库存算术 | 引入可追溯的单位标准化、部分扣减与换算确认 |
+| 写入一致性 | 提案原子领取，执行幂等 | 增加提案状态与库存写入之间的跨事务恢复协议 |
+| 路由 | 确定性规则结合 FastText 门禁 | 扩充挑战样本，降低食品请求误拦率并增加显式不确定路径 |
+| 图片恢复 | 持久化候选、人工修改与原请求恢复 | 增加恢复执行的原子领取与并发保护 |
+| 菜谱知识 | 复合食材和过敏原硬过滤 | 扩充别名与衍生物知识，引入 reranker、营养约束和菜单规划 |
+| 对话历史 | 追加保存、十段上下文、时间召回 | 增加关键词或语义检索、历史压缩和用户可控删除策略 |
+| 主动能力 | 页面访问触发的只读建议 | 在保持确认边界的前提下扩展调度与通知渠道 |
+| 产品化 | 固定 showcase 用户 | 增加账户体系、身份认证和多租户隔离 |
 
 ## 项目结构
 
 ```text
 app/
-├── actions.py                # 实例变更提案、确认状态与允许列表执行
-├── adapters/
-│   ├── recipe_api.py         # Spoonacular / TheMealDB / DeepSeek Web Search 适配器
-│   └── vision_api.py         # 百度果蔬识别适配器
-├── agent.py                  # LangChain Agent 与 10 个工具
-├── audit.py                  # 正则与实例级工具调用审核
-├── config.py                 # 环境变量配置
-├── context.py                # Agent 上下文和响应模型
-├── expiry.py                 # 结构化保质期推断
-├── intent.py                 # 确定性／上下文路由与意图匹配
-├── memory.py                 # 用户画像、追加式对话历史与时间召回
+├── actions.py                # 库存提案、状态转换与允许列表执行
+├── adapters/                 # 菜谱、Web Search 与图片识别适配器
+├── agent.py                  # LangChain Agent 与受约束工具
+├── audit.py                  # 回答与工具结果审核
+├── intent.py                 # 确定性路由与意图匹配
+├── memory.py                 # 用户画像、追加式历史与时间召回
 ├── pipeline.py               # 顶层请求编排
-├── proactive.py              # 访问节流、候选选择与固定提醒模板
-├── prompts.py                # Agent 实例语义约束
-├── supervisor.py             # 有界审核修复、主 Agent 重试与固定兜底
-├── tasks.py                  # 单一活动烹饪 task、菜谱证据与状态转换
-├── tools/
-│   ├── inventory.py          # SQLite 实例库存仓库
-│   └── recipe.py             # 菜谱主备路由与过滤
-├── templates/user_profile.md # 基础用户画像模板
+├── proactive.py              # 访问节流与主动建议
+├── supervisor.py             # 有界修复、重试与安全兜底
+├── tasks.py                  # Cooking Session 状态管理
+├── tools/                    # 库存仓库与菜谱路由
 ├── trace.py                  # 请求级执行轨迹
-├── vision.py                 # 图片校验和置信度分层
-├── vision_confirmations.py   # 图片确认持久化
+├── vision.py                 # 图片校验与置信度分层
 └── web.py                    # FastAPI 接口
 
-classifier/                   # 未改动的 FastText 数据、训练、评估与运行时
-recommender/                  # 本地菜谱构建、只读 SQLite/FTS5、FAISS 与 RRF 检索
-frontend/                     # 页面、task 挂件、实例库存、主动便笺和执行轨迹
-scripts/                      # Linux Bash 启停脚本
+classifier/                   # FastText 数据、训练、评估与运行时
+recommender/                  # SQLite/FTS5、FAISS 与 RRF 检索
+evaluation/                   # 可重复的分层系统评估
+frontend/                     # 展示页、库存、task 与执行轨迹
 tests/                        # pytest 自动化测试
 main.py                       # CLI 入口
 ```
 
-## 使用的数据集与模型
+## 数据集与模型
 
-以下三个开源项目用于分类器数据构建与本地菜谱检索，来源、固定版本和许可信息如下。
-
-| 类型 | 项目 | 用途 | 固定版本 / 本地路径 | 许可 |
+| 类型 | 项目 | 用途 | 固定版本 | 许可 |
 | --- | --- | --- | --- | --- |
-| 数据集 | [MASSIVE](https://huggingface.co/datasets/AmazonScience/massive) | 分类器中文领域外文本来源，本地保留 `zh-CN` 的 train/validation/test 分区 | Hugging Face `AmazonScience/massive`；`classifier/dataset/massive/` | CC BY 4.0 |
-| 数据集 | [josephrmartinez/recipe-dataset](https://github.com/josephrmartinez/recipe-dataset) | 本地菜谱检索输入，使用完整 `13k-recipes.csv` 构建 SQLite/FTS5 与 FAISS | commit `c5a1e8dab69d46841d914be1f20cca6fbe4b6260`；`recommender/dataset/` | CC BY-SA 3.0 |
-| 模型 | [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) | 菜谱查询与文档 embedding，输出 384 维向量 | revision `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`；`recommender/model/` | MIT |
+| 数据集 | [MASSIVE](https://huggingface.co/datasets/AmazonScience/massive) | 分类器中文领域外文本 | `AmazonScience/massive`，本地保留 `zh-CN` 分区 | CC BY 4.0 |
+| 数据集 | [recipe-dataset](https://github.com/josephrmartinez/recipe-dataset) | 本地菜谱检索语料 | commit `c5a1e8dab69d46841d914be1f20cca6fbe4b6260` | CC BY-SA 3.0 |
+| 模型 | [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) | 384 维菜谱 embedding | revision `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a` | MIT |
 
-## 环境要求与安装
+## 安装与运行
 
-项目使用 `enum.StrEnum`，需要 **Python 3.11 或更高版本**。
+项目需要 Python 3.11 或更高版本。
 
 ```bash
 python3.13 -m venv .venv
@@ -419,56 +194,13 @@ python3.13 -m venv .venv
 cp .env.example .env
 ```
 
-## 配置
-
-### Agent 与外部服务
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `DEEPSEEK_API_KEY` | 空 | Agent、保质期推断、主动候选选择与最终菜谱 Web Search 兜底所需 |
-| `DEEPSEEK_MODEL` | `deepseek-v4-flash` | OpenAI 兼容模型名称 |
-| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | 模型 API 地址 |
-| `DEEPSEEK_MAX_OUTPUT_TOKENS` | `800` | 单次模型最大输出 Token |
-| `DEEPSEEK_MAX_INPUT_CHARS` | `60000` | Agent 与主动选择负载的字符上限 |
-| `AGENT_RECURSION_LIMIT` | `10` | LangChain Agent 递归上限 |
-| `BAIDU_IMAGE_API_KEY` | 空 | 图片食材识别所需 |
-| `BAIDU_IMAGE_SECRET_KEY` | 空 | 图片食材识别所需 |
-| `BAIDU_IMAGE_ENDPOINT` | 百度果蔬识别接口 | 图片识别地址 |
-| `SPOONACULAR_API_KEY` | 空 | 可选主菜谱源；未配置时使用 TheMealDB |
-| `SPOONACULAR_BASE_URL` | `https://api.spoonacular.com` | Spoonacular API 地址 |
-| `THEMEALDB_API_KEY` | `1` | TheMealDB API 路径密钥 |
-| `THEMEALDB_BASE_URL` | `https://www.themealdb.com/api/json/v1` | TheMealDB API 地址 |
-| `HTTP_TIMEOUT_SECONDS` | `20` | 外部 HTTP 与模型请求超时 |
-| `APP_TIMEZONE` | `Asia/Shanghai` | 解释相对历史时间时使用的 IANA 时区；历史仍统一保存为 UTC |
-
-### 本地状态与分类器
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `INVENTORY_DB_PATH` | `data/inventory.db` | 实例库存、提案、访问时间、历史和图片确认 SQLite 文件 |
-| `USER_PROFILE_PATH` | `data/user_profile.md` | Markdown 用户画像路径 |
-| `PENDING_ACTION_TTL_MINUTES` | `15` | 库存提案和图片确认有效期 |
-| `FOOD_CLASSIFIER_ENABLED` | `true` | 是否启用领域分类器 |
-| `FOOD_CLASSIFIER_MODEL_PATH` | `classifier/artifacts/food_query.bin` | FastText 模型路径 |
-| `FOOD_CLASSIFIER_METADATA_PATH` | `classifier/artifacts/metadata.json` | 分类阈值和预处理元数据 |
-| `RECOMMENDER_ENABLED` | `true` | 是否尝试加载本地菜谱检索产物；不可用时自动降级到外部 API |
-| `RECOMMENDER_DB_PATH` | `recommender/artifacts/recipes.db` | 本地 SQLite/FTS5 只读路径 |
-| `RECOMMENDER_FAISS_PATH` | `recommender/artifacts/recipes.faiss` | 本地 FAISS 只读路径 |
-| `RECOMMENDER_METADATA_PATH` | `recommender/artifacts/metadata.json` | 本地构建元数据路径 |
-| `RECOMMENDER_MODEL_PATH` | `recommender/model` | 部署前准备的 `BAAI/bge-small-en-v1.5` 本地目录 |
-| `RECOMMENDER_MODEL_REVISION` | `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a` | 固定 embedding 模型 revision |
-
-当用户画像不存在时，应用从受版本控制的 `app/templates/user_profile.md` 创建基础文件，已有画像不会被覆盖。
-
-## 运行方式
-
-### Web 展示页
+启动 Web 展示页：
 
 ```bash
 ./scripts/start.sh
 ```
 
-访问 `http://127.0.0.1:8000`。页面包含文本／图片输入、低置信度确认、实例库存、待确认操作、过敏原设置、主动库存便笺和执行轨迹。停止或指定端口：
+访问 `http://127.0.0.1:8000`；OpenAPI 文档位于 `http://127.0.0.1:8000/docs`。停止服务或指定端口：
 
 ```bash
 ./scripts/stop.sh
@@ -476,7 +208,7 @@ cp .env.example .env
 ./scripts/stop.sh --port 8080
 ```
 
-### CLI
+CLI 示例：
 
 ```bash
 .venv/bin/python main.py \
@@ -485,47 +217,42 @@ cp .env.example .env
   --language zh
 ```
 
-图片请求：
+## 关键配置
 
-```bash
-.venv/bin/python main.py \
-  --text "根据图片里的食材推荐菜谱" \
-  --image "./sample.jpg" \
-  --user-id "demo-user" \
-  --language zh
-```
+| 变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `DEEPSEEK_API_KEY` | 空 | Agent、保质期推断、主动候选选择与 Web Search 兜底 |
+| `DEEPSEEK_MODEL` | `deepseek-v4-flash` | OpenAI 兼容模型名称 |
+| `BAIDU_IMAGE_API_KEY` / `BAIDU_IMAGE_SECRET_KEY` | 空 | 图片食材识别 |
+| `SPOONACULAR_API_KEY` | 空 | 可选主菜谱源 |
+| `INVENTORY_DB_PATH` | `data/inventory.db` | 库存、提案、历史、访问时间与图片确认数据库 |
+| `USER_PROFILE_PATH` | `data/user_profile.md` | 长期用户画像 |
+| `FOOD_CLASSIFIER_MODEL_PATH` | `classifier/artifacts/food_query.bin` | FastText 模型 |
+| `RECOMMENDER_DB_PATH` | `recommender/artifacts/recipes.db` | 本地 SQLite/FTS5 索引 |
+| `RECOMMENDER_FAISS_PATH` | `recommender/artifacts/recipes.faiss` | 本地 FAISS 索引 |
+| `APP_TIMEZONE` | `Asia/Shanghai` | 相对时间解释使用的 IANA 时区 |
 
-CLI 输出完整 JSON。继续图片确认或库存提案时，可使用对应 HTTP 接口或展示页。
+完整配置及默认值见 [.env.example](.env.example)。
 
-## HTTP API
-
-FastAPI OpenAPI 文档位于 `http://127.0.0.1:8000/docs`。
+## 主要 API
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/status` | 查看服务配置状态和输入限制 |
 | `POST` | `/api/process` | 处理文本或图片请求 |
-| `GET` | `/api/tasks` | 获取活动、暂停及待核对 task |
-| `GET` | `/api/tasks/active` | 获取当前活动 task 或 `null` |
-| `POST` | `/api/tasks/recipe` | 从持久化菜谱证据创建或更新活动 task |
-| `POST` | `/api/tasks/recipe-as-new` | 暂停当前 task 并从菜谱证据创建新 task |
-| `POST` | `/api/tasks/{task_id}/activate` | 切换到暂停 task |
-| `PATCH` | `/api/tasks/{task_id}/servings` | 修改活动 task 份数 |
-| `POST` | `/api/tasks/{task_id}/cooked` | 完成 task 并开启库存核对 |
-| `POST` | `/api/tasks/{task_id}/reconciliation/close` | 跳过或关闭库存核对 |
-| `POST` | `/api/context/clear` | 清空短期窗口并结束活动 task |
-| `GET` | `/api/inventory` | 获取全部库存实例快照 |
-| `POST` | `/api/proactive-check` | 记录页面访问，并在符合节流条件时返回只读建议或 `null` |
-| `GET` | `/api/allergens` | 获取过敏原选项和当前设置 |
-| `PUT` | `/api/allergens` | 更新官方和自定义过敏原 |
-| `GET` | `/api/actions` | 获取待确认库存提案及其结构化 `preview` |
+| `GET` | `/api/inventory` | 获取库存实例快照 |
+| `GET` | `/api/actions` | 获取待确认库存提案 |
 | `POST` | `/api/actions/{action_id}/confirm` | 确认并执行库存提案 |
 | `POST` | `/api/actions/{action_id}/cancel` | 取消库存提案 |
-| `POST` | `/api/vision-confirmations/{confirmation_id}/resolve` | 提交图片候选选择并恢复原请求 |
+| `GET` | `/api/tasks` | 获取活动、暂停和待核对 task |
+| `POST` | `/api/tasks/recipe` | 从持久化菜谱证据创建或更新 task |
+| `POST` | `/api/tasks/{task_id}/cooked` | 完成烹饪并开启库存核对 |
+| `POST` | `/api/proactive-check` | 记录访问并返回只读建议或 `null` |
+| `GET` / `PUT` | `/api/allergens` | 获取或更新过敏原设置 |
+| `POST` | `/api/vision-confirmations/{confirmation_id}/resolve` | 确认图片候选并恢复原请求 |
 
-当前展示接口使用固定 showcase 用户，没有账户注册、登录和多租户鉴权。底层提案、历史、访问时间和图片确认仍按 `user_id` 保存或检查。
+当前 Web 展示使用固定 showcase 用户；底层库存提案、历史、任务、访问记录和图片确认均按 `user_id` 保存或校验。
 
-## 分类器训练与评估
+## 分类器训练
 
 训练脚本使用 FastText 0.9.2 CLI；应用内推理使用与 `.bin` 文件兼容的 `fasttext-predict`。
 
