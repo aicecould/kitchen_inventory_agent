@@ -12,7 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from classifier.data import (
-    dataset_sha256,
+    DEFAULT_DATASET_DIR,
+    datasets_sha256,
+    discover_dataset_csvs,
     load_dataset,
     stratified_split,
     write_fasttext_file,
@@ -22,19 +24,23 @@ from classifier.model import positive_scores
 from classifier.preprocessing import PREPROCESSING_VERSION
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_DATASET = (
-    ROOT_DIR / "classifier" / "dataset" / "semantic_food_query_dataset_300.csv"
-)
+DEFAULT_DATASET = DEFAULT_DATASET_DIR
 DEFAULT_ARTIFACTS = ROOT_DIR / "classifier" / "artifacts"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the food query classifier")
-    parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=DEFAULT_DATASET,
+        help="CSV file or directory; directories load all valid CSVs",
+    )
     parser.add_argument("--artifacts", type=Path, default=DEFAULT_ARTIFACTS)
     parser.add_argument("--fasttext-binary", type=Path)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--minimum-recall", type=float, default=0.98)
+    parser.add_argument("--minimum-threshold", type=float, default=0.1)
     return parser.parse_args()
 
 
@@ -62,6 +68,7 @@ def train(
     fasttext_binary: Path,
     seed: int,
     minimum_recall: float,
+    minimum_threshold: float = 0.1,
 ) -> dict[str, object]:
     records = load_dataset(dataset_path)
     split = stratified_split(records, seed=seed)
@@ -69,9 +76,6 @@ def train(
     work_dir = artifacts_dir / "training"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    train_path = work_dir / "threshold_train.txt"
-    write_fasttext_file(split.train, train_path)
-    threshold_model_prefix = work_dir / "threshold_model"
     training_options = [
         "-lr",
         "0.2",
@@ -96,34 +100,6 @@ def train(
         "-verbose",
         "2",
     ]
-    subprocess.run(
-        [
-            str(fasttext_binary),
-            "supervised",
-            "-input",
-            str(train_path),
-            "-output",
-            str(threshold_model_prefix),
-            *training_options,
-        ],
-        check=True,
-        cwd=ROOT_DIR,
-    )
-
-    import fasttext
-
-    threshold_model = fasttext.load_model(
-        str(threshold_model_prefix.with_suffix(".bin"))
-    )
-    validation_labels = [record.label for record in split.validation]
-    validation_scores = positive_scores(
-        threshold_model, [record.text for record in split.validation]
-    )
-    threshold, validation_metrics = choose_threshold(
-        validation_labels,
-        validation_scores,
-        minimum_recall=minimum_recall,
-    )
 
     deployment_train_path = work_dir / "deployment_train.txt"
     write_fasttext_file(
@@ -146,7 +122,20 @@ def train(
     )
 
     model_path = model_prefix.with_suffix(".bin")
+    import fasttext
+
     deployment_model = fasttext.load_model(str(model_path))
+    validation_labels = [record.label for record in split.validation]
+    validation_scores = positive_scores(
+        deployment_model,
+        [record.text for record in split.validation],
+    )
+    threshold, validation_metrics = choose_threshold(
+        validation_labels,
+        validation_scores,
+        minimum_recall=minimum_recall,
+        minimum_threshold=minimum_threshold,
+    )
     test_labels = [record.label for record in split.test]
     test_scores = positive_scores(
         deployment_model,
@@ -159,17 +148,27 @@ def train(
     except ValueError:
         dataset_display_path = str(resolved_dataset)
 
+    dataset_paths = discover_dataset_csvs(dataset_path)
+    dataset_files: list[str] = []
+    for path in dataset_paths:
+        try:
+            dataset_files.append(str(path.relative_to(ROOT_DIR)))
+        except ValueError:
+            dataset_files.append(str(path))
+
     metadata: dict[str, object] = {
         "model_type": "fasttext-supervised",
         "domain": "recipe_and_ingredient_queries",
         "positive_label": "__label__1",
         "threshold": threshold,
         "minimum_validation_recall": minimum_recall,
+        "minimum_threshold": minimum_threshold,
         "preprocessing": "nfkc_lowercase_jieba",
         "preprocessing_version": PREPROCESSING_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "dataset": dataset_display_path,
-        "dataset_sha256": dataset_sha256(dataset_path),
+        "dataset_sha256": datasets_sha256(dataset_paths),
+        "dataset_files": dataset_files,
         "seed": seed,
         "split_counts": {
             "train": len(split.train),
@@ -223,6 +222,7 @@ def main() -> None:
         fasttext_binary=locate_fasttext_binary(args.fasttext_binary),
         seed=args.seed,
         minimum_recall=args.minimum_recall,
+        minimum_threshold=args.minimum_threshold,
     )
     print(json.dumps(metadata, ensure_ascii=False, indent=2))
 

@@ -69,6 +69,22 @@ def test_threshold_selection_prioritizes_requested_recall() -> None:
     assert calculate_metrics(labels, scores, threshold) == metrics
 
 
+def test_threshold_selection_respects_minimum_confidence_floor() -> None:
+    labels = [1, 1, 0, 0]
+    scores = [0.9, 0.7, 0.6, 0.2]
+
+    threshold, metrics = choose_threshold(
+        labels,
+        scores,
+        minimum_recall=0.5,
+        minimum_threshold=0.5,
+    )
+
+    assert threshold == 0.7
+    assert metrics.recall == 1.0
+    assert metrics.false_positive_rate == 0.0
+
+
 def test_runtime_classifier_uses_positive_probability_threshold() -> None:
     model = FakeFastTextModel(0.35)
     classifier = FoodQueryClassifier(model, threshold=0.3)

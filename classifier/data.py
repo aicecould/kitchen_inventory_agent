@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import random
 from dataclasses import dataclass
 from pathlib import Path
 
 from classifier.preprocessing import normalize_text, preprocess_text
+
+DEFAULT_DATASET_DIR = Path(__file__).resolve().parent / "dataset"
+CSV_ENCODINGS = ("utf-8-sig", "gbk", "gb18030")
+CSV_DELIMITERS = ("\t", ",", ";")
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,39 +30,149 @@ class DatasetSplit:
 
 
 def load_dataset(path: Path) -> list[LabeledQuery]:
-    """Load a two-column CSV accepting either `query` or `text`."""
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        headers = set(reader.fieldnames or ())
-        text_column = "query" if "query" in headers else "text" if "text" in headers else None
-        if text_column is None or "label" not in headers:
-            raise ValueError("Dataset must contain query/text and label columns")
+    """Load one CSV, or merge all valid CSVs under a directory."""
+    if path.is_dir():
+        return load_merged_datasets([path])
 
-        unique: dict[str, LabeledQuery] = {}
-        for row_number, row in enumerate(reader, start=2):
-            text = (row.get(text_column) or "").strip()
-            raw_label = (row.get("label") or "").strip()
-            if not text:
-                raise ValueError(f"Dataset row {row_number} has an empty query")
-            if raw_label not in {"0", "1"}:
-                raise ValueError(
-                    f"Dataset row {row_number} has invalid label {raw_label!r}"
-                )
+    records = _load_csv_file(path)
+    _require_both_labels(records)
+    return records
 
-            key = normalize_text(text)
-            label = int(raw_label)
+
+def discover_dataset_csvs(path: Path) -> list[Path]:
+    """Return valid `text/query` + `label` CSV files for a file or directory."""
+    resolved = path.resolve()
+    if resolved.is_file():
+        return [resolved]
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"Dataset path not found: {path}")
+
+    paths = sorted(resolved.rglob("*.csv"))
+    valid = [candidate for candidate in paths if _dataset_headers(candidate)]
+    if not valid:
+        raise ValueError(f"No valid dataset CSVs found in {path}")
+    return valid
+
+
+def load_merged_datasets(paths: list[Path]) -> list[LabeledQuery]:
+    """Load multiple CSVs and reject conflicting labels across files."""
+    if not paths:
+        raise ValueError("At least one dataset path is required")
+
+    resolved_paths: list[Path] = []
+    for path in paths:
+        resolved_paths.extend(discover_dataset_csvs(path))
+    if not resolved_paths:
+        raise ValueError("At least one dataset path is required")
+
+    unique: dict[str, LabeledQuery] = {}
+    for path in resolved_paths:
+        for record in _load_csv_file(path):
+            key = normalize_text(record.text)
             existing = unique.get(key)
-            if existing is not None and existing.label != label:
+            if existing is not None and existing.label != record.label:
                 raise ValueError(
-                    f"Dataset contains conflicting labels for query {text!r}"
+                    f"Datasets contain conflicting labels for query {record.text!r}"
                 )
-            unique.setdefault(key, LabeledQuery(text=text, label=label))
+            unique.setdefault(key, record)
 
     records = list(unique.values())
+    _require_both_labels(records)
+    return records
+
+
+def load_dataset_with_optional_extra(
+    primary: Path,
+    extra: Path | None = None,
+) -> list[LabeledQuery]:
+    """Load primary and optional extra file/directory when the extra path exists."""
+    paths = [primary]
+    if extra is not None and extra.exists():
+        paths.append(extra)
+    return load_merged_datasets(paths)
+
+
+def datasets_sha256(paths: list[Path]) -> str:
+    """Hash resolved dataset file paths and their contents."""
+    digest = hashlib.sha256()
+    for path in sorted(path.resolve() for path in paths):
+        digest.update(str(path).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(dataset_sha256(path).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _dataset_headers(path: Path) -> set[str] | None:
+    try:
+        _, headers, _ = _read_csv_table(path)
+    except (ValueError, csv.Error):
+        return None
+    if ("query" in headers or "text" in headers) and "label" in headers:
+        return headers
+    return None
+
+
+def _load_csv_file(path: Path) -> list[LabeledQuery]:
+    text, headers, delimiter = _read_csv_table(path)
+    if not _dataset_headers(path):
+        raise ValueError(f"Dataset must contain query/text and label columns: {path}")
+
+    text_column = "query" if "query" in headers else "text"
+    unique: dict[str, LabeledQuery] = {}
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+    for row_number, row in enumerate(reader, start=2):
+        text_value = (row.get(text_column) or "").strip()
+        raw_label = (row.get("label") or "").strip()
+        if not text_value:
+            raise ValueError(f"Dataset row {row_number} has an empty query")
+        if raw_label not in {"0", "1"}:
+            raise ValueError(
+                f"Dataset row {row_number} has invalid label {raw_label!r}"
+            )
+
+        key = normalize_text(text_value)
+        label = int(raw_label)
+        existing = unique.get(key)
+        if existing is not None and existing.label != label:
+            raise ValueError(
+                f"Dataset contains conflicting labels for query {text_value!r}"
+            )
+        unique.setdefault(key, LabeledQuery(text=text_value, label=label))
+    return list(unique.values())
+
+
+def _read_csv_table(path: Path) -> tuple[str, set[str], str]:
+    text = _decode_csv_text(path)
+    first_line = text.splitlines()[0] if text.splitlines() else ""
+    delimiter = _detect_delimiter(first_line)
+    headers = set(
+        csv.DictReader(io.StringIO(text), delimiter=delimiter).fieldnames or ()
+    )
+    return text, headers, delimiter
+
+
+def _decode_csv_text(path: Path) -> str:
+    data = path.read_bytes()
+    for encoding in CSV_ENCODINGS:
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError(f"Dataset {path} has unsupported encoding")
+
+
+def _detect_delimiter(header: str) -> str:
+    for delimiter in CSV_DELIMITERS:
+        if delimiter in header:
+            return delimiter
+    return ","
+
+
+def _require_both_labels(records: list[LabeledQuery]) -> None:
     labels = {record.label for record in records}
     if labels != {0, 1}:
         raise ValueError("Dataset must contain both label 0 and label 1")
-    return records
 
 
 def stratified_split(

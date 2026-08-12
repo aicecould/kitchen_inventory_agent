@@ -7,7 +7,12 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from classifier.data import LabeledQuery, load_dataset, stratified_split
+from classifier.data import (
+    DEFAULT_DATASET_DIR,
+    LabeledQuery,
+    load_dataset,
+    stratified_split,
+)
 from classifier.model import FoodQueryClassifier, positive_scores
 
 
@@ -67,22 +72,38 @@ def choose_threshold(
     scores: list[float],
     *,
     minimum_recall: float,
+    minimum_threshold: float = 0.0,
 ) -> tuple[float, BinaryMetrics]:
-    """Choose the highest observed threshold satisfying the recall constraint."""
+    """Choose the best observed threshold satisfying recall and confidence floors."""
     if not 0 < minimum_recall <= 1:
         raise ValueError("minimum_recall must be in (0, 1]")
+    if not 0 <= minimum_threshold <= 1:
+        raise ValueError("minimum_threshold must be in [0, 1]")
     if 1 not in labels:
         raise ValueError("Threshold selection requires positive examples")
 
-    candidates = sorted({0.0, *scores}, reverse=True)
+    candidates = sorted({0.0, *scores, minimum_threshold}, reverse=True)
     feasible: list[tuple[float, BinaryMetrics]] = []
     for threshold in candidates:
+        if threshold < minimum_threshold:
+            continue
         metrics = calculate_metrics(labels, scores, threshold)
         if metrics.recall >= minimum_recall:
             feasible.append((threshold, metrics))
     if not feasible:
         raise ValueError("No threshold satisfies the requested recall")
-    return max(feasible, key=lambda item: item[0])
+    return max(
+        feasible,
+        key=lambda item: (_f1(item[1]), -item[0]),
+    )
+
+
+def _f1(metrics: BinaryMetrics) -> float:
+    if metrics.precision + metrics.recall == 0:
+        return 0.0
+    return 2 * metrics.precision * metrics.recall / (
+        metrics.precision + metrics.recall
+    )
 
 
 def evaluate_records(
@@ -97,7 +118,12 @@ def evaluate_records(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate the food query classifier")
-    parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=DEFAULT_DATASET_DIR,
+        help="CSV file or directory; directories load all valid CSVs",
+    )
     parser.add_argument(
         "--model",
         type=Path,

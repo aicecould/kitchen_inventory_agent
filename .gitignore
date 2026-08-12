@@ -8,9 +8,11 @@ __pycache__/
 .worktrees/
 data/
 docs/
-classifier/artifacts/*.vec
-classifier/artifacts/training/
-classifier/dataset/massive/
+classifier/artifacts/*
+!classifier/artifacts/food_query.bin
+!classifier/artifacts/metadata.json
+classifier/dataset/*
+!classifier/dataset/semantic_food_query_dataset_300.csv
 recommender/artifacts/
 recommender/dataset/
 recommender/model/*
