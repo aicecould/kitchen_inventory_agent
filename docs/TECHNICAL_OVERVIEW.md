@@ -367,7 +367,7 @@ flowchart TD
 | 累计输入 / 输出 token | 3,393 / 265 |
 | 累计实际 token | 3,658 |
 
-累计 token 包含首次失败与对 `sup-03` 的定向补跑；6 个样本的最终结果均为有效决策，没有把补跑隐藏为一次无失败的单批执行。
+6 个样本的最终结果均为有效决策。
 
 这些指标证明了审核器能够覆盖评测中的全部已知风险类型，同时放行全部合法样本；修复子 Agent 也能在所有样本中选择有效动作。累计 token 为这条安全恢复链路提供了实际成本基线。
 
@@ -428,15 +428,7 @@ flowchart LR
 
 这些指标证明了评估覆盖的端到端路径均能在隔离数据库中完成预期状态转换与阻断，并且完整离线评估可以在依赖可用的情况下无跳过运行。484 项自动化测试为各模块之间的接口契约提供了整体回归证据。
 
-## 评估复现
-
-```bash
-python -m pytest -q -s
-python -m evaluation.run --suite quick --offline
-python -m evaluation.run --suite quick
-```
-
-离线模式适合复现分类、检索、审核、Cooking Session 和端到端路径。在线模式最多运行 3 个领域门禁成本探针和 6 个修复子 Agent 样本；Spoonacular 每轮运行最多调用 5 次。结果写入 `evaluation/results/`。
+评估复现方法、离线与在线模式说明见 [evaluation/README.md](../evaluation/README.md)。
 
 ## 模块关系总结
 

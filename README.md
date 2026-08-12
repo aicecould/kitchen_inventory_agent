@@ -1,6 +1,6 @@
 # Kitchen Inventory Agent
 
-Kitchen Inventory Agent 是一个面向家庭厨房场景的可审计 Agent。它处理同名食材的不同批次、无法安全换算的自然语言数量、需要用户确认的库存变更、受过敏原约束的菜谱检索，以及烹饪前后持续变化的上下文。
+Kitchen Inventory Agent 是一个面向家庭厨房场景的可审计 Agent。它处理同名食材的不同批次、难以准确换算的自然语言数量、需要用户确认的库存变更、受过敏原约束的菜谱检索，以及烹饪前后持续变化的上下文。
 
 系统将语言模型用于意图理解、候选选择和受约束的工具调用，将实例身份、原始数量、状态转换、确认执行与事实审核交给确定性代码。任何库存写操作都先生成持久化提案，用户确认后才会执行；主动建议只读，不会代替用户修改库存。
 
@@ -126,17 +126,9 @@ inventory.confirm
 | 验证集 | 242 | 100.00% | 100.00% | 100.00% | 0.00% |
 | 独立测试集 | 245 | 93.88% | 84.81% | 95.71% | 6.86% |
 
-该表是分类器自身的既有离线评估；上方 96.30% 是快速系统评测中的分类器结果，两者来自不同评估口径。系统通过“确定性路由优先、分类器处理未决请求”的组合降低对单一二分类边界的依赖。
+该表是分类器自身的既有离线评估。系统通过“确定性路由优先、分类器处理未决请求”的组合降低对单一二分类边界的依赖。
 
-### 复现评估
-
-```bash
-python -m pytest -q -s
-python -m evaluation.run --suite quick --offline
-python -m evaluation.run --suite quick
-```
-
-离线模式不发送网络请求。在线模式最多运行 3 个 DeepSeek 领域门禁成本探针和 6 个修复子 Agent 样本；Spoonacular 每轮运行最多调用 5 次。评估产物写入 `evaluation/results/`，同时保存逐样本 JSON 和 Markdown 报告。
+评估复现方法、离线与在线模式说明见 [evaluation/README.md](evaluation/README.md)。
 
 ## 当前边界与演进方向
 
@@ -170,8 +162,8 @@ app/
 ├── vision.py                 # 图片校验与置信度分层
 └── web.py                    # FastAPI 接口
 
-classifier/                   # FastText 数据、训练、评估与运行时，[README.md](classifier/README.md)
-recommender/                  # SQLite/FTS5、FAISS 与 RRF 检索，[README.md](recommender/README.md)
+classifier/                   # FastText 数据、训练、评估与运行时
+recommender/                  # SQLite/FTS5、FAISS 与 RRF 检索
 evaluation/                   # 可重复的分层系统评估
 frontend/                     # 展示页、库存、task 与执行轨迹
 tests/                        # pytest 自动化测试
@@ -188,7 +180,7 @@ main.py                       # CLI 入口
 
 ## 安装与运行
 
-项目需要 Python 3.11 或更高版本。
+项目推荐使用 Python 3.13 或更高版本。
 
 ```bash
 python3.13 -m venv .venv
@@ -218,6 +210,11 @@ CLI 示例：
   --user-id "demo-user" \
   --language zh
 ```
+
+模型训练与使用见：
+
+- [classifier/README.md](classifier/README.md)
+- [recommender/README.md](recommender/README.md)
 
 ## 关键配置
 
@@ -253,14 +250,3 @@ CLI 示例：
 | `POST` | `/api/vision-confirmations/{confirmation_id}/resolve` | 确认图片候选并恢复原请求 |
 
 当前 Web 展示使用固定 showcase 用户；底层库存提案、历史、任务、访问记录和图片确认均按 `user_id` 保存或校验。
-
-## 分类器训练
-
-训练脚本使用 FastText 0.9.2 CLI；应用内推理使用与 `.bin` 文件兼容的 `fasttext-predict`。
-
-```bash
-./classifier/build_fasttext.sh
-.venv/bin/python -m classifier.train
-.venv/bin/python -m classifier.evaluate \
-  --dataset classifier/dataset/semantic_food_query_dataset_300.csv
-```
