@@ -14,17 +14,19 @@ class FakeChatOpenAI:
     def __init__(self, **kwargs: object) -> None:
         self.kwargs = kwargs
         self.schema: type[ExpiryPrediction] | None = None
+        self.structured_method: str | None = None
         self.prompt: str | None = None
         self.instances.append(self)
 
     def with_structured_output(
-        self, schema: type[ExpiryPrediction]
+        self, schema: type[ExpiryPrediction], *, method: str
     ) -> "FakeChatOpenAI":
         self.schema = schema
+        self.structured_method = method
         return self
 
-    def invoke(self, prompt: str) -> ExpiryPrediction:
-        self.prompt = prompt
+    def invoke(self, messages: object, config: object = None) -> object:
+        self.prompt = str(messages)
         return self.response
 
 
@@ -55,6 +57,7 @@ def test_infer_returns_future_aware_structured_expiry(
     assert result == datetime(2026, 8, 12, 9, tzinfo=UTC)
     model = FakeChatOpenAI.instances[0]
     assert model.schema is ExpiryPrediction
+    assert model.structured_method == "json_mode"
     assert model.kwargs == {
         "api_key": "test-key",
         "base_url": "https://deepseek.invalid",

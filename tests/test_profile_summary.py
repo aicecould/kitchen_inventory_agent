@@ -18,12 +18,16 @@ class FakeStructuredModel:
         self.result = result
         self.calls = 0
         self.messages: list[object] = []
+        self.structured_method: str | None = None
 
-    def with_structured_output(self, schema: object) -> "FakeStructuredModel":
+    def with_structured_output(
+        self, schema: object, *, method: str
+    ) -> "FakeStructuredModel":
         assert schema is ProfileSummaryBatch
+        self.structured_method = method
         return self
 
-    def invoke(self, messages: object) -> ProfileSummaryBatch:
+    def invoke(self, messages: object, config: object = None) -> object:
         self.calls += 1
         self.messages.append(messages)
         if isinstance(self.result, Exception):

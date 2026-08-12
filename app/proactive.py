@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from app.config import Settings
 from app.context import HistoryExcerpt
+from app.structured_output import invoke_validated_json
 
 if TYPE_CHECKING:
     from app.pipeline import KitchenPipeline
@@ -124,10 +125,11 @@ class ReminderGenerator:
                     "没有值得提醒的内容时，两个字段都返回null。\n"
                     f"数据：{payload}"
                 )
-                raw_response = self.model.with_structured_output(
-                    ReminderResponse
-                ).invoke(prompt)
-                response = ReminderResponse.model_validate(raw_response)
+                response = invoke_validated_json(
+                    self.model,
+                    ReminderResponse,
+                    prompt,
+                )
                 selection = _validated_model_selection(
                     response, highest_priority, inventory
                 )

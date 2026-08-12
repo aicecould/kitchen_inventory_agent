@@ -42,6 +42,7 @@ REPAIR_SYSTEM_PROMPT = """
 如果菜谱错误、菜谱或链接不在工具结果中、或者缺少 search_recipes 调用，返回 retry_main，
 只提供简短错误反馈，不自行补写菜谱事实。任务无法完成时返回 fallback。
 严格按结构化输出模型返回，不输出额外文本。
+rewrite 示例：{"action":"rewrite","content":"安全的重写回答","feedback":null,"reason_code":"repairable_output_violation"}
 """.strip()
 
 

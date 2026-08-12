@@ -9,6 +9,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
 from app.config import Settings
+from app.structured_output import invoke_validated_json
 
 
 class ExpiryPrediction(BaseModel):
@@ -41,7 +42,11 @@ class DeepSeekExpiryInferer:
             f"食物名称：{name}\n"
             f"当前 UTC 时间：{utc_now.isoformat()}"
         )
-        prediction = self.model.with_structured_output(ExpiryPrediction).invoke(prompt)
+        prediction = invoke_validated_json(
+            self.model,
+            ExpiryPrediction,
+            prompt,
+        )
         expires_at = prediction.expires_at
         if (
             expires_at is None

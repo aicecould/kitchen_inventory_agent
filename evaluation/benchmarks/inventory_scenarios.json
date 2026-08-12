@@ -1,0 +1,12 @@
+[
+  {"id":"inv-ret-01","ingredients":["chicken","rice","lemon"],"exclude_ingredients":[],"blocked_ingredients":[]},
+  {"id":"inv-ret-02","ingredients":["egg","potato","rosemary"],"exclude_ingredients":[],"blocked_ingredients":[]},
+  {"id":"inv-ret-03","ingredients":["tomato","onion","garlic"],"exclude_ingredients":[],"blocked_ingredients":[]},
+  {"id":"inv-ret-04","ingredients":["pumpkin","coconut milk","ginger"],"exclude_ingredients":[],"blocked_ingredients":[]},
+  {"id":"inv-ret-05","ingredients":["chickpeas","kale","carrot"],"exclude_ingredients":["honey"],"blocked_ingredients":["honey"]},
+  {"id":"inv-ret-06","ingredients":["salmon","yogurt","lime"],"exclude_ingredients":["peanut"],"blocked_ingredients":["peanut"]},
+  {"id":"inv-ret-07","ingredients":["black beans","corn tortillas","avocado"],"exclude_ingredients":["shrimp"],"blocked_ingredients":["shrimp"]},
+  {"id":"inv-ret-08","ingredients":["paneer","tomato","rice"],"exclude_ingredients":["cashew"],"blocked_ingredients":["cashew"]},
+  {"id":"inv-ret-09","ingredients":["lentils"],"exclude_ingredients":[],"blocked_ingredients":["egg"]},
+  {"id":"inv-ret-10","ingredients":["tofu","mushroom","noodles"],"exclude_ingredients":["pork"],"blocked_ingredients":["pork"]}
+]

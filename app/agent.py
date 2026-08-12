@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from time import perf_counter
 from typing import Any, Literal
@@ -50,6 +50,7 @@ from app.supervisor import (
     SupervisorRequest,
     fixed_response,
 )
+from app.structured_output import invoke_validated_json
 from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
 from app.trace import TraceRecorder, elapsed_ms
@@ -95,6 +96,7 @@ class KitchenAgent:
     application_timezone: str = "Asia/Shanghai"
     recursion_limit: int = 10
     max_input_chars: int = 60000
+    model_callbacks: list[Any] = field(default_factory=list)
     repair_decider: (
         Callable[[SupervisorRequest, AuditResult], RepairDecision] | None
     ) = None
@@ -121,9 +123,14 @@ class KitchenAgent:
         )
         started = perf_counter()
         try:
+            invoke_config: dict[str, object] = {
+                "recursion_limit": self.recursion_limit
+            }
+            if self.model_callbacks:
+                invoke_config["callbacks"] = self.model_callbacks
             response = agent.invoke(
                 {"messages": [{"role": "user", "content": user_message}]},
-                config={"recursion_limit": self.recursion_limit},
+                config=invoke_config,
             )
         except Exception as exc:
             trace.record(
@@ -244,7 +251,6 @@ class KitchenAgent:
     def _run_repair_subagent(
         self, request: SupervisorRequest, audit: AuditResult
     ) -> RepairDecision:
-        structured_model = self.model.with_structured_output(RepairDecision)
         payload = {
             "request": request.model_dump(mode="json"),
             "audit": {
@@ -252,18 +258,18 @@ class KitchenAgent:
                 "reason": audit.reason,
             },
         }
-        result = structured_model.invoke(
+        return invoke_validated_json(
+            self.model,
+            RepairDecision,
             [
                 {"role": "system", "content": REPAIR_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": json.dumps(payload, ensure_ascii=False, default=str),
                 },
-            ]
+            ],
+            callbacks=self.model_callbacks,
         )
-        if isinstance(result, RepairDecision):
-            return result
-        return RepairDecision.model_validate(result)
 
     def _run_main_retry(
         self,
@@ -287,7 +293,12 @@ class KitchenAgent:
                 [
                     {"role": "system", "content": ANSWER_REWRITE_SYSTEM_PROMPT},
                     {"role": "user", "content": user_message},
-                ]
+                ],
+                config=(
+                    {"callbacks": self.model_callbacks}
+                    if self.model_callbacks
+                    else None
+                ),
             )
             content = self._last_text([response])
             history = immutable_history
@@ -302,9 +313,12 @@ class KitchenAgent:
                 tools=tools,
                 system_prompt=RECIPE_RECOVERY_SYSTEM_PROMPT,
             )
+            invoke_config = {"recursion_limit": self.recursion_limit}
+            if self.model_callbacks:
+                invoke_config["callbacks"] = self.model_callbacks
             response = agent.invoke(
                 {"messages": [{"role": "user", "content": user_message}]},
-                config={"recursion_limit": self.recursion_limit},
+                config=invoke_config,
             )
             messages = response.get("messages", [])
             content = self._last_text(messages)
@@ -751,6 +765,7 @@ def build_agent(
     actions: InventoryActionService,
     history: ConversationHistoryRepository,
     profile_actions: ProfileActionService | None = None,
+    model_callbacks: list[Any] | None = None,
 ) -> KitchenAgent:
     settings.require("deepseek_api_key", "deepseek_model", "deepseek_base_url")
     model = ChatOpenAI(
@@ -761,6 +776,7 @@ def build_agent(
         timeout=settings.http_timeout_seconds,
         max_retries=1,
         max_tokens=settings.deepseek_max_output_tokens,
+        extra_body={"thinking": {"type": "disabled"}},
     )
     return KitchenAgent(
         model=model,
@@ -772,6 +788,7 @@ def build_agent(
         application_timezone=settings.application_timezone,
         recursion_limit=settings.agent_recursion_limit,
         max_input_chars=settings.deepseek_max_input_chars,
+        model_callbacks=list(model_callbacks or []),
     )
 
 

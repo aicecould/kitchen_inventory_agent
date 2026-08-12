@@ -27,17 +27,19 @@ class FakeChatOpenAI:
     def __init__(self, **kwargs: object) -> None:
         self.kwargs = kwargs
         self.schema: type[ReminderResponse] | None = None
+        self.structured_method: str | None = None
         self.prompt: str | None = None
         self.instances.append(self)
 
     def with_structured_output(
-        self, schema: type[ReminderResponse]
+        self, schema: type[ReminderResponse], *, method: str
     ) -> "FakeChatOpenAI":
         self.schema = schema
+        self.structured_method = method
         return self
 
-    def invoke(self, prompt: str) -> object:
-        self.prompt = prompt
+    def invoke(self, messages: object, config: object = None) -> object:
+        self.prompt = str(messages)
         if self.failure is not None:
             raise self.failure
         return self.response
