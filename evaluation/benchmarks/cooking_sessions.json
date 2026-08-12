@@ -1,0 +1,8 @@
+[
+  {"id":"cook-01","title":"番茄炒蛋","servings":2,"ingredients":["番茄","鸡蛋","盐"],"status":"active","question":"这道菜是几人份？"},
+  {"id":"cook-02","title":"香煎三文鱼","servings":3,"ingredients":["三文鱼","柠檬","黑胡椒"],"status":"active","question":"刚才的鱼需要哪些原料？"},
+  {"id":"cook-03","title":"南瓜浓汤","servings":4,"ingredients":["南瓜","洋葱","牛奶"],"status":"paused","question":"暂停的是哪道菜？"},
+  {"id":"cook-04","title":"鸡肉烩饭","servings":2,"ingredients":["鸡肉","米饭","高汤"],"status":"active","question":"继续当前烹饪任务。"},
+  {"id":"cook-05","title":"鹰嘴豆沙拉","servings":1,"ingredients":["鹰嘴豆","生菜","番茄"],"status":"active","question":"当前沙拉是一人份吗？"},
+  {"id":"cook-06","title":"牛肉炖土豆","servings":5,"ingredients":["牛肉","土豆","胡萝卜"],"status":"paused","question":"恢复之前的炖菜任务。"}
+]

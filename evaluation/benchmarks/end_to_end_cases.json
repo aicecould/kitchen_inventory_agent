@@ -1,0 +1,14 @@
+[
+  {"id":"e2e-01","text":"你好","expected_route":"irrelevant"},
+  {"id":"e2e-02","text":"查看库存","expected_route":"supported"},
+  {"id":"e2e-03","text":"查看牛奶库存","expected_route":"supported"},
+  {"id":"e2e-04","text":"删除所有牛奶","expected_route":"supported"},
+  {"id":"e2e-05","text":"下一步呢？","expected_route":"contextual"},
+  {"id":"e2e-06","text":"用了一半","expected_route":"contextual"},
+  {"id":"e2e-07","text":"西红柿和鸡蛋能做什么菜？","expected_route":"undecided"},
+  {"id":"e2e-08","text":"鸡胸肉怎么保存？","expected_route":"undecided"},
+  {"id":"e2e-09","text":"上海明天天气怎么样？","expected_route":"undecided"},
+  {"id":"e2e-10","text":"帮我写 Python 排序函数","expected_route":"undecided"},
+  {"id":"e2e-11","text":"取消","expected_route":"supported"},
+  {"id":"e2e-12","text":"确认 inv_0123456789abcdef0123456789abcdef 还在","expected_route":"supported"}
+]

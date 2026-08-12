@@ -15,6 +15,7 @@ from app.profile_actions import (
     ProfileChangeRequest,
 )
 from app.prompts import PROFILE_SUMMARY_SYSTEM_PROMPT
+from app.structured_output import invoke_validated_json
 
 
 class ProfileSummaryCandidate(BaseModel):
@@ -84,8 +85,9 @@ class ProfileSummarizer:
             }
             for record in records
         ]
-        structured = self.model.with_structured_output(ProfileSummaryBatch)
-        result = structured.invoke(
+        return invoke_validated_json(
+            self.model,
+            ProfileSummaryBatch,
             [
                 {"role": "system", "content": PROFILE_SUMMARY_SYSTEM_PROMPT},
                 {
@@ -94,6 +96,3 @@ class ProfileSummarizer:
                 },
             ]
         )
-        if isinstance(result, ProfileSummaryBatch):
-            return result
-        return ProfileSummaryBatch.model_validate(result)
