@@ -7,7 +7,7 @@ __pycache__/
 .run/
 .worktrees/
 data/
-docs/
+docs/superpowers/
 classifier/artifacts/*
 !classifier/artifacts/food_query.bin
 !classifier/artifacts/metadata.json
