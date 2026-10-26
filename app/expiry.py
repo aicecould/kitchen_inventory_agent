@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.llm_log import model_callbacks
 from app.config import Settings
+from app.llm import chat_model_kwargs
 from app.structured_output import invoke_validated_json
 
 
@@ -24,15 +25,7 @@ class ExpiryInferer(Protocol):
 class DeepSeekExpiryInferer:
     def __init__(self, settings: Settings) -> None:
         self.logging_callbacks = model_callbacks(settings, "expiry_inference")
-        self.model = ChatOpenAI(
-            api_key=settings.deepseek_api_key,
-            base_url=settings.deepseek_base_url,
-            model=settings.deepseek_model,
-            temperature=0,
-            timeout=settings.http_timeout_seconds,
-            max_retries=1,
-            max_tokens=settings.deepseek_max_output_tokens,
-        )
+        self.model = ChatOpenAI(**chat_model_kwargs(settings))
 
     def infer(self, name: str, now: datetime) -> datetime | None:
         if now.tzinfo is None or now.utcoffset() is None:

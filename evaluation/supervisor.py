@@ -7,6 +7,7 @@ from pathlib import Path
 from time import perf_counter
 
 from langchain_openai import ChatOpenAI
+from app.llm import chat_model_kwargs
 
 from app.audit import AuditCode, review_candidate
 from app.llm_log import model_callbacks
@@ -53,16 +54,7 @@ def run_supervisor_suite(
 
     collector = UsageCollector()
     logging_callbacks = model_callbacks(settings, "supervisor_evaluation")
-    model = ChatOpenAI(
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        model=settings.deepseek_model,
-        temperature=0,
-        timeout=settings.http_timeout_seconds,
-        max_retries=1,
-        max_tokens=settings.deepseek_max_output_tokens,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
+    model = ChatOpenAI(**chat_model_kwargs(settings, disable_thinking=True))
     samples: list[SampleResult] = []
     for record in records:
         target_language = str(record.get("target_language", "zh"))
@@ -122,7 +114,7 @@ def run_supervisor_suite(
                     "repair_action": action,
                     "final_passed": final_passed,
                 },
-                call_counts={"deepseek": collector.call_count - before_calls},
+                call_counts={settings.llm_provider: collector.call_count - before_calls},
                 error=error,
             )
         )
@@ -141,7 +133,7 @@ def run_supervisor_suite(
                 for s in samples
             ),
             "failed_calls": sum(s.status == "failed" for s in samples),
-            "deepseek_calls": collector.call_count,
+            f"{settings.llm_provider}_calls": collector.call_count,
             "input_tokens": usage.input_tokens if usage else None,
             "output_tokens": usage.output_tokens if usage else None,
             "total_tokens": usage.total_tokens if usage else None,

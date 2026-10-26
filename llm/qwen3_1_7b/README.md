@@ -1,6 +1,6 @@
 # Qwen3-1.7B GPU 推理
 
-本目录独立保存 Qwen3-1.7B 的代码、权重及运行记录。
+本目录独立保存 Qwen3-1.7B 的代码和权重，运行记录放在项目 `.run/`。
 不导入 classifier、recommender 或厨房 Agent，也不改变应用的模型配置。
 仅使用官方现成权重，不训练、不微调、不量化。
 
@@ -69,6 +69,34 @@ curl http://127.0.0.1:8001/v1/chat/completions \
   -d '{"model":"Qwen/Qwen3-1.7B","messages":[{"role":"user","content":"鸡蛋和西红柿可以做什么菜？"}],"max_tokens":128}'
 ```
 
-服务只监听本机，无鉴权，支持文本非流式聊天和模型列表，不支持工具调用或
-完整 OpenAI API。默认关闭思考模式，串行生成，输入加输出上限 4096 token，
-单次输出上限 1024 token。按 Ctrl+C 停止前台服务。
+服务只监听本机，无鉴权，支持文本非流式聊天、工具调用、JSON 对象输出和模型列表，
+不实现完整 OpenAI API。默认关闭思考模式，串行生成，输入加输出上限 32768 token，
+单次输出上限 4096 token。JSON 模式会校验返回对象；无效或不完整的工具调用会报错，
+不会交给 Agent 执行。按 Ctrl+C 停止前台服务。
+
+
+## Agent 配置切换
+
+Agent 通过 HTTP 接口访问模型，不导入本目录的模型运行时代码。
+项目根目录 `.env` 使用 `LLM_PROVIDER` 选择模型；默认仍为 `deepseek`。
+切换到本地 Qwen 时，先保证上面的本地服务正在运行，再设置：
+
+```dotenv
+LLM_PROVIDER=qwen
+QWEN_BASE_URL=http://127.0.0.1:8001/v1
+QWEN_MODEL=Qwen/Qwen3-1.7B
+QWEN_API_KEY=local
+QWEN_TIMEOUT_SECONDS=120
+QWEN_MAX_OUTPUT_TOKENS=800
+QWEN_MAX_INPUT_CHARS=60000
+```
+
+修改后重启 Agent 应用。`QWEN_API_KEY` 是兼容客户端所用的占位值，本地服务不验证它。
+主 Agent、回答修复、画像总结、过期时间推断和提醒均使用选中的模型。
+Qwen 模式无需 DeepSeek 密钥，不启用 DeepSeek 网络搜索，也不在本地服务失败时
+自动回退到远程模型。Agent 的原有工具审核与待确认写入规则保持生效。
+本地模型的指令遵循、工具选择和回答质量仍需按实际业务评估。
+
+切回远程模型时设置 `LLM_PROVIDER=deepseek`，并使用原有的 `DEEPSEEK_*` 配置。
+`/api/status` 的 `llm_provider` 和 `llm_model` 显示当前选择；本地模型进程是否已就绪
+由 `http://127.0.0.1:8001/health` 检查。

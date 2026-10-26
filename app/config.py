@@ -46,6 +46,35 @@ class Settings:
     llm_log_source: str = "application"
     llm_logging_enabled: bool = True
     llm_log_db_path: Path = Path("data/llm_logs.db")
+    llm_provider: str = "deepseek"
+    qwen_base_url: str = "http://127.0.0.1:8001/v1"
+    qwen_model: str = "Qwen/Qwen3-1.7B"
+    qwen_api_key: str = "local"
+    qwen_timeout_seconds: float = 120
+    qwen_max_output_tokens: int = 800
+    qwen_max_input_chars: int = 60000
+
+    def __post_init__(self) -> None:
+        if self.llm_provider not in {"deepseek", "qwen"}:
+            raise ValueError("LLM_PROVIDER must be deepseek or qwen")
+
+    @property
+    def llm_enabled(self) -> bool:
+        if self.llm_provider == "qwen":
+            return bool(self.qwen_base_url.strip() and self.qwen_model.strip())
+        return bool(self.deepseek_api_key.strip())
+
+    @property
+    def llm_model(self) -> str:
+        return self.qwen_model if self.llm_provider == "qwen" else self.deepseek_model
+
+    @property
+    def llm_base_url(self) -> str:
+        return self.qwen_base_url if self.llm_provider == "qwen" else self.deepseek_base_url
+
+    @property
+    def llm_max_input_chars(self) -> int:
+        return self.qwen_max_input_chars if self.llm_provider == "qwen" else self.deepseek_max_input_chars
 
     def require(self, *names: str) -> None:
         missing = [name for name in names if not str(getattr(self, name, "")).strip()]
@@ -56,6 +85,13 @@ class Settings:
 
 def get_settings() -> Settings:
     return Settings(
+        llm_provider=os.getenv("LLM_PROVIDER", "deepseek").strip().lower(),
+        qwen_base_url=os.getenv("QWEN_BASE_URL", "http://127.0.0.1:8001/v1"),
+        qwen_model=os.getenv("QWEN_MODEL", "Qwen/Qwen3-1.7B"),
+        qwen_api_key=os.getenv("QWEN_API_KEY", "local"),
+        qwen_timeout_seconds=float(os.getenv("QWEN_TIMEOUT_SECONDS", "120")),
+        qwen_max_output_tokens=int(os.getenv("QWEN_MAX_OUTPUT_TOKENS", "800")),
+        qwen_max_input_chars=int(os.getenv("QWEN_MAX_INPUT_CHARS", "60000")),
         llm_log_source=os.getenv("LLM_LOG_SOURCE", "application"),
         llm_logging_enabled=_env_bool("LLM_LOGGING_ENABLED", True),
         llm_log_db_path=Path(os.getenv("LLM_LOG_DB_PATH", "data/llm_logs.db")),

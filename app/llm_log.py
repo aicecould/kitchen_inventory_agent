@@ -64,7 +64,7 @@ def runtime_metadata() -> dict[str, Any]:
     """Identify the running source, including local edits, without invoking Git."""
     root = Path(__file__).resolve().parent.parent
     files = {}
-    for folder in ("app", "classifier", "recommender", "evaluation"):
+    for folder in ("app", "classifier", "recommender", "llm", "evaluation"):
         for path in sorted((root / folder).rglob("*.py")):
             files[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
     packages = {}
@@ -91,7 +91,7 @@ def settings_metadata(settings: Any) -> dict[str, Any]:
     names = ("application_timezone", "http_timeout_seconds", "agent_recursion_limit",
              "deepseek_model", "deepseek_max_output_tokens", "deepseek_max_input_chars",
              "pending_action_ttl_minutes", "food_classifier_enabled", "recommender_enabled",
-             "recommender_model_revision")
+             "recommender_model_revision", "llm_provider", "llm_model")
     config = {name: getattr(settings, name) for name in names}
     artifacts = {}
     for name in ("food_classifier_model_path", "food_classifier_metadata_path", "recommender_metadata_path"):
@@ -101,7 +101,7 @@ def settings_metadata(settings: Any) -> dict[str, Any]:
             stat = path.stat()
             digest = _file_digest(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
         artifacts[name] = {"path": str(path), "sha256": digest}
-    endpoint = urlsplit(settings.deepseek_base_url)
+    endpoint = urlsplit(settings.llm_base_url)
     return {"config": config, "artifacts": artifacts,
             "provider_endpoint": {"scheme": endpoint.scheme, "host": endpoint.hostname,
                                   "path": endpoint.path}}
@@ -450,4 +450,4 @@ def log_store(settings: Any) -> LLMLogStore | None:
 
 def model_callbacks(settings: Any, component: str) -> list[Any]:
     store = log_store(settings)
-    return [PersistentLLMCallback(store, component, settings.deepseek_model)] if store else []
+    return [PersistentLLMCallback(store, component, settings.llm_model)] if store else []

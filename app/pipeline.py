@@ -764,7 +764,7 @@ class KitchenPipeline:
             )
 
         if self.agent is None:
-            raise ValueError("Missing configuration in .env: deepseek_api_key")
+            raise ValueError("Missing model configuration in .env for the selected LLM_PROVIDER")
 
         task = (
             self.tasks.get_reconciliation_task(user_id, reconciliation_task_id)
@@ -906,7 +906,7 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
     action_repository = PendingActionRepository(settings.inventory_db_path)
     action_repository.initialize()
     expiry_inferer = (
-        DeepSeekExpiryInferer(settings) if settings.deepseek_api_key else None
+        DeepSeekExpiryInferer(settings) if settings.llm_enabled else None
     )
     actions = InventoryActionService(
         action_repository,
@@ -952,7 +952,7 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
             timeout=settings.http_timeout_seconds,
             logging_settings=settings,
         )
-        if settings.deepseek_api_key
+        if settings.llm_provider == "deepseek" and settings.deepseek_api_key
         else None
     )
     local_recommender = build_runtime_recommender(settings)
@@ -964,7 +964,7 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
     )
     agent = (
         build_agent(settings, inventory, recipes, actions, history, profile_actions)
-        if settings.deepseek_api_key
+        if settings.llm_enabled
         else None
     )
     profile_summarizer = (

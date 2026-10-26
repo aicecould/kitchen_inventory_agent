@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from langchain_openai import ChatOpenAI
+from app.llm import chat_model_kwargs
 from pydantic import BaseModel
 
 from app.llm_log import callback_store, logged_span, model_callbacks, request_context
@@ -83,18 +84,10 @@ class ReminderGenerator:
 
     def __init__(self, settings: Settings) -> None:
         self.logging_callbacks = model_callbacks(settings, "proactive_reminder")
-        self.max_input_chars = settings.deepseek_max_input_chars
+        self.max_input_chars = settings.llm_max_input_chars
         self.model = (
-            ChatOpenAI(
-                api_key=settings.deepseek_api_key,
-                base_url=settings.deepseek_base_url,
-                model=settings.deepseek_model,
-                temperature=0,
-                timeout=settings.http_timeout_seconds,
-                max_retries=1,
-                max_tokens=settings.deepseek_max_output_tokens,
-            )
-            if settings.deepseek_api_key
+            ChatOpenAI(**chat_model_kwargs(settings))
+            if settings.llm_enabled
             else None
         )
 

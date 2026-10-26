@@ -36,7 +36,7 @@ class QwenRuntime:
         # parameters, buffers, inputs and KV caches are placed on the GPU.
         self.model = AutoModelForCausalLM.from_pretrained(
             MODEL_DIR, local_files_only=True, trust_remote_code=False,
-            torch_dtype=torch.float16, attn_implementation="sdpa",
+            dtype=torch.float16, attn_implementation="sdpa",
         ).to(self.device).eval()
         if any(p.device != self.device for p in self.model.parameters()):
             raise RuntimeError("Model parameters must all reside on the GPU")
@@ -44,15 +44,17 @@ class QwenRuntime:
             raise RuntimeError("Model buffers must all reside on the GPU")
         self.lock = Lock()
 
-    def generate(self, messages, max_tokens=256, temperature=0.7):
+    def generate(self, messages, max_tokens=256, temperature=0.7, tools=None):
         with self.lock, torch.inference_mode():
             inputs = self.tokenizer.apply_chat_template(
                 messages, tokenize=True, add_generation_prompt=True,
                 enable_thinking=False, return_tensors="pt", return_dict=True,
+                tools=tools,
             ).to(self.device)
             prompt_tokens = inputs["input_ids"].shape[-1]
-            if prompt_tokens + max_tokens > 4096:
-                raise ValueError("Input plus output exceeds the 4096-token service limit")
+            context_limit = min(32768, self.model.config.max_position_embeddings)
+            if prompt_tokens + max_tokens > context_limit:
+                raise ValueError(f"Input plus output exceeds the {context_limit}-token service limit")
             outputs = self.model.generate(
                 **inputs, max_new_tokens=max_tokens,
                 do_sample=temperature > 0,

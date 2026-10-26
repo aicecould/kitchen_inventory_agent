@@ -29,7 +29,7 @@ BENCHMARKS = Path(__file__).resolve().parent / "benchmarks"
 LIMITATIONS = [
     "快速 benchmark 样本量小，不代表统计显著性。",
     "检索目标由本地已收录菜谱反向构造，偏向已知语料。",
-    "DeepSeek 输出和网络延迟存在随机波动。",
+    "所选模型输出和推理延迟存在波动。",
     "故障注入覆盖已知风险，不代表生产错误的真实发生频率。",
     "分类器元数据声明测试集 245 条，当前可审查去重数据重放为 243 条。",
 ]
@@ -73,13 +73,15 @@ def _git_metadata() -> tuple[str, bool]:
     return commit, dirty
 
 
-def run_quick(*, offline: bool) -> EvaluationRun:
+def run_quick(*, offline: bool, suite: str = "quick") -> EvaluationRun:
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     with logging_context(source="evaluation", run_id=run_id):
-        return _run_quick(offline=offline, run_id=run_id)
+        return _run_quick(offline=offline, run_id=run_id, suite=suite)
 
 
-def _run_quick(*, offline: bool, run_id: str) -> EvaluationRun:
+def _run_quick(*, offline: bool, run_id: str, suite: str = "quick") -> EvaluationRun:
+    if suite not in {"quick", "llm"}:
+        raise ValueError("suite must be quick or llm")
     source_root = _repo_root()
     settings = get_settings()
     settings = replace(
@@ -117,6 +119,10 @@ def _run_quick(*, offline: bool, run_id: str) -> EvaluationRun:
                 temp_dir=temp_dir / "e2e")),
         ]
         for name, runner in runners:
+            if suite == "llm" and name not in {
+                "deterministic_auditor", "gate_cost_probe", "repair_subagent"
+            }:
+                continue
             try:
                 (temp_dir / "cooking").mkdir(exist_ok=True)
                 (temp_dir / "e2e").mkdir(exist_ok=True)
@@ -134,17 +140,38 @@ def _run_quick(*, offline: bool, run_id: str) -> EvaluationRun:
         "python": platform.python_version(),
         "platform": platform.platform(),
         "mode": "offline" if offline else "online",
+        "suite": suite,
         "deepseek_model": settings.deepseek_model,
+        "llm_provider": settings.llm_provider,
+        "llm_model": settings.llm_model,
+        "llm_max_output_tokens": (
+            settings.qwen_max_output_tokens if settings.llm_provider == "qwen"
+            else settings.deepseek_max_output_tokens
+        ),
+        "llm_timeout_seconds": (
+            settings.qwen_timeout_seconds if settings.llm_provider == "qwen"
+            else settings.http_timeout_seconds
+        ),
         "benchmark_hashes": {
             path.name: _sha256(path) for path in sorted(BENCHMARKS.glob("*.json"))
         },
     }
-    return EvaluationRun(metadata=metadata, suites=suites, limitations=LIMITATIONS)
+    limitations = list(LIMITATIONS)
+    if suite == "llm":
+        limitations = [
+            "仅运行领域门禁成本探针、回答修复子 Agent 与确定性审核基线。",
+            "门禁探针的 passed 表示请求成功，不等同于拒答内容正确。",
+            "确定性审核为规则故障注入结果，不是模型生成正确率。",
+            "不包含真实业务端到端、库存工具调用、菜谱检索或多轮烹饪生成评测。",
+            "样本量仅 9 次模型调用，不能推导通用能力或统计显著性。",
+            "记录单次实测结果，不对失败样本反复重跑取优。",
+        ]
+    return EvaluationRun(metadata=metadata, suites=suites, limitations=limitations)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run quick system evaluation")
-    parser.add_argument("--suite", choices=["quick"], default="quick")
+    parser.add_argument("--suite", choices=["quick", "llm"], default="quick")
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=Path("evaluation/results"))
@@ -154,10 +181,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if args.dry_run:
-        print("DeepSeek maximum calls: gate_cost_probe=3, repair_subagent=6")
-        print("Spoonacular maximum calls: 5")
+        print(f"{get_settings().llm_provider} maximum calls: gate_cost_probe=3, repair_subagent=6")
+        print(f"Spoonacular maximum calls: {0 if args.suite == 'llm' else 5}")
         return
-    run = run_quick(offline=args.offline)
+    run = run_quick(offline=args.offline, suite=args.suite)
     run_id = str(run.metadata["run_id"])
     json_path, markdown_path = write_reports(run, args.output_dir, run_id)
     print(f"JSON: {json_path}")

@@ -135,7 +135,9 @@ def service_status() -> dict[str, object]:
     with _pipeline_lock:
         pipeline = _pipeline
     services = {
-        "deepseek": bool(settings.deepseek_api_key),
+        "llm": settings.llm_enabled,
+        "qwen": settings.llm_provider == "qwen" and settings.llm_enabled,
+        "deepseek": settings.llm_provider == "deepseek" and bool(settings.deepseek_api_key),
         "baidu_vision": bool(
             settings.baidu_image_api_key and settings.baidu_image_secret_key
         ),
@@ -152,7 +154,9 @@ def service_status() -> dict[str, object]:
         ),
     }
     return {
-        "ready": services["deepseek"],
+        "ready": services["llm"],
+        "llm_provider": settings.llm_provider,
+        "llm_model": settings.llm_model,
         "services": services,
         "limits": {
             "max_text_chars": MAX_TEXT_CHARS,

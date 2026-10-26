@@ -1,4 +1,4 @@
-"""DeepSeek-powered LangChain tool-calling Agent."""
+"""Configurable LangChain tool-calling Agent."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from app.audit import (
 )
 from app.llm_log import callback_store, logged_span, model_callbacks as persistent_model_callbacks
 from app.config import Settings
+from app.llm import chat_model_kwargs
 from app.context import AgentContext, AgentResult
 from app.memory import ConversationHistoryRepository
 from app.profile import ProfileCategory, ProfileProposal
@@ -103,6 +104,7 @@ class KitchenAgent:
     ) = None
 
     logging_callbacks: list[Any] = field(default_factory=list)
+    model_provider: str = "deepseek"
 
     @property
     def callbacks(self) -> list[Any]:
@@ -153,7 +155,7 @@ class KitchenAgent:
         except Exception as exc:
             trace.record(
                 "model",
-                "deepseek_agent",
+                f"{self.model_provider}_agent",
                 "failed",
                 type(exc).__name__,
                 elapsed_ms(started),
@@ -171,7 +173,7 @@ class KitchenAgent:
             )
         trace.record(
             "model",
-            "deepseek_agent",
+            f"{self.model_provider}_agent",
             "success",
             "response completed",
             elapsed_ms(started),
@@ -792,17 +794,7 @@ def build_agent(
     profile_actions: ProfileActionService | None = None,
     model_callbacks: list[Any] | None = None,
 ) -> KitchenAgent:
-    settings.require("deepseek_api_key", "deepseek_model", "deepseek_base_url")
-    model = ChatOpenAI(
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        model=settings.deepseek_model,
-        temperature=0,
-        timeout=settings.http_timeout_seconds,
-        max_retries=1,
-        max_tokens=settings.deepseek_max_output_tokens,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
+    model = ChatOpenAI(**chat_model_kwargs(settings, disable_thinking=True))
     return KitchenAgent(
         model=model,
         inventory=inventory,
@@ -812,7 +804,8 @@ def build_agent(
         profile_actions=profile_actions,
         application_timezone=settings.application_timezone,
         recursion_limit=settings.agent_recursion_limit,
-        max_input_chars=settings.deepseek_max_input_chars,
+        max_input_chars=settings.llm_max_input_chars,
+        model_provider=settings.llm_provider,
         model_callbacks=list(model_callbacks or []),
         logging_callbacks=persistent_model_callbacks(settings, "kitchen_agent"),
     )

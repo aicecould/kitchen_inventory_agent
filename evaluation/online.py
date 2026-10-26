@@ -8,6 +8,7 @@ from langchain_openai import ChatOpenAI
 
 from app.llm_log import callback_store, logged_span, model_callbacks
 from app.config import Settings
+from app.llm import chat_model_kwargs
 from evaluation.models import EvidenceKind, SampleResult, SuiteResult
 from evaluation.usage import UsageCollector
 
@@ -29,15 +30,9 @@ def run_gate_cost_probe(
             summary={"sample_count": len(samples), "online_skipped": len(samples)},
         )
     logging_callbacks = model_callbacks(settings, "online_evaluation")
-    model = ChatOpenAI(
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        model=settings.deepseek_model,
-        temperature=0,
-        timeout=settings.http_timeout_seconds,
-        max_retries=1,
-        max_tokens=min(settings.deepseek_max_output_tokens, 200),
-    )
+    options = chat_model_kwargs(settings)
+    options["max_tokens"] = min(options["max_tokens"], 200)
+    model = ChatOpenAI(**options)
     results: list[SampleResult] = []
     for index, text in enumerate(samples, start=1):
         collector = UsageCollector()
@@ -81,7 +76,7 @@ def run_gate_cost_probe(
                     "saved_tokens": usage.total_tokens if usage else None,
                 },
                 usage=usage,
-                call_counts={"deepseek": collector.call_count},
+                call_counts={settings.llm_provider: collector.call_count},
                 error=error,
             )
         )
