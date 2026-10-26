@@ -30,7 +30,8 @@ def test_usage_collector_returns_none_when_provider_omits_usage() -> None:
     assert collector.call_count == 1
 
 
-def test_build_agent_accepts_optional_model_callbacks() -> None:
+def test_build_agent_accepts_optional_model_callbacks(monkeypatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "offline-test-placeholder")
     collector = UsageCollector()
     agent = build_agent(
         get_settings(),
@@ -44,6 +45,7 @@ def test_build_agent_accepts_optional_model_callbacks() -> None:
 
 
 def test_build_agent_explicitly_disables_deepseek_thinking(monkeypatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "offline-test-placeholder")
     captured: dict[str, object] = {}
 
     class FakeModel:

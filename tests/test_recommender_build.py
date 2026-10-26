@@ -1,5 +1,6 @@
 import csv
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Sequence
 
@@ -16,6 +17,7 @@ from recommender.build import (
     validate_sqlite,
 )
 from recommender.model_config import EMBEDDING_MODEL, EMBEDDING_MODEL_REVISION
+from recommender.repository import RecipeRepository
 
 
 def write_recipe_csv(path: Path) -> None:
@@ -240,3 +242,20 @@ def test_build_artifacts_rejects_unverified_encoder_identity(
     assert (output_dir / "recipes.db").read_text(encoding="utf-8") == "old-db"
     assert (output_dir / "recipes.faiss").read_text(encoding="utf-8") == "old-faiss"
     assert (output_dir / "metadata.json").read_text(encoding="utf-8") == "old-metadata"
+
+
+def test_readonly_repository_queries_work_from_worker_threads(tmp_path: Path) -> None:
+    source = tmp_path / 'recipes.csv'
+    destination = tmp_path / 'recipes.db'
+    write_recipe_csv(source)
+    build_sqlite(source, destination)
+    repository = RecipeRepository.open_readonly(destination)
+
+    def query(_):
+        assert repository.count_recipes() == 2
+        ids = repository.fts_search('"tomato"')
+        assert ids == [1]
+        assert repository.get_many(ids)[1].title == 'Tomato Egg'
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(query, range(12)))

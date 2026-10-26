@@ -6,6 +6,7 @@ import json
 import sqlite3
 from collections.abc import Sequence
 from pathlib import Path
+from threading import Lock
 
 from recommender.models import RecommenderArtifactsError, StoredRecipe
 
@@ -13,6 +14,7 @@ from recommender.models import RecommenderArtifactsError, StoredRecipe
 class RecipeRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
+        self._lock = Lock()
 
     @classmethod
     def open_readonly(cls, path: Path) -> "RecipeRepository":
@@ -20,11 +22,17 @@ class RecipeRepository:
             raise RecommenderArtifactsError(
                 f"Recipe database is missing: {path.name}"
             )
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection = sqlite3.connect(
+            f"file:{path}?mode=ro", uri=True, check_same_thread=False
+        )
         return cls(connection)
 
+    def _fetchall(self, query: str, parameters: Sequence[object] = ()) -> list[tuple]:
+        with self._lock:
+            return self._connection.execute(query, parameters).fetchall()
+
     def fts_search(self, match_query: str, limit: int = 100) -> list[int]:
-        rows = self._connection.execute(
+        rows = self._fetchall(
             """
             SELECT rowid
             FROM recipes_fts
@@ -33,17 +41,17 @@ class RecipeRepository:
             LIMIT ?
             """,
             (match_query, limit),
-        ).fetchall()
+        )
         return [row[0] for row in rows]
 
     def count_recipes(self) -> int:
-        return self._connection.execute("SELECT COUNT(*) FROM recipes").fetchone()[0]
+        return self._fetchall("SELECT COUNT(*) FROM recipes")[0][0]
 
     def get_many(self, recipe_ids: Sequence[int]) -> dict[int, StoredRecipe]:
         if not recipe_ids:
             return {}
         placeholders = ", ".join("?" for _ in recipe_ids)
-        rows = self._connection.execute(
+        rows = self._fetchall(
             f"""
             SELECT
                 id,
@@ -57,7 +65,7 @@ class RecipeRepository:
             WHERE id IN ({placeholders})
             """,
             list(recipe_ids),
-        ).fetchall()
+        )
         recipes: dict[int, StoredRecipe] = {}
         for row in rows:
             recipe_id, title, lines_json, normalized_json, search_text, instructions, image_name = row

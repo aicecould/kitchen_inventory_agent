@@ -110,3 +110,24 @@ def test_training_finds_linux_build_output(
     located = classifier_train.locate_fasttext_binary(None)
 
     assert located == binary.resolve()
+
+
+@pytest.mark.parametrize(
+    ('text', 'expected'),
+    [
+        ('添加2个番茄', True),
+        ('我买了2个番茄，请帮我加入库存。', True),
+        ('添加3个鸡蛋', True),
+        ('我买了一盒牛奶，请帮我加入库存。', True),
+        ('添加2个苹果电脑', False),
+        ('番茄钟怎么设置', False),
+        ('Python怎么安装', False),
+    ],
+)
+def test_deployed_classifier_handles_inventory_and_unrelated_requests(text, expected):
+    root = Path(__file__).resolve().parents[1]
+    classifier = FoodQueryClassifier.load(
+        root / 'classifier/artifacts/food_query.bin',
+        root / 'classifier/artifacts/metadata.json',
+    )
+    assert classifier.classify(text).is_related is expected

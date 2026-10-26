@@ -747,12 +747,18 @@ class KitchenAgent:
         for message in messages:
             if isinstance(message, ToolMessage):
                 call_id = message.tool_call_id
+                result = message.content
+                if isinstance(result, str):
+                    try:
+                        result = json.loads(result)
+                    except ValueError:
+                        pass
                 history.append(
                     {
                         "tool": message.name or "unknown",
                         "tool_call_id": call_id,
                         "arguments": arguments_by_id.get(call_id, {}),
-                        "result": message.content,
+                        "result": result,
                     }
                 )
         return history

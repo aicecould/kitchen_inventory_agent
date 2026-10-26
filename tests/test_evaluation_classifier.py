@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from classifier.model import ClassificationResult
@@ -25,11 +26,28 @@ class CountingClassifier:
         )
 
 
-def test_classifier_split_detects_missing_training_source() -> None:
+def test_classifier_split_loads_prepared_dataset() -> None:
     records, provenance_matches = select_classifier_test_records(
         Path("classifier/dataset"), Path("classifier/artifacts/metadata.json")
     )
-    assert len(records) == 243
+    assert len(records) == 272
+    assert provenance_matches is True
+
+
+def test_classifier_split_detects_missing_training_source(tmp_path: Path) -> None:
+    dataset = tmp_path / "partial.csv"
+    dataset.write_text(
+        "text,label\n番茄炒蛋,1\n蒸鸡蛋,1\n烤牛肉,1\n"
+        "查询天气,0\n设置闹钟,0\n播放音乐,0\n",
+        encoding="utf-8",
+    )
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text(
+        json.dumps({"seed": 42, "split_counts": {"test": 3}}),
+        encoding="utf-8",
+    )
+    records, provenance_matches = select_classifier_test_records(dataset, metadata)
+    assert len(records) == 2
     assert provenance_matches is False
 
 
@@ -59,7 +77,8 @@ def test_challenge_benchmark_has_forty_unique_bilingual_records() -> None:
     assert len(set(texts)) == 40
     assert any(any("a" <= character.lower() <= "z" for character in text) for text in texts)
     assert any(any("\u4e00" <= character <= "\u9fff" for character in text) for text in texts)
-    assert result.summary["classifier_test_total"] == 243
-    assert result.summary["classifier_test_metadata_declared_total"] == 245
+    assert result.summary["classifier_test_total"] == 272
+    assert result.summary["classifier_test_metadata_declared_total"] == 272
+    assert result.summary["classifier_test_metadata_count_delta"] == 0
     assert result.summary["classifier_test_source"] == "current_dataset_replay"
-    assert result.summary["classifier_test_replayable"] is False
+    assert result.summary["classifier_test_replayable"] is True

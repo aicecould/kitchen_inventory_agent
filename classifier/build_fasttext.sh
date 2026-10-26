@@ -45,7 +45,12 @@ if [[ ! -d "$source_dir/.git" ]]; then
         "$source_dir"
 fi
 
-cmake -S "$source_dir" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release
+# FastText 0.9.2 uses uint64_t without including cstdint on newer GCC versions.
+sed -i '/^#include <cstdint>$/d; /^#include <unordered_map>$/a #include <cstdint>' \
+    "$source_dir/src/args.cc"
+
+cmake -S "$source_dir" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 cmake --build "$build_dir" --config Release --target fasttext-bin
 
 binary="$build_dir/fasttext"

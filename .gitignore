@@ -13,6 +13,7 @@ classifier/artifacts/*
 !classifier/artifacts/metadata.json
 classifier/dataset/*
 !classifier/dataset/semantic_food_query_dataset_300.csv
+!classifier/dataset/inventory_queries.csv
 recommender/artifacts/
 recommender/dataset/
 recommender/model/*

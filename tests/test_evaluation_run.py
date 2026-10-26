@@ -1,12 +1,13 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from evaluation.run import _repo_root
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = Path("/home/ubuntu/Education/kitchen_inventory_agent/.venv/bin/python")
+PYTHON = Path(sys.executable)
 
 
 def test_repo_root_finds_shared_checkout_artifacts(monkeypatch) -> None:
@@ -16,7 +17,7 @@ def test_repo_root_finds_shared_checkout_artifacts(monkeypatch) -> None:
 
 def test_offline_cli_writes_one_report_pair(tmp_path) -> None:
     environment = dict(os.environ)
-    environment["EVALUATION_PROJECT_ROOT"] = "/home/ubuntu/Education/kitchen_inventory_agent"
+    environment["EVALUATION_PROJECT_ROOT"] = str(ROOT)
     completed = subprocess.run(
         [str(PYTHON), "-m", "evaluation.run", "--suite", "quick", "--offline",
          "--output-dir", str(tmp_path)],

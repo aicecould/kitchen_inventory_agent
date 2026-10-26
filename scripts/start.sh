@@ -59,7 +59,7 @@ validate_port "$port"
 
 if [[ ! -x "$python_bin" ]]; then
     echo "未找到 Linux 虚拟环境：$python_bin" >&2
-    echo "请先运行：python3.13 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt" >&2
+    echo "请先运行：python3 -m venv .venv && .venv/bin/python -m pip install -r requirements-xpu.txt" >&2
     exit 1
 fi
 
@@ -82,6 +82,7 @@ import sys
 
 port = int(sys.argv[1])
 with socket.socket() as listener:
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", port))
 PY
 then
@@ -100,7 +101,7 @@ fi
 
 (
     cd -- "$project_root"
-    nohup "$python_bin" "${arguments[@]}" >"$log_file" 2>&1 &
+    nohup setsid -- "$python_bin" "${arguments[@]}" < /dev/null >"$log_file" 2>&1 &
     echo "$!" >"$pid_file"
 )
 pid=$(<"$pid_file")

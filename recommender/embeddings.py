@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import platform
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
@@ -39,6 +40,7 @@ class LocalSentenceEncoder:
     model_id = EMBEDDING_MODEL
 
     def __init__(self, model_path: Path, *, local_files_only: bool) -> None:
+        _initialize_wsl_xpu()
         from sentence_transformers import SentenceTransformer
 
         manifest = load_model_manifest(model_path)
@@ -75,6 +77,21 @@ class LocalSentenceEncoder:
         if not np.isfinite(vectors).all():
             raise ValueError("Embedding model returned NaN or Inf values")
         return vectors
+
+
+def _initialize_wsl_xpu() -> None:
+    """Initialize compute before Transformers probes Level Zero Sysman on WSL.
+
+    With PyTorch 2.14 XPU and some WSL drivers, the initial Sysman probe can
+    segfault. Explicit compute initialization avoids that probe; CPU wheels
+    and other operating systems keep their normal device selection.
+    """
+    if "microsoft" not in platform.release().lower():
+        return
+    import torch
+
+    if getattr(torch.version, "xpu", None) is not None:
+        torch.xpu.init()
 
 
 def load_model_manifest(model_path: Path) -> ModelManifest:

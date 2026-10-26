@@ -102,29 +102,29 @@ inventory.confirm
 
 | 范围 | 证据类型 | 结果 |
 | --- | --- | --- |
-| 全量自动化测试 | `measured` | **484/484 通过**，耗时 **51.85 秒** |
+| 全量自动化测试 | `measured` | **497/497 通过**，耗时 **39.79 秒** |
 | 完整离线评估 | `measured` | 全部评估成功，无 `skipped` 或 `unavailable` |
 | 确定性审核器 | `fault_injection` | **30/30** 风险回答被拦截，**15/15** 合法回答被放行 |
-| 快速评测分类器 | `measured` | 准确率 **96.30%**，食物召回率 **95.71%** |
-| 路由挑战集 | `measured` | 食物误拦率 **21.74%**；作为后续增强重点保留 |
+| 快速评测分类器 | `measured` | 准确率 **95.59%**，食物召回率 **96.67%** |
+| 路由挑战集 | `measured` | 食物误拦率 **26.09%**；作为后续增强重点保留 |
 | 本地混合检索 | `measured` | RRF Recall@10 **93.33%**；总体 Recall 与最佳单路持平 |
 | 双路检索互补性 | `measured` | FTS 贡献 **2** 个独占命中，FAISS 贡献 **1** 个独占命中 |
-| 修复子 Agent | `measured` | **6/6** 有效决策：4 次成功重写，2 次正确要求主 Agent 重试 |
-| 修复子 Agent 成本 | `measured` | 累计实际消耗 **3,658 tokens**，包含首次失败与定向补跑 |
+| 修复子 Agent | `measured` | **6/6** 有效决策：2 次成功重写，2 次正确要求主 Agent 重试 |
+| 修复子 Agent 成本 | `measured` | 累计实际消耗 **3,335 tokens** |
 | Cooking Session | `measured` | 事实保留率由仅依赖历史的 **20%** 提升至结构化状态的 **100%** |
-| 分类拦截成本探针 | `paired_estimate` | 3 个在线样本中，每次拦截平均估算节省 **192.67 tokens** |
+| 分类拦截成本探针 | `paired_estimate` | 3 个在线样本中，每次拦截平均估算节省 **145.33 tokens** |
 | 端到端路径 | `measured` | **12/12** 路径成功，使用隔离临时数据库且无网络调用 |
 
 `fault_injection` 衡量已知风险样本的检出能力，适用范围是已覆盖的风险类型；`paired_estimate` 是小样本成本估算，适用范围是本次在线探针。检索目标来自本地已收录菜谱，因此指标用于验证当前语料内的检索链路。
 
 ### 分类器数据与效果
 
-分类器训练读取 `classifier/dataset/` 下的规范 CSV，支持 UTF-8 逗号分隔和 GBK Tab 分隔。当前合并去重后共 1,621 条；部署模型使用训练集与验证集共 1,376 条重新训练，独立测试集不参与训练或阈值选择。
+分类器训练读取 `classifier/dataset/` 下的规范 CSV，支持 UTF-8 逗号分隔和 GBK Tab 分隔。当前合并去重后共 1,801 条；部署模型使用训练集与验证集共 1,529 条重新训练，独立测试集不参与训练或阈值选择。
 
 | 数据集 | 样本数 | 准确率 | 精确率 | 召回率 | 假阳性率 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 验证集 | 242 | 100.00% | 100.00% | 100.00% | 0.00% |
-| 独立测试集 | 245 | 93.88% | 84.81% | 95.71% | 6.86% |
+| 验证集 | 269 | 100.00% | 100.00% | 100.00% | 0.00% |
+| 独立测试集 | 272 | 95.59% | 90.62% | 96.67% | 4.95% |
 
 该表是分类器自身的既有离线评估。系统通过“确定性路由优先、分类器处理未决请求”的组合降低对单一二分类边界的依赖。
 
@@ -180,41 +180,73 @@ main.py                       # CLI 入口
 
 ## 安装与运行
 
-项目推荐使用 Python 3.13 或更高版本。
+### 安装依赖
+
+建议 Python 3.10 以上。
 
 ```bash
-python3.13 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-cp .env.example .env
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-启动 Web 展示页：
+按设备选择一条：
 
 ```bash
-./scripts/start.sh
+pip install -r requirements-cpu.txt
+pip install -r requirements-xpu.txt
 ```
 
-访问 `http://127.0.0.1:8000`；OpenAPI 文档位于 `http://127.0.0.1:8000/docs`。停止服务或指定端口：
+### 准备菜谱检索
+
+下载模型与菜谱数据，构建索引：
 
 ```bash
-./scripts/stop.sh
-./scripts/start.sh --port 8080
-./scripts/stop.sh --port 8080
+python -m recommender.download
+python -m recommender.build --source recommender/dataset/13k-recipes.csv --model recommender/model --output-dir recommender/artifacts
 ```
 
-CLI 示例：
+### 配置与启动
 
 ```bash
-.venv/bin/python main.py \
-  --text "查询一下当前库存" \
-  --user-id "demo-user" \
-  --language zh
+cp -n .env.example .env
 ```
 
-模型训练与使用见：
+在 `.env` 中填写 `DEEPSEEK_API_KEY`。图片识别另需百度密钥，Spoonacular 密钥可选。
 
-- [classifier/README.md](classifier/README.md)
-- [recommender/README.md](recommender/README.md)
+```bash
+bash scripts/start.sh --no-reload
+```
+
+访问 `http://127.0.0.1:8000`，或通过 `/api/status` 查看服务状态。
+
+```bash
+bash scripts/stop.sh
+```
+
+启动和停止脚本均支持 `--port PORT`。
+
+### 分类器训练与评测
+
+仓库已包含分类模型。重训或完整评测时，先准备数据：
+
+```bash
+python -m classifier.download
+python -m classifier.prepare_massive
+```
+
+重训需要 CMake 和 C++ 编译器：
+
+```bash
+bash classifier/build_fasttext.sh
+python -m classifier.train
+python -m classifier.evaluate
+```
+
+```bash
+python -m pytest -q
+python -m evaluation.run --suite quick --offline
+python -m evaluation.run --suite quick  # 调用 DeepSeek
+```
 
 ## 关键配置
 

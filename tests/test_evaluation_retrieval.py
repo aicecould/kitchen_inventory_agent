@@ -13,7 +13,7 @@ from recommender.models import NormalizedRecipeRequest
 from recommender.search import load_recommender
 
 
-ROOT = Path("/home/ubuntu/Education/kitchen_inventory_agent")
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(scope="module")

@@ -1,6 +1,8 @@
 import hashlib
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -10,6 +12,7 @@ from recommender.embeddings import (
     EMBEDDING_MODEL,
     EMBEDDING_MODEL_REVISION,
     LocalSentenceEncoder,
+    _initialize_wsl_xpu,
     load_model_manifest,
 )
 from recommender.models import RecommenderArtifactsError
@@ -166,8 +169,12 @@ def test_encode_query_uses_bge_instruction_without_changing_documents(
     model_path = make_fake_model(tmp_path)
     transformer = RecordingSentenceTransformer()
     monkeypatch.setattr(
-        "sentence_transformers.SentenceTransformer",
-        lambda *args, **kwargs: transformer,
+        "recommender.embeddings._initialize_wsl_xpu", lambda: None
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=lambda *args, **kwargs: transformer),
     )
 
     encoder = LocalSentenceEncoder(model_path, local_files_only=True)
@@ -178,3 +185,31 @@ def test_encode_query_uses_bge_instruction_without_changing_documents(
         ["Represent this sentence for searching relevant passages: chicken rice"],
         ["chicken rice"],
     ]
+
+
+@pytest.mark.parametrize(
+    "release,xpu_version,expected",
+    [
+        ("6.18-microsoft-standard-WSL2", "20260100", ["init"]),
+        ("6.18-microsoft-standard-WSL2", None, []),
+        ("6.18-generic", "20260100", []),
+    ],
+)
+def test_wsl_initializes_xpu_without_sysman_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    release: str,
+    xpu_version: str | None,
+    expected: list[str],
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr("recommender.embeddings.platform.release", lambda: release)
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(
+            version=SimpleNamespace(xpu=xpu_version),
+            xpu=SimpleNamespace(init=lambda: calls.append("init")),
+        ),
+    )
+    _initialize_wsl_xpu()
+    assert calls == expected

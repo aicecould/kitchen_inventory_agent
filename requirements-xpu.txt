@@ -1,0 +1,21 @@
+# PyTorch XPU wheels for Intel GPU.
+--extra-index-url https://download.pytorch.org/whl/xpu
+
+langchain>=1.0,<2.0
+langchain-openai>=1.0,<2.0
+pydantic>=2.0,<3.0
+python-dotenv>=1.0,<2.0
+httpx>=0.27,<1.0
+httpx2>=2.0,<3.0
+Pillow>=10.0
+pytest>=8.0,<10.0
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.34,<1.0
+python-multipart>=0.0.20,<1.0
+jieba==0.42.1
+fasttext-predict==0.9.2.4
+numpy>=1.25,<3.0
+faiss-cpu>=1.15,<2.0
+sentence-transformers>=5.7,<6.0
+torch==2.14.1+xpu
+triton-xpu==3.8.0
