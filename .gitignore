@@ -18,3 +18,5 @@ recommender/artifacts/
 recommender/dataset/
 recommender/model/*
 !recommender/model/model-manifest.json
+
+llm/qwen3_1_7b/models/
