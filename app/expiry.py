@@ -8,6 +8,7 @@ from typing import Protocol
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
+from app.llm_log import model_callbacks
 from app.config import Settings
 from app.structured_output import invoke_validated_json
 
@@ -22,6 +23,7 @@ class ExpiryInferer(Protocol):
 
 class DeepSeekExpiryInferer:
     def __init__(self, settings: Settings) -> None:
+        self.logging_callbacks = model_callbacks(settings, "expiry_inference")
         self.model = ChatOpenAI(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
@@ -46,6 +48,8 @@ class DeepSeekExpiryInferer:
             self.model,
             ExpiryPrediction,
             prompt,
+            callbacks=self.logging_callbacks,
+            component="expiry_inference",
         )
         expires_at = prediction.expires_at
         if (

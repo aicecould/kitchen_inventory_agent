@@ -43,6 +43,10 @@ class Settings:
     recommender_model_path: Path
     recommender_model_revision: str
 
+    llm_log_source: str = "application"
+    llm_logging_enabled: bool = True
+    llm_log_db_path: Path = Path("data/llm_logs.db")
+
     def require(self, *names: str) -> None:
         missing = [name for name in names if not str(getattr(self, name, "")).strip()]
         if missing:
@@ -52,6 +56,9 @@ class Settings:
 
 def get_settings() -> Settings:
     return Settings(
+        llm_log_source=os.getenv("LLM_LOG_SOURCE", "application"),
+        llm_logging_enabled=_env_bool("LLM_LOGGING_ENABLED", True),
+        llm_log_db_path=Path(os.getenv("LLM_LOG_DB_PATH", "data/llm_logs.db")),
         deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
         deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),

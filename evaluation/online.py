@@ -6,6 +6,7 @@ from time import perf_counter
 
 from langchain_openai import ChatOpenAI
 
+from app.llm_log import callback_store, logged_span, model_callbacks
 from app.config import Settings
 from evaluation.models import EvidenceKind, SampleResult, SuiteResult
 from evaluation.usage import UsageCollector
@@ -27,6 +28,7 @@ def run_gate_cost_probe(
             ],
             summary={"sample_count": len(samples), "online_skipped": len(samples)},
         )
+    logging_callbacks = model_callbacks(settings, "online_evaluation")
     model = ChatOpenAI(
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek_base_url,
@@ -41,16 +43,26 @@ def run_gate_cost_probe(
         collector = UsageCollector()
         started = perf_counter()
         try:
-            model.invoke(
-                [
-                    {"role": "system", "content": (
-                        "You are a kitchen inventory assistant. Briefly state that this "
-                        "request is outside kitchen inventory and cooking scope."
-                    )},
-                    {"role": "user", "content": text},
-                ],
-                config={"callbacks": [collector]},
-            )
+            with logged_span(
+                callback_store(logging_callbacks), "request", "gate_cost_probe", prompt=text,
+                metadata={"source": "evaluation", "suite": "gate_cost_probe",
+                          "sample_id": f"gate-cost-{index:02d}"},
+            ) as query:
+                response = model.invoke(
+                    [
+                        {"role": "system", "content": (
+                            "You are a kitchen inventory assistant. Briefly state that this "
+                            "request is outside kitchen inventory and cooking scope."
+                        )},
+                        {"role": "user", "content": text},
+                    ],
+                    config={"callbacks": [collector, *logging_callbacks], "metadata": {
+                        "log_component": "gate_cost_probe",
+                        "log_metadata": {"source": "evaluation", "suite": "gate_cost_probe",
+                                         "sample_id": f"gate-cost-{index:02d}"},
+                    }},
+                )
+                query["content"] = response
             status = "passed"
             error = None
         except Exception as exc:

@@ -46,7 +46,10 @@ class ProfileSummarizer:
         model: Any,
         history: ConversationHistoryRepository,
         actions: ProfileActionService,
+        *,
+        callbacks: list[Any] | None = None,
     ) -> None:
+        self.callbacks = callbacks or []
         self.model = model
         self.history = history
         self.actions = actions
@@ -94,5 +97,7 @@ class ProfileSummarizer:
                     "role": "user",
                     "content": json.dumps(payload, ensure_ascii=False),
                 },
-            ]
+            ],
+            callbacks=self.callbacks,
+            component="profile_summary",
         )

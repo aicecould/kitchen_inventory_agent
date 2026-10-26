@@ -9,6 +9,7 @@ from time import perf_counter
 from langchain_openai import ChatOpenAI
 
 from app.audit import AuditCode, review_candidate
+from app.llm_log import model_callbacks
 from app.config import Settings
 from app.prompts import REPAIR_SYSTEM_PROMPT
 from app.supervisor import RepairAction, RepairDecision, SupervisorRequest
@@ -51,6 +52,7 @@ def run_supervisor_suite(
         )
 
     collector = UsageCollector()
+    logging_callbacks = model_callbacks(settings, "supervisor_evaluation")
     model = ChatOpenAI(
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek_base_url,
@@ -85,7 +87,10 @@ def run_supervisor_suite(
                         "audit": {"code": initial.code.value, "reason": initial.reason},
                     }, ensure_ascii=False)},
                 ],
-                callbacks=[collector],
+                callbacks=[collector, *logging_callbacks],
+                component="supervisor_evaluation",
+                log_metadata={"source": "evaluation", "suite": "repair_subagent",
+                              "sample_id": str(record["id"])},
             )
             final = (
                 review_candidate(

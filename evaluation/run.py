@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.config import get_settings
+from app.llm_log import logging_context
 from evaluation.auditor import run_auditor_suite
 from evaluation.classifier import run_classifier_suite
 from evaluation.cooking_session import run_cooking_session_suite
@@ -73,6 +74,12 @@ def _git_metadata() -> tuple[str, bool]:
 
 
 def run_quick(*, offline: bool) -> EvaluationRun:
+    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    with logging_context(source="evaluation", run_id=run_id):
+        return _run_quick(offline=offline, run_id=run_id)
+
+
+def _run_quick(*, offline: bool, run_id: str) -> EvaluationRun:
     source_root = _repo_root()
     settings = get_settings()
     settings = replace(
@@ -120,7 +127,7 @@ def run_quick(*, offline: bool) -> EvaluationRun:
                     error=type(exc).__name__, summary={"status": "failed"},
                 ))
     metadata = {
-        "run_id": datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"),
+        "run_id": run_id,
         "created_at_utc": datetime.now(UTC).isoformat(),
         "git_commit": commit,
         "git_dirty": dirty,

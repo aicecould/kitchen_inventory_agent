@@ -9,6 +9,9 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.config import Settings, get_settings
+from app.llm_log import log_store, logged_span
+
 
 @dataclass(slots=True)
 class Recipe:
@@ -51,7 +54,10 @@ class DeepSeekWebSearchClient:
         api_key: str,
         model: str,
         timeout: float = 20,
+        *,
+        logging_settings: Settings | None = None,
     ) -> None:
+        self.logging_settings = logging_settings
         root = base_url.rstrip("/")
         if root.endswith("/v1"):
             root = root[:-3]
@@ -109,32 +115,44 @@ class DeepSeekWebSearchClient:
                 }
             ],
         }
-        response_payload = self._post(payload)
-        if response_payload.get("stop_reason") == "pause_turn":
-            messages = payload["messages"]
-            assert isinstance(messages, list)
-            messages.append(
-                {"role": "assistant", "content": response_payload.get("content", [])}
-            )
+        with logged_span(log_store(self.logging_settings or get_settings()),
+                         "request", "recipe_web_search", prompt=request) as query:
             response_payload = self._post(payload)
-        return self._recipes_from_response(response_payload, limit)
+            if response_payload.get("stop_reason") == "pause_turn":
+                messages = payload["messages"]
+                assert isinstance(messages, list)
+                messages.append(
+                    {"role": "assistant", "content": response_payload.get("content", [])}
+                )
+                response_payload = self._post(payload)
+            recipes = self._recipes_from_response(response_payload, limit)
+            query["content"] = [recipe.as_dict() for recipe in recipes]
+            return recipes
 
     def _post(self, payload: dict[str, object]) -> dict[str, object]:
-        response = httpx.post(
-            self.endpoint,
-            headers={
-                "content-type": "application/json",
-                "x-api-key": self.api_key,
-                "anthropic-version": "2023-06-01",
-            },
-            json=payload,
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        result = response.json()
-        if not isinstance(result, dict):
-            raise ValueError("DeepSeek web search returned a non-object response")
-        return result
+        with logged_span(log_store(self.logging_settings or get_settings()), "llm", "deepseek_web_search",
+                         model=self.model, prompt=payload,
+                         parameters={k: v for k, v in payload.items()
+                                     if k not in {"messages", "system"}}) as span:
+            response = httpx.post(
+                self.endpoint,
+                headers={
+                    "content-type": "application/json",
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                json=payload,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if not isinstance(result, dict):
+                raise ValueError("DeepSeek web search returned a non-object response")
+            span["content"] = result
+            span["tool_calls"] = [block for block in result.get("content", [])
+                                  if isinstance(block, dict) and block.get("type") in {"server_tool_use", "tool_use"}]
+            span["usage"] = result.get("usage")
+            return result
 
     @classmethod
     def _recipes_from_response(

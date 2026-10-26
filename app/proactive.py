@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Literal
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
+from app.llm_log import callback_store, logged_span, model_callbacks, request_context
 from app.config import Settings
 from app.context import HistoryExcerpt
 from app.structured_output import invoke_validated_json
@@ -81,6 +82,7 @@ class ReminderGenerator:
     """Generate one constrained reminder, with a deterministic safe fallback."""
 
     def __init__(self, settings: Settings) -> None:
+        self.logging_callbacks = model_callbacks(settings, "proactive_reminder")
         self.max_input_chars = settings.deepseek_max_input_chars
         self.model = (
             ChatOpenAI(
@@ -97,6 +99,20 @@ class ReminderGenerator:
         )
 
     def generate(
+        self,
+        candidates: dict[str, list[dict[str, object]]],
+        inventory: list[dict[str, object]],
+        history: list[HistoryExcerpt],
+    ) -> str | None:
+        with logged_span(
+            callback_store(self.logging_callbacks), "request", "proactive_reminder",
+            prompt={"candidates": candidates, "inventory": inventory, "history": history},
+        ) as query:
+            result = self._generate(candidates, inventory, history)
+            query["content"] = result
+            return result
+
+    def _generate(
         self,
         candidates: dict[str, list[dict[str, object]]],
         inventory: list[dict[str, object]],
@@ -129,6 +145,8 @@ class ReminderGenerator:
                     self.model,
                     ReminderResponse,
                     prompt,
+                    callbacks=self.logging_callbacks,
+                    component="proactive_reminder",
                 )
                 selection = _validated_model_selection(
                     response, highest_priority, inventory
@@ -157,11 +175,12 @@ class ProactiveService:
         if not self.visits.check_and_touch(user_id, reference):
             return None
         candidates = self.pipeline.inventory.reminder_candidates(reference)
-        return self.generator.generate(
-            candidates,
-            self.pipeline.inventory.list_instances(),
-            self.pipeline.history.list_context_window(user_id),
-        )
+        with request_context(user_id, "", metadata={"trigger": "proactive_visit"}):
+            return self.generator.generate(
+                candidates,
+                self.pipeline.inventory.list_instances(),
+                self.pipeline.history.list_context_window(user_id),
+            )
 
 
 def _as_utc(value: datetime) -> datetime:

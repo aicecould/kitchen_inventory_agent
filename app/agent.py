@@ -27,6 +27,7 @@ from app.audit import (
     review_candidate,
     review_tool_calls,
 )
+from app.llm_log import callback_store, logged_span, model_callbacks as persistent_model_callbacks
 from app.config import Settings
 from app.context import AgentContext, AgentResult
 from app.memory import ConversationHistoryRepository
@@ -101,7 +102,23 @@ class KitchenAgent:
         Callable[[SupervisorRequest, AuditResult], RepairDecision] | None
     ) = None
 
+    logging_callbacks: list[Any] = field(default_factory=list)
+
+    @property
+    def callbacks(self) -> list[Any]:
+        return [*self.model_callbacks, *self.logging_callbacks]
+
     def run(self, context: AgentContext, target_language: str = "zh") -> AgentResult:
+        with logged_span(
+            callback_store(self.callbacks), "request", "kitchen_agent",
+            prompt={"context": context, "target_language": target_language},
+            metadata={"user_id": context.user_id, "segment_id": context.segment_id},
+        ) as query:
+            result = self._run(context, target_language)
+            query["content"] = result
+            return result
+
+    def _run(self, context: AgentContext, target_language: str = "zh") -> AgentResult:
         trace = TraceRecorder()
         user_message = self._user_message(
             context,
@@ -124,10 +141,11 @@ class KitchenAgent:
         started = perf_counter()
         try:
             invoke_config: dict[str, object] = {
-                "recursion_limit": self.recursion_limit
+                "recursion_limit": self.recursion_limit,
+                "metadata": {"log_component": "kitchen_agent"},
             }
-            if self.model_callbacks:
-                invoke_config["callbacks"] = self.model_callbacks
+            if self.callbacks:
+                invoke_config["callbacks"] = self.callbacks
             response = agent.invoke(
                 {"messages": [{"role": "user", "content": user_message}]},
                 config=invoke_config,
@@ -268,7 +286,8 @@ class KitchenAgent:
                     "content": json.dumps(payload, ensure_ascii=False, default=str),
                 },
             ],
-            callbacks=self.model_callbacks,
+            callbacks=self.callbacks,
+            component="response_repair",
         )
 
     def _run_main_retry(
@@ -295,9 +314,8 @@ class KitchenAgent:
                     {"role": "user", "content": user_message},
                 ],
                 config=(
-                    {"callbacks": self.model_callbacks}
-                    if self.model_callbacks
-                    else None
+                    {"callbacks": self.callbacks,
+                     "metadata": {"log_component": "answer_rewrite"}}
                 ),
             )
             content = self._last_text([response])
@@ -313,9 +331,10 @@ class KitchenAgent:
                 tools=tools,
                 system_prompt=RECIPE_RECOVERY_SYSTEM_PROMPT,
             )
-            invoke_config = {"recursion_limit": self.recursion_limit}
-            if self.model_callbacks:
-                invoke_config["callbacks"] = self.model_callbacks
+            invoke_config = {"recursion_limit": self.recursion_limit,
+                             "metadata": {"log_component": "recipe_recovery"}}
+            if self.callbacks:
+                invoke_config["callbacks"] = self.callbacks
             response = agent.invoke(
                 {"messages": [{"role": "user", "content": user_message}]},
                 config=invoke_config,
@@ -795,6 +814,7 @@ def build_agent(
         recursion_limit=settings.agent_recursion_limit,
         max_input_chars=settings.deepseek_max_input_chars,
         model_callbacks=list(model_callbacks or []),
+        logging_callbacks=persistent_model_callbacks(settings, "kitchen_agent"),
     )
 
 

@@ -60,6 +60,7 @@ from app.tools.inventory import InventoryRepository
 from app.tools.recipe import RecipeRouter
 from app.tasks import CookingTask, CookingTaskRepository, CookingTaskService
 from app.trace import TraceRecorder
+from app.llm_log import active_store, log_store, logged_span, request_context
 from app.vision import recognize_ingredients
 from app.vision_confirmations import VisionConfirmationRepository
 from recommender.models import RecommenderArtifactsError
@@ -114,46 +115,62 @@ class KitchenPipeline:
         reconciliation_task_id: str | None = None,
     ) -> AgentResult:
         segment_id = self.history.reserve_segment_id()
-        result = self._process_request(
-            user_id=user_id,
-            text=text,
-            image_bytes=image_bytes,
-            target_language=target_language,
-            initial_trace=initial_trace,
-            segment_id=segment_id,
-            reconciliation_task_id=reconciliation_task_id,
-        )
-        result.segment_id = segment_id
-        result.recipe_options = _recipe_options(result.tool_history)
-        if (
-            reconciliation_task_id is not None
-            and not result.blocked
-            and _has_sourced_inventory_proposal(
-                result.tool_history, reconciliation_task_id
-            )
-        ):
-            reconciliation_task = self.tasks.get_reconciliation_task(
-                user_id, reconciliation_task_id
-            )
-            self.tasks.close_reconciliation(
+        store = log_store(self.settings)
+        image_reference = store.capture_image(image_bytes) if store else None
+        with request_context(user_id, segment_id), logged_span(
+            store, "request", "process_request", prompt={
+                "text": text, "target_language": target_language,
+                "reconciliation_task_id": reconciliation_task_id,
+                "image": image_reference,
+                "image_present": image_bytes is not None,
+                "profile_markdown": self.profile.markdown,
+            }
+        ) as span:
+            result = self._process_request(
                 user_id=user_id,
-                task_id=reconciliation_task_id,
-                expected_version=reconciliation_task.version,
-                request_id=f"reconcile-{segment_id}",
+                text=text,
+                image_bytes=image_bytes,
+                target_language=target_language,
+                initial_trace=initial_trace,
+                segment_id=segment_id,
+                reconciliation_task_id=reconciliation_task_id,
             )
-        self._record_result(
-            user_id=user_id,
-            request_text=text,
-            result=result,
-            confirmation_result=None,
-            segment_id=segment_id,
-        )
-        if self.profile_summarizer is not None:
-            result.profile_proposals.extend(
-                self.profile_summarizer.run_if_due(user_id)
+            result.segment_id = segment_id
+            result.recipe_options = _recipe_options(result.tool_history)
+            if (
+                reconciliation_task_id is not None
+                and not result.blocked
+                and _has_sourced_inventory_proposal(
+                    result.tool_history, reconciliation_task_id
+                )
+            ):
+                reconciliation_task = self.tasks.get_reconciliation_task(
+                    user_id, reconciliation_task_id
+                )
+                self.tasks.close_reconciliation(
+                    user_id=user_id,
+                    task_id=reconciliation_task_id,
+                    expected_version=reconciliation_task.version,
+                    request_id=f"reconcile-{segment_id}",
+                )
+            self._record_result(
+                user_id=user_id,
+                request_text=text,
+                result=result,
+                confirmation_result=None,
+                segment_id=segment_id,
             )
-            self.profile = self.profile_actions.repository.read()
-        return result
+            if self.profile_summarizer is not None:
+                result.profile_proposals.extend(
+                    self.profile_summarizer.run_if_due(user_id)
+                )
+                self.profile = self.profile_actions.repository.read()
+            span["content"] = {"content": result.content, "blocked": result.blocked,
+                               "audit_reason": result.audit_reason,
+                               "execution_trace": result.execution_trace,
+                               "tool_history": result.tool_history,
+                               "profile_proposals": result.profile_proposals}
+            return result
 
     def _process_request(
         self,
@@ -181,7 +198,10 @@ class KitchenPipeline:
                 "image request bypasses text-only classifier",
             )
         else:
-            route_decision = route_deterministically(text)
+            with logged_span(active_store(), "component", "deterministic_route",
+                             prompt={"text": text}) as routing_span:
+                route_decision = route_deterministically(text)
+                routing_span["content"] = route_decision
             route_detail = route_decision.kind
             if route_decision.operation is not None:
                 route_detail += f"; {route_decision.operation}"
@@ -227,6 +247,7 @@ class KitchenPipeline:
                             f"score={value.positive_score:.4f}; "
                             f"threshold={value.threshold:.4f}"
                         ),
+                        inputs={"text": text},
                     )
                 except Exception:
                     trace.record(
@@ -245,7 +266,9 @@ class KitchenPipeline:
                         execution_trace=trace.events,
                     )
 
-        intent = match_intent(text)
+        with logged_span(active_store(), "component", "intent_match", prompt={"text": text}) as intent_span:
+            intent = match_intent(text)
+            intent_span["content"] = intent
         trace.record("routing", "intent_match", "success", intent)
 
         if intent == "order_unsupported":
@@ -927,6 +950,7 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
             api_key=settings.deepseek_api_key,
             model=settings.deepseek_model,
             timeout=settings.http_timeout_seconds,
+            logging_settings=settings,
         )
         if settings.deepseek_api_key
         else None
@@ -944,7 +968,7 @@ def build_pipeline(settings: Settings | None = None) -> KitchenPipeline:
         else None
     )
     profile_summarizer = (
-        ProfileSummarizer(agent.model, history, profile_actions)
+        ProfileSummarizer(agent.model, history, profile_actions, callbacks=agent.callbacks)
         if agent is not None
         else None
     )
