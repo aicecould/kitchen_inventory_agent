@@ -66,6 +66,7 @@ class SupervisorRequest(BaseModel):
     content: str
     tool_history: list[dict[str, object]] = Field(default_factory=list)
     intent: str = "unknown"
+    request_text: str = ""
     target_language: str = "zh"
 
 

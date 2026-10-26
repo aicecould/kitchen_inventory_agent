@@ -30,7 +30,7 @@ SQLite 普通列保存 `id`、`user_id`、`segment_id`、`source`、`status`、`
 | `steps` | 有业务意义的组件执行、模型调用、工具调用和决策事件 |
 | `result` | 最终内容、业务返回信息、执行状态和错误类型 |
 | `time` | UTC 开始/结束时间和毫秒耗时 |
-| `models` | 实际调用过的模型名称 |
+| `models` | 服务响应声明的模型名称；缺失身份的调用不以配置名称填充 |
 | `tokens` | 已知用量之和、模型调用次数、已返回用量的调用数、用量是否完整 |
 
 每个 `steps` 明细保留自身的 ID、父明细 ID、类型、名称、输入、输出、参数、状态、耗时。
@@ -77,3 +77,22 @@ ORDER BY started_at DESC;
 测试使用独立临时日志库，不向应用日志库写入构造的数据。实际业务数据不作为测试夹具。
 日志保留完整输入和上下文，当前不自动清理。不采集请求头或客户端对象；结构化凭据字段会替换，
 正文中的敏感信息不做自动识别。异常只记录类型，避免把供应商错误正文中的凭据写入日志。
+
+## 模型身份（schema_version=2）
+
+每个模型步骤的 `model_identity` 区分 `configured_model`、`requested_model` 和
+`response_model`。`model` 与 `models` 只汇总响应声明；`source=response_body` 表示
+读取 SDK 补齐前的原始响应字段，缺失时为 `unknown`。`sdk_model` 保留 SDK 汇总名称，
+不能用来确认实际模型。`independently_verified=false` 表示未独立核验远端部署权重。
+旧日志仅能依据已保存的消息元数据恢复，来源标为 `message_response_metadata`。
+
+可在备份后纠正旧日志的混合字段：
+
+```bash
+.venv/bin/python -m app.log_migration --db data/llm_logs.db
+```
+
+迁移自动使用 SQLite backup 保存完整数据库，旧值留在 `legacy_model`，只处理 v1，
+不修改模型消息、工具结果或历史回答。重复执行不重复修改已迁移记录。
+新请求的 `result.public_response` 保存实际提供给前端的字段，原始 `tool_history`
+和内部审计原因只保留在日志与内部处理链中。完整业务规则见 [business_flow.md](business_flow.md)。

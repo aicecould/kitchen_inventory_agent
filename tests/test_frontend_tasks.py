@@ -102,6 +102,18 @@ console.log(JSON.stringify({
     }
 
 
+def test_recommended_recipe_precedes_collapsed_other_candidates():
+    output = _run_node("""
+console.log(tasks.renderRecipeOptions('hist_1', [
+  {id: 'a', title: 'Apple Pie', ingredients: ['apple']},
+  {id: 'b', title: 'Tomato Soup', ingredients: ['tomato']},
+], null, '推荐 Tomato Soup（番茄汤）'));
+""")
+    assert output.index('data-recipe-id="b"') < output.index('<details')
+    assert output.index('<details') < output.index('data-recipe-id="a"')
+    assert "其他候选菜谱（1）" in output
+
+
 class _PageElements(HTMLParser):
     def __init__(self) -> None:
         super().__init__()

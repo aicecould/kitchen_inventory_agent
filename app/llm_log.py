@@ -167,7 +167,7 @@ class LLMLogStore:
         info = {**context.get("metadata", {}), **(metadata or {})}
         source = info.pop("source", self.source)
         record = {
-            "id": query_id, "schema_version": 1, "name": name, "source": source,
+            "id": query_id, "schema_version": 2, "name": name, "source": source,
             "user_id": context.get("user_id") or info.pop("user_id", None),
             "segment_id": context.get("segment_id") or info.pop("segment_id", None),
             "request": json_value(prompt), "prompt_hash": fingerprint(prompt),
@@ -220,6 +220,11 @@ class LLMLogStore:
             "status": "running", "error_type": None,
             "time": {"started_at": _now(), "ended_at": None, "duration_ms": None},
         }
+        if kind == "llm":
+            step["model_identity"] = model_identity(
+                model, (parameters or {}).get("model") or (parameters or {}).get("model_name"), None, None
+            )
+            step["model"] = None
 
         def append(record: dict[str, Any]) -> None:
             # A nested model may receive both inherited and explicit callbacks.
@@ -231,6 +236,7 @@ class LLMLogStore:
 
     def finish(self, step_id: str | None, *, content: Any = None, tool_calls: Any = None,
                usage: dict[str, Any] | None = None, model: str | None = None,
+               identity: dict[str, Any] | None = None,
                error: BaseException | None = None, query_id: str | None = None) -> None:
         if step_id is None:
             return
@@ -245,6 +251,13 @@ class LLMLogStore:
                         error_type=type(error).__name__ if error else None)
             if model:
                 step["model"] = model
+            if step["kind"] == "llm":
+                step["model_identity"] = identity or model_identity(
+                    step["model_identity"]["configured_model"],
+                    step["model_identity"]["requested_model"], model,
+                    "response_body" if model else None,
+                )
+                step["model"] = step["model_identity"]["response_model"]
             _end_time(step["time"])
 
         self._update(query_id or (_context.get() or {}).get("query_id"), update)
@@ -271,6 +284,41 @@ def _parse_usage(usage: dict[str, Any] | None) -> dict[str, int | None]:
     if total is None and isinstance(input_tokens, int) and isinstance(output_tokens, int):
         total = input_tokens + output_tokens
     return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total}
+
+
+def model_identity(configured: str | None, requested: str | None,
+                   reported: str | None, source: str | None) -> dict[str, Any]:
+    return {"configured_model": configured, "requested_model": requested,
+            "response_model": reported, "source": source or "unknown",
+            "independently_verified": False}
+
+
+def response_model_identity(configured: str | None, requested: str | None,
+                            messages: list[Any], output: dict[str, Any]) -> dict[str, Any]:
+    # ChatOpenAI may fill llm_output.model_name from the request. Message response
+    # metadata carries the per-response model, and therefore takes precedence.
+    reported = []
+    stamped = False
+    for message in messages:
+        metadata = (message.get("response_metadata", {}) if isinstance(message, dict)
+                    else getattr(message, "response_metadata", {}))
+        evidence = metadata.get("model_identity_response")
+        if isinstance(evidence, dict):
+            stamped = True
+            name = evidence.get("model")
+        else:
+            name = metadata.get("model_name") or metadata.get("model")
+        if isinstance(name, str) and name.strip():
+            reported.append(name)
+    unique = sorted(set(reported))
+    identity = model_identity(configured, requested,
+                              unique[0] if len(unique) == 1 else None,
+                              ("response_body" if stamped else "message_response_metadata") if len(unique) == 1 else None)
+    identity["message_models"] = unique
+    identity["sdk_model"] = output.get("model_name") or output.get("model")
+    if len(unique) > 1:
+        identity["source"] = "conflicting_response_models"
+    return identity
 
 
 def _total_usage(calls: list[dict[str, Any]]) -> dict[str, Any]:
@@ -377,6 +425,7 @@ class PersistentLLMCallback(BaseCallbackHandler):
     def __init__(self, store: LLMLogStore, component: str, model: str) -> None:
         self.store, self.component, self.model = store, component, model
         self._runs: dict[str, tuple[LLMLogStore, str]] = {}
+        self._requested: dict[str, str | None] = {}
 
     def _start(self, kind: str, serialized: Any, run_id: Any, parent_run_id: Any,
                prompt: Any = None, parameters: Any = None,
@@ -401,6 +450,7 @@ class PersistentLLMCallback(BaseCallbackHandler):
     def on_chat_model_start(self, serialized: Any, messages: Any, *, run_id: Any,
                             parent_run_id: Any = None, **kwargs: Any) -> None:
         params = kwargs.get("invocation_params", {})
+        self._requested[str(run_id)] = params.get("model") or params.get("model_name")
         # Explicit allowlist excludes client objects, headers and credentials.
         params = {k: v for k, v in params.items() if k in {
             "model", "model_name", "temperature", "max_tokens", "stop", "tools",
@@ -424,10 +474,14 @@ class PersistentLLMCallback(BaseCallbackHandler):
             metadata = getattr(messages[0], "response_metadata", {})
             usage = usage or metadata.get("token_usage") or metadata.get("usage")
         calls = [call for m in messages for call in (getattr(m, "tool_calls", None) or [])]
+        identity = response_model_identity(
+            self.model, self._requested.pop(str(run_id), None), messages, output
+        )
         self._finish(run_id, content=messages, tool_calls=calls,
-                     usage=usage, model=output.get("model_name") or output.get("model"))
+                     usage=usage, identity=identity)
 
     def on_llm_error(self, error: BaseException, *, run_id: Any, **kwargs: Any) -> None:
+        self._requested.pop(str(run_id), None)
         self._finish(run_id, error=error)
 
     def on_tool_start(self, serialized: Any, input_str: str, *, run_id: Any,

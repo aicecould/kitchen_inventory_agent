@@ -1,8 +1,8 @@
 # PyTorch XPU wheels for Intel GPU.
 --extra-index-url https://download.pytorch.org/whl/xpu
 
-langchain>=1.0,<2.0
-langchain-openai>=1.0,<2.0
+langchain>=1.4.7,<2.0
+langchain-openai>=1.7.2,<2.0
 pydantic>=2.0,<3.0
 python-dotenv>=1.0,<2.0
 httpx>=0.27,<1.0

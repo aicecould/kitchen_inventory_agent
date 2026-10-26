@@ -497,7 +497,7 @@ def resolve_vision_confirmation(
             status_code=502,
             detail=detail,
         ) from exc
-    return result.model_dump(mode="json")
+    return result.public_payload()
 
 
 @app.post("/api/process")
@@ -609,7 +609,7 @@ async def process_request(
             status_code=502,
             detail=detail,
         ) from exc
-    return result.model_dump(mode="json")
+    return result.public_payload()
 
 
 @app.get("/", include_in_schema=False)

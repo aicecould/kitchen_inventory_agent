@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Protocol
 
-from langchain_openai import ChatOpenAI
+from app.llm import ObservedChatOpenAI as ChatOpenAI
 from pydantic import BaseModel
 
 from app.llm_log import model_callbacks

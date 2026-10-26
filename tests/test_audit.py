@@ -24,6 +24,36 @@ def test_regex_audit_placeholder_allows_normal_content() -> None:
     assert result.code == AuditCode.PASSED
 
 
+@pytest.mark.parametrize("internal", [
+    "inv_" + "1" * 32, "act_" + "2" * 32,
+    "expiry_source=llm", "stocked_at", "local_recipe_dataset",
+    "<think>internal</think>", "<tool_call>{}</tool_call>",
+    "2026-10-26T08:45:29+00:00",
+])
+def test_internal_metadata_and_protocol_never_pass_public_answer_audit(internal):
+    result = regex_audit(f"推荐番茄汤。{internal}")
+    assert not result.passed
+    assert result.code == AuditCode.REPAIRABLE_OUTPUT_VIOLATION
+
+
+def test_one_recipe_request_rejects_even_an_additional_side_suggestion():
+    history = [{"tool": "search_recipes", "arguments": {"ingredients": ["tomato"], "ingredient_mapping": []}, "result": [
+        {"id": "r1", "title": "Tomato Soup", "ingredients": ["tomato"], "instructions": "Simmer."},
+        {"id": "r2", "title": "Apple Crisp", "ingredients": ["apple"], "instructions": "Bake."},
+    ]}]
+    result = review_candidate("推荐 Tomato Soup。另可做 Apple Crisp。", history,
+                              intent="recipe", request_text="根据库存推荐一道菜")
+    assert result.code == AuditCode.REPAIRABLE_OUTPUT_VIOLATION
+    assert review_candidate("推荐 Tomato Soup（番茄汤）。", history,
+                            intent="recipe", request_text="根据库存推荐一道菜").passed
+
+
+def test_repeated_generation_cannot_pass_as_a_recipe_answer():
+    result = regex_audit("推荐番茄汤。缺少材料：" + "黄油、鸡蛋、面粉、牛奶、柠檬、" * 8)
+    assert not result.passed
+    assert result.reason == "Model output contains repeated text"
+
+
 def test_recipe_recommendation_requires_search_tool_history() -> None:
     result = review_candidate(
         "推荐一道番茄汤菜谱，步骤是把番茄煮熟。",
@@ -285,8 +315,8 @@ def test_inventory_audit_accepts_exact_lines_from_multiple_reads() -> None:
     assert audit.passed is True
 
 
-def test_canonical_inventory_renderer_preserves_complete_structured_snapshot() -> None:
-    """Canonical output must expose every authoritative identity and quantity value."""
+def test_canonical_inventory_renderer_preserves_quantity_without_internal_fields() -> None:
+    """Public inventory keeps quantities, while tool records retain identifiers."""
     assert hasattr(audit_module, "canonical_tool_response")
     item = inventory_instance()
     history = [
@@ -300,10 +330,10 @@ def test_canonical_inventory_renderer_preserves_complete_structured_snapshot() -
     content = audit_module.canonical_tool_response(history)
 
     assert content is not None
-    assert "库存实例快照（只读）" in content
-    assert str(item["instance_id"]) in content
+    assert "当前库存：" in content
+    assert str(item["instance_id"]) not in content
     assert "大约100个" in content
-    assert "2026-08-07T00:00:00+00:00" in content
+    assert "2026-08-07T00:00:00+00:00" not in content
     assert review_tool_calls(content, history).passed is True
 
 
@@ -415,9 +445,14 @@ def test_canonical_renderer_supports_every_pending_inventory_operation(
 
     assert content is not None
     assert "待确认操作（尚未执行）" in content
-    assert "status=pending（尚未执行）" in content
+    assert "尚未执行" in content
+    assert "status=pending" not in content
     for fragment in fragments:
-        assert fragment in content
+        if fragment.startswith(("inv_", "act_")) or fragment == "最后确认":
+            assert fragment not in content
+        elif fragment not in {"预计数量 1", "unknown"}:
+            assert fragment in content
+    assert "inv_" not in content and "act_" not in content
     assert review_tool_calls(content, history).passed is True
 
 
@@ -473,15 +508,10 @@ def test_canonical_mixed_response_appends_recipe_titles_and_source_links() -> No
         },
     ]
 
-    content = audit_module.canonical_tool_response(history)
-
-    assert content is not None
-    assert "Tomato Soup" in content
-    assert "食材：tomato" in content
-    assert "步骤：Simmer." in content
-    assert "来源：example" in content
-    assert "https://recipes.example/tomato-soup" in content
+    assert audit_module.canonical_tool_response(history) is None
+    content = "推荐 **Tomato Soup**（番茄汤）：将番茄煮软。来源：[原始菜谱](https://recipes.example/tomato-soup)"
     assert review_tool_calls(content, history).passed is True
+    assert history[0]["result"][0]["instance_id"] == item["instance_id"]
 
 
 def test_canonical_mixed_response_discloses_an_empty_recipe_result() -> None:
@@ -503,12 +533,8 @@ def test_canonical_mixed_response_discloses_an_empty_recipe_result() -> None:
         },
     ]
 
-    content = audit_module.canonical_tool_response(history)
-
-    assert content is not None
-    assert "菜谱工具结果：" in content
-    assert "未找到符合条件的菜谱。" in content
-    assert review_tool_calls(content, history).passed is True
+    assert audit_module.canonical_tool_response(history) is None
+    assert review_tool_calls("未找到符合条件的菜谱。", history).passed is True
 
 
 def test_canonical_mixed_response_honors_english_target_language() -> None:
@@ -542,10 +568,11 @@ def test_canonical_mixed_response_honors_english_target_language() -> None:
     content = audit_module.canonical_tool_response(history, target_language="en")
 
     assert content is not None
-    assert "Inventory snapshots (read-only):" in content
+    assert "Current inventory:" in content
     assert "Pending actions (not executed):" in content
-    assert "status=pending (not executed)" in content
-    assert "Recipe tool results:" in content
+    assert "(not executed)" in content
+    assert "status=pending" not in content
+    assert "Recipe suggestion:" in content
     assert "Ingredients: tomato; salt" in content
     assert "Instructions: Simmer, then serve." in content
     assert "Source: example" in content

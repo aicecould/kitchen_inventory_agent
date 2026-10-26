@@ -184,6 +184,20 @@ def test_pipeline_reserves_segment_id_before_agent_and_persists_same_id(
     assert agent.contexts[0].segment_id == record.segment_id
 
 
+@pytest.mark.parametrize("text", [
+    "根据现有库存推荐一道菜", "根据现有库存推荐一道菜，并避开我的过敏原",
+])
+def test_inventory_recipe_request_bypasses_classifier_and_keeps_recipe_intent(tmp_path, text):
+    pipeline = build_test_pipeline(tmp_path)
+    classifier = ForbiddenClassifier()
+    pipeline.food_classifier = classifier
+    agent = CapturingAgent()
+    pipeline.agent = agent
+    pipeline.process_request(user_id="u", text=text)
+    assert classifier.calls == 0
+    assert agent.contexts[0].intent == "recipe"
+
+
 def test_pipeline_injects_active_task_without_partitioning_global_history(
     tmp_path: Path,
 ) -> None:
@@ -421,6 +435,25 @@ def install_scripted_agent(
         repair_decider=repair_decider,
     )
     return model
+
+
+def test_recipe_tool_errors_can_be_corrected_without_becoming_recipe_evidence(tmp_path):
+    pipeline = build_test_pipeline(tmp_path)
+    pipeline.inventory.add_instance("番茄", "2个", None, "unknown")
+    model = install_scripted_agent(pipeline, [
+        AIMessage(content="", tool_calls=[{"name": "search_recipes", "id": "bad",
+                  "args": {"ingredients": [], "ingredient_mapping": []}}]),
+        AIMessage(content="", tool_calls=[{"name": "search_recipes", "id": "good",
+                  "args": {"ingredients": ["tomato"], "ingredient_mapping": []}}]),
+        AIMessage(content="推荐 Tomato Soup（番茄汤），将番茄煮软。"),
+    ], recipes=FixedRecipeRouter())
+    result = pipeline.process_request(user_id="u", text="根据库存推荐一道菜")
+    assert result.public_payload()["state"] == "completed"
+    assert result.tool_history[0]["origin"] == "business_rule"
+    assert result.tool_history[1]["status"] == "error"
+    assert result.tool_history[2]["result"][0]["title"] == "Tomato Soup"
+    assert all(names == ["search_recipes"] for names in model.bound_tool_names_by_call)
+    assert pipeline.actions.repository.list_pending("u") == []
 
 
 class FixedRecipeRouter:
@@ -804,10 +837,7 @@ def test_inventory_query_returns_exact_instance_snapshots_without_deepseek(
     result = pipeline.process_request(user_id="test", text="查询一下当前库存")
 
     assert result.content == (
-        "库存实例快照（只读）：\n"
-        f"- 土豆 [{item['instance_id']}]：2 个；"
-        f"入库 {item['stocked_at']}；过期 未知；日期来源 unknown；"
-        f"最后确认 {item['last_confirmed_at']}"
+        "当前库存：\n- 土豆：2 个；过期 未知"
     )
     assert result.blocked is False
     assert result.tool_history == [
@@ -883,10 +913,7 @@ def test_supported_list_bypasses_classifier_and_returns_real_inventory(
     result = pipeline.process_request(user_id="test", text="查询库存")
 
     assert result.content == (
-        "库存实例快照（只读）：\n"
-        f"- 土豆 [{item['instance_id']}]：大约100个；"
-        f"入库 {item['stocked_at']}；过期 未知；日期来源 unknown；"
-        f"最后确认 {item['last_confirmed_at']}"
+        "当前库存：\n- 土豆：大约100个；过期 未知"
     )
     assert classifier.calls == 0
     assert result.execution_trace[0].name == "deterministic_route"
@@ -905,13 +932,7 @@ def test_supported_named_read_bypasses_classifier_and_returns_exact_instances(
     result = pipeline.process_request(user_id="test", text="查看土豆还有多少")
 
     assert result.content == (
-        "库存实例快照（只读）：\n"
-        f"- 土豆 [{first['instance_id']}]：2个；"
-        f"入库 {first['stocked_at']}；过期 未知；日期来源 unknown；"
-        f"最后确认 {first['last_confirmed_at']}\n"
-        f"- 土豆 [{second['instance_id']}]：半袋；"
-        f"入库 {second['stocked_at']}；过期 未知；日期来源 unknown；"
-        f"最后确认 {second['last_confirmed_at']}"
+        "当前库存：\n- 土豆：2个；过期 未知\n- 土豆：半袋；过期 未知"
     )
     assert result.tool_history == [
         {
@@ -969,9 +990,10 @@ def test_shared_prefix_instances_are_rendered_with_distinct_full_ids(
 
     result = pipeline.process_request(user_id="test", text="查看番茄还有多少")
 
-    assert str(first["instance_id"]) in result.content
-    assert str(second["instance_id"]) in result.content
-    assert result.content.count("inv_abcd") == 2
+    assert str(first["instance_id"]) not in result.content
+    assert str(second["instance_id"]) not in result.content
+    assert result.content.count("- 番茄：") == 2
+    assert result.tool_history[0]["result"] == [first, second]
 
 
 def test_explicit_full_id_replace_bypasses_classifier_and_stays_pending(
@@ -996,7 +1018,7 @@ def test_explicit_full_id_replace_bypasses_classifier_and_stays_pending(
 
     assert classifier.calls == 0
     assert result.blocked is False
-    assert instance_id in result.content
+    assert instance_id not in result.content
     assert pipeline.inventory.get_instance(instance_id) == original
     pending = pipeline.actions.repository.list_pending("test")
     assert len(pending) == 1
@@ -1031,7 +1053,7 @@ def test_explicit_full_id_remove_and_confirm_bypass_classifier_and_stay_pending(
 
     assert classifier.calls == 0
     assert result.blocked is False
-    assert instance_id in result.content
+    assert instance_id not in result.content
     assert pipeline.inventory.get_instance(instance_id) == original
     pending = pipeline.actions.repository.list_pending("test")
     assert len(pending) == 1
@@ -1178,7 +1200,8 @@ def test_agent_inventory_proposal_replaces_english_execution_prose_with_canonica
     assert result.blocked is False
     assert "I added" not in result.content
     assert "待确认操作（尚未执行）" in result.content
-    assert "status=pending（尚未执行）" in result.content
+    assert "尚未执行" in result.content
+    assert "status=pending" not in result.content
     assert "牛奶" in result.content and "一盒" in result.content
     assert pipeline.inventory.find_by_name("牛奶") == []
     events = [
@@ -1189,7 +1212,7 @@ def test_agent_inventory_proposal_replaces_english_execution_prose_with_canonica
     assert events[0].detail == "unknown expiry; proposal remains pending"
 
 
-def test_agent_mixed_inventory_recipe_response_is_canonical_and_useful(
+def test_agent_mixed_inventory_recipe_response_preserves_model_recommendation(
     tmp_path: Path,
 ) -> None:
     """Canonical inventory replacement must append real recipe titles and links."""
@@ -1225,7 +1248,7 @@ def test_agent_mixed_inventory_recipe_response_is_canonical_and_useful(
                     }
                 ],
             ),
-            AIMessage(content="I checked the pantry and found something useful."),
+            AIMessage(content="I recommend Tomato Soup. Simmer the tomato. [Recipe](https://recipes.example/tomato-soup)"),
         ],
         recipes=FixedRecipeRouter(),
     )
@@ -1237,16 +1260,11 @@ def test_agent_mixed_inventory_recipe_response_is_canonical_and_useful(
     )
 
     assert result.blocked is False
-    assert "I checked" not in result.content
-    assert str(item["instance_id"]) in result.content
-    assert "大约100个" in result.content
-    assert "Tomato Soup" in result.content
-    assert "Ingredients: tomato" in result.content
-    assert "Instructions: Simmer." in result.content
-    assert "Source: example" in result.content
-    assert "https://recipes.example/tomato-soup" in result.content
-    assert "Inventory snapshots (read-only):" in result.content
-    assert "库存实例快照" not in result.content
+    assert result.content == "I recommend Tomato Soup. Simmer the tomato. [Recipe](https://recipes.example/tomato-soup)"
+    assert str(item["instance_id"]) not in result.content
+    assert result.tool_history[0]["result"] == [item]
+    assert result.recipe_options[0]["title"] == "Tomato Soup"
+    assert "Current inventory:" not in result.content
 
 
 def test_relative_replacement_accepts_equivalent_expiry_serializations(

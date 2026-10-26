@@ -12,9 +12,10 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from langchain.agents import create_agent
-from langchain_core.messages import ToolMessage
+from langchain.agents.middleware import ToolErrorMiddleware, wrap_model_call
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
+from app.llm import ObservedChatOpenAI as ChatOpenAI
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from app.actions import InventoryActionService
@@ -87,6 +88,46 @@ _ALLERGEN_TOOL_ERRORS = frozenset(
 )
 
 
+def _recipe_tool_error(error: Exception, request: Any) -> str | None:
+    if isinstance(error, ValueError):
+        return (
+            "Recipe search arguments were rejected. Use nonempty ingredient names "
+            "from inventory_snapshot or list_inventory_instances, and provide the "
+            "required original-to-English ingredient_mapping. Correct the arguments "
+            "and retry; do not present this diagnostic text to the user."
+        )
+    return None
+
+
+def _readonly_recipe_request(context: AgentContext) -> bool:
+    return (
+        context.intent == "recipe" and context.inventory_source_task_id is None
+        and not re.search(r"添加|新增|修改|更新|替换|删除|移除|校准|用完|核对|扣减|确认库存|永久|以后|记住|默认", context.request_text)
+    )
+
+
+def _recipe_answer_phase(context: AgentContext, language: str):
+    @wrap_model_call
+    def finalize(request, handler):
+        completed_search = any(
+            isinstance(message, ToolMessage) and message.name == "search_recipes"
+            and message.status == "success" for message in request.state["messages"]
+        )
+        if _readonly_recipe_request(context) and completed_search:
+            prompt = (
+                "你是厨房菜谱助手。检索已完成，本轮只生成最终回答，不得再调用任何工具。"
+                "只依据成功的菜谱结果和用户上下文回答，不得新增菜谱或链接。"
+                f"回答语言为 {language}；保留原始菜名，可附译名。"
+                "用户要求一道菜时只推荐一道，不附带第二道；简要说明已有食材、缺少材料和做法。"
+                "中文回答控制在300字以内。没有结果时说明未找到。"
+                "不得输出内部ID、字段名、JSON、工具过程、思考标签或原始时间戳。"
+                "数量保留原文。未记录过敏原不等于没有过敏，不能作无过敏保证。"
+            )
+            return handler(request.override(tools=[], system_message=SystemMessage(content=prompt)))
+        return handler(request)
+    return finalize
+
+
 @dataclass(slots=True)
 class KitchenAgent:
     model: ChatOpenAI
@@ -139,6 +180,8 @@ class KitchenAgent:
             model=self.model,
             tools=tools,
             system_prompt=SYSTEM_PROMPT,
+            middleware=[_recipe_answer_phase(context, target_language),
+                        ToolErrorMiddleware(_recipe_tool_error, tools=["search_recipes"])],
         )
         started = perf_counter()
         try:
@@ -179,12 +222,21 @@ class KitchenAgent:
             elapsed_ms(started),
         )
         messages = response.get("messages", [])
-        content = self._last_text(messages)
         history = self._tool_history(messages)
         canonical = canonical_tool_response(history, target_language=target_language)
         if canonical is not None:
             content = canonical
-        elif target_language == "zh" and any(
+        else:
+            try:
+                content = self._last_text(messages)
+            except RuntimeError:
+                trace.record("output", "final_text", "blocked", "no assistant text")
+                return AgentResult(
+                    content=fixed_response(AuditCode.TASK_IMPOSSIBLE, target_language),
+                    blocked=True, audit_reason=AuditCode.TASK_IMPOSSIBLE.value,
+                    tool_history=history, execution_trace=trace.events,
+                )
+        if canonical is None and target_language == "zh" and any(
             code in content for code in _ALLERGEN_TOOL_ERRORS
         ):
             content = "菜谱查询缺少或包含无效的过敏原过滤条件，本次没有发送查询请求。"
@@ -213,6 +265,7 @@ class KitchenAgent:
             content,
             history,
             intent=context.intent,
+            request_text=context.request_text,
             target_language=target_language,
             ingredients=context.ingredients,
             vision_confirmation_result=context.vision_confirmation_result,
@@ -223,6 +276,7 @@ class KitchenAgent:
                     candidate,
                     candidate_history,
                     intent=context.intent,
+                    request_text=context.request_text,
                     target_language=target_language,
                     ingredients=context.ingredients,
                     vision_confirmation_result=context.vision_confirmation_result,
@@ -244,6 +298,7 @@ class KitchenAgent:
                     content=content,
                     tool_history=history,
                     intent=context.intent,
+                    request_text=context.request_text,
                     target_language=target_language,
                 )
             )
@@ -332,6 +387,8 @@ class KitchenAgent:
                 model=self.model,
                 tools=tools,
                 system_prompt=RECIPE_RECOVERY_SYSTEM_PROMPT,
+                middleware=[_recipe_answer_phase(context, target_language),
+                            ToolErrorMiddleware(_recipe_tool_error, tools=["search_recipes"])],
             )
             invoke_config = {"recursion_limit": self.recursion_limit,
                              "metadata": {"log_component": "recipe_recovery"}}
@@ -674,6 +731,18 @@ class KitchenAgent:
                 return [item.model_dump(mode="json") for item in records]
 
             tools.append(search_conversation_history_by_time)
+        if (
+            context.intent == "recipe" and context.inventory_source_task_id is None
+            and not re.search(r"添加|新增|修改|更新|替换|删除|移除|校准|用完|核对|扣减|确认库存", context.request_text)
+        ):
+            allowed = {"search_recipes"}
+            if context.inventory_snapshot is None:
+                allowed.update({"list_inventory_instances", "find_inventory_instances", "get_inventory_instance"})
+            if re.search(r"永久|以后|记住|默认", context.request_text):
+                allowed.add("propose_profile_change")
+            if re.search(r"过去|昨天|之前|回顾|上次", context.request_text):
+                allowed.add("search_conversation_history_by_time")
+            tools = [candidate for candidate in tools if candidate.name in allowed]
         return tools
 
     @staticmethod
@@ -715,6 +784,7 @@ class KitchenAgent:
             "application_timezone": application_timezone,
             "intent_hint": context.intent,
             "ingredients": [item.model_dump(mode="json") for item in context.ingredients],
+            "inventory_snapshot": context.inventory_snapshot,
             "allergens": context.allergens,
             "allergen_intolerances": context.allergen_intolerances,
             "custom_allergens": context.custom_allergens,
@@ -739,8 +809,10 @@ class KitchenAgent:
     @staticmethod
     def _last_text(messages: list[Any]) -> str:
         for message in reversed(messages):
-            if isinstance(message, ToolMessage):
+            if not isinstance(message, AIMessage) or message.tool_calls:
                 continue
+            if message.response_metadata.get("finish_reason") == "length":
+                raise RuntimeError("Agent final text was truncated")
             content = getattr(message, "content", "")
             if isinstance(content, str) and content.strip():
                 return content.strip()
@@ -782,6 +854,8 @@ class KitchenAgent:
                         "result": result,
                     }
                 )
+                if message.status == "error":
+                    history[-1]["status"] = "error"
         return history
 
 

@@ -18,6 +18,12 @@ BLOCK_PATTERNS = (
     re.compile(r"忽略(?:之前|以上)(?:的)?指令"),
     re.compile(r"(?:已经|已)完成(?:付款|下单)"),
 )
+_INTERNAL_OUTPUT = re.compile(
+    r"\b(?:inv|act|prof|hist|task)_[0-9a-f]{32}\b|</?(?:think|tool_call)>|"
+    r"\b(?:instance_id|expiry_source|stocked_at|last_confirmed_at|tool_call_id|"
+    r"response_metadata|reasoning_content|local_recipe_dataset|status=pending)\b|"
+    r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}|工具(?:返回|结果)|结构化上下文"
+)
 _MARKDOWN_URL = re.compile(r"\[[^\]]+\]\((https?://[^)\s]+)\)")
 _INSTANCE_ID = re.compile(r"^inv_[0-9a-f]{32}$")
 _ACTION_ID = re.compile(r"^act_[0-9a-f]{32}$")
@@ -96,6 +102,10 @@ def audit_failure(
 def regex_audit(content: str) -> AuditResult:
     if not content.strip():
         return audit_failure("Output is empty")
+    if _INTERNAL_OUTPUT.search(content):
+        return audit_failure("Internal fields or model protocol reached the public answer")
+    if re.search(r"(.{12,160}?)\1{2,}", content, re.DOTALL):
+        return audit_failure("Model output contains repeated text")
     for pattern in BLOCK_PATTERNS:
         if pattern.search(content):
             return audit_failure(f"Matched blocked pattern: {pattern.pattern}")
@@ -138,6 +148,7 @@ def canonical_tool_response(
             "result": _as_value(entry.get("result")),
         }
         for entry in tool_history
+        if entry.get("status") != "error"
     ]
     return _canonical_response_from_calls(parsed_calls, target_language)
 
@@ -183,6 +194,7 @@ def review_tool_calls(
             "result": _as_value(entry.get("result")),
         }
         for entry in tool_history
+        if entry.get("status") != "error"
     ]
     for entry in parsed_calls:
         record_error = _validate_tool_record(entry)
@@ -251,6 +263,8 @@ def review_tool_calls(
                 "Recipe answer contains a URL absent from tool results",
                 AuditCode.RECIPE_RESULT_MISMATCH,
             )
+        if not recipes and _looks_like_recipe_recommendation(content):
+            return audit_failure("Recipe recommendation has empty tool results", AuditCode.RECIPE_RESULT_MISMATCH)
         if recipes and _looks_like_recipe_recommendation(content):
             titles = [str(item.get("title", "")).strip() for item in recipes]
             if not any(title and title.casefold() in content.casefold() for title in titles):
@@ -267,6 +281,7 @@ def review_candidate(
     tool_history: list[dict[str, object]],
     *,
     intent: str = "unknown",
+    request_text: str = "",
     target_language: str = "zh",
     ingredients: list[Ingredient] | None = None,
     vision_confirmation_result: dict[str, object] | None = None,
@@ -274,7 +289,8 @@ def review_candidate(
     """Return one stable review classification for supervisor orchestration."""
 
     has_recipe_tool = any(
-        entry.get("tool") == "search_recipes" for entry in tool_history
+        entry.get("tool") == "search_recipes" and entry.get("status") != "error"
+        for entry in tool_history
     )
     if (
         intent == "recipe"
@@ -300,6 +316,17 @@ def review_candidate(
             tool_result.reason or "Tool-call audit failed",
             AuditCode.REPAIRABLE_OUTPUT_VIOLATION,
         )
+
+    if re.search(r"(?:一|1)\s*道|\bone\s+(?:recipe|dish)\b", request_text, re.IGNORECASE):
+        titles: set[str] = set()
+        for entry in tool_history:
+            result = _as_value(entry.get("result"))
+            if entry.get("tool") == "search_recipes" and isinstance(result, list):
+                titles.update(str(item.get("title", "")).strip() for item in result
+                              if isinstance(item, dict) and item.get("title"))
+        mentioned = [title for title in titles if title.casefold() in content.casefold()]
+        if len(mentioned) > 1:
+            return audit_failure("User requested exactly one recipe; remove all other recipe suggestions")
 
     regex_result = regex_audit(content)
     if not regex_result.passed:
@@ -689,14 +716,22 @@ def _canonical_response_from_calls(
     ):
         return None
 
+    # Reading inventory to recommend a recipe is an intermediate step, not a
+    # request to dump the inventory or replace a translated recommendation.
+    if any(entry.get("tool") == "search_recipes" for entry in parsed_calls) and not any(
+        entry.get("tool") in frozenset(_INVENTORY_PROPOSAL_OPERATIONS) | _PROFILE_PROPOSAL_TOOLS
+        for entry in parsed_calls
+    ):
+        return None
+
     language = _canonical_language(target_language)
     sections: list[str] = []
     read_lines = _canonical_read_lines(parsed_calls, language)
     if read_lines:
         heading = (
-            "库存实例快照（只读）："
+            "当前库存："
             if language == "zh"
-            else "Inventory snapshots (read-only):"
+            else "Current inventory:"
         )
         sections.append(heading + "\n" + "\n".join(read_lines))
 
@@ -720,7 +755,7 @@ def _canonical_response_from_calls(
 
     recipe_lines = _canonical_recipe_lines(parsed_calls, language)
     if recipe_lines is not None:
-        heading = "菜谱工具结果：" if language == "zh" else "Recipe tool results:"
+        heading = "可选菜谱：" if language == "zh" else "Recipe suggestion:"
         sections.append(heading + "\n" + "\n".join(recipe_lines))
     return "\n\n".join(sections)
 
@@ -728,30 +763,16 @@ def _canonical_response_from_calls(
 def _canonical_profile_proposal_lines(
     parsed_calls: list[dict[str, object]], language: str
 ) -> list[str]:
-    lines: list[str] = []
+    lines = []
     for entry in parsed_calls:
         if entry.get("tool") not in _PROFILE_PROPOSAL_TOOLS:
             continue
         result = entry.get("result")
         if not isinstance(result, dict):
             continue
-        operation = result.get("operation", "")
-        category = result.get("category", "")
-        key = result.get("key", "")
         value = result.get("value")
-        proposal_id = result.get("proposal_id", "")
-        if language == "zh":
-            target = "删除" if operation == "delete" else str(value or "")
-            lines.append(
-                f"- 画像变更 | proposal_id={proposal_id} | status=pending（尚未写入）"
-            )
-            lines.append(f"  - {category} / {key}：{target}")
-        else:
-            target = "delete" if operation == "delete" else str(value or "")
-            lines.append(
-                f"- Profile change | proposal_id={proposal_id} | status=pending (not saved)"
-            )
-            lines.append(f"  - {category} / {key}: {target}")
+        target = ("删除该记录" if language == "zh" else "Delete this fact") if result.get("operation") == "delete" else str(value or "")
+        lines.append(f"- {target}")
     return lines
 
 
@@ -795,113 +816,40 @@ def _canonical_read_lines(
                 else f'- No instance matches the exact name "{name}".'
             )
         else:
-            instance_id = structured_arguments.get("instance_id", "")
             lines.append(
-                f"- 完整实例 ID {instance_id} 无匹配实例。"
+                "- 未找到指定的库存项。"
                 if language == "zh"
-                else f"- No instance matches full instance ID {instance_id}."
+                else "- The selected inventory item was not found."
             )
     return lines
 
 
 def _canonical_proposal_lines(
-    parsed_calls: list[dict[str, object]],
-    language: str,
+    parsed_calls: list[dict[str, object]], language: str,
 ) -> list[str]:
-    lines: list[str] = []
+    lines = []
     for entry in parsed_calls:
-        tool_name = entry.get("tool")
-        operation = _INVENTORY_PROPOSAL_OPERATIONS.get(str(tool_name))
+        operation = _INVENTORY_PROPOSAL_OPERATIONS.get(str(entry.get("tool")))
         result = entry.get("result")
         if operation is None or not isinstance(result, dict):
             continue
-        action_id = result.get("action_id", "")
-        pending_status = (
-            "status=pending（尚未执行）"
-            if language == "zh"
-            else "status=pending (not executed)"
-        )
-        lines.append(
-            f"- {_OPERATION_LABELS[language][operation]} | action_id={action_id} | "
-            f"{pending_status}"
-        )
-        preview = result.get("preview")
-        structured_preview = preview if isinstance(preview, dict) else {}
-        if operation == "inventory.add":
-            proposed = structured_preview.get("proposed")
-            value = proposed if isinstance(proposed, dict) else {}
-            if language == "zh":
-                lines.append(
-                    "  - 拟新增："
-                    f"{value.get('name', '')}：{value.get('quantity_text', '')}；"
-                    f"过期 {_display_value(value.get('expires_at'), language)}；"
-                    f"日期来源 {value.get('expiry_source', '')}"
-                )
-            else:
-                lines.append(
-                    "  - Proposed addition: "
-                    f"{value.get('name', '')}: {value.get('quantity_text', '')}; "
-                    f"expires {_display_value(value.get('expires_at'), language)}; "
-                    f"expiry source {value.get('expiry_source', '')}"
-                )
-        elif operation == "inventory.replace":
-            current = structured_preview.get("current")
-            proposed = structured_preview.get("proposed")
-            current_value = current if isinstance(current, dict) else {}
-            proposed_value = proposed if isinstance(proposed, dict) else {}
-            current_label = "当前" if language == "zh" else "Current"
-            lines.append(
-                f"  - {current_label}: {_canonical_snapshot(current_value, language)}"
-            )
-            if language == "zh":
-                lines.append(
-                    "  - 拟替换："
-                    f"{proposed_value.get('name', '')} "
-                    f"[{proposed_value.get('instance_id', '')}]："
-                    f"{proposed_value.get('quantity_text', '')}；"
-                    f"过期 {_display_value(proposed_value.get('expires_at'), language)}；"
-                    f"日期来源 {proposed_value.get('expiry_source', '')}"
-                )
-            else:
-                lines.append(
-                    "  - Proposed replacement: "
-                    f"{proposed_value.get('name', '')} "
-                    f"[{proposed_value.get('instance_id', '')}]: "
-                    f"{proposed_value.get('quantity_text', '')}; "
-                    f"expires {_display_value(proposed_value.get('expires_at'), language)}; "
-                    f"expiry source {proposed_value.get('expiry_source', '')}"
-                )
-        elif operation in {"inventory.remove", "inventory.confirm"}:
-            current = structured_preview.get("current")
-            current_value = current if isinstance(current, dict) else {}
-            if language == "zh":
-                label = "删除目标" if operation == "inventory.remove" else "确认目标"
-            else:
-                label = "Removal target" if operation == "inventory.remove" else "Confirmation target"
-            lines.append(
-                f"  - {label}: {_canonical_snapshot(current_value, language)}"
-            )
-        else:
-            if language == "zh":
-                lines.append(
-                    "  - 精确名称 "
-                    f"{structured_preview.get('name', '')}；预计数量 "
-                    f"{structured_preview.get('expected_count', '')}"
-                )
-            else:
-                lines.append(
-                    "  - Exact name "
-                    f"{structured_preview.get('name', '')}; expected count "
-                    f"{structured_preview.get('expected_count', '')}"
-                )
-            items = structured_preview.get("items")
-            if isinstance(items, list):
-                for item in items:
-                    if isinstance(item, dict):
-                        target_label = "删除目标" if language == "zh" else "Removal target"
-                        lines.append(
-                            f"  - {target_label}: {_canonical_snapshot(item, language)}"
-                        )
+        preview = result.get("preview") or {}
+        lines.append(f"- {_OPERATION_LABELS[language][operation]}（尚未执行）" if language == "zh"
+                     else f"- {_OPERATION_LABELS[language][operation]} (not executed)")
+        current = preview.get("current")
+        if isinstance(current, dict):
+            label = "当前" if language == "zh" else "Current"
+            lines.append(f"  - {label}：{_canonical_snapshot(current, language)}")
+        proposed = preview.get("proposed")
+        if isinstance(proposed, dict):
+            label = "拟更新为" if language == "zh" else "Proposed"
+            lines.append(f"  - {label}：{_canonical_snapshot(proposed, language)}")
+        if operation == "inventory.remove_all":
+            label = "预计删除" if language == "zh" else "Items to remove"
+            lines.append(f"  - {preview.get('name', '')}；{label} {preview.get('expected_count', '')}")
+            for item in preview.get("items", []):
+                if isinstance(item, dict):
+                    lines.append(f"  - {_canonical_snapshot(item, language)}")
     return lines
 
 
@@ -954,7 +902,7 @@ def _canonical_recipe_lines(
                         f"- {rendered_title}",
                         f"  - 食材：{'、'.join(ingredient_values) or '未提供'}",
                         f"  - 步骤：{instructions or '未提供'}",
-                        f"  - 来源：{source}",
+                        f"  - 来源：{_public_source(source, language)}",
                     ]
                 )
             else:
@@ -963,9 +911,12 @@ def _canonical_recipe_lines(
                         f"- {rendered_title}",
                         f"  - Ingredients: {'; '.join(ingredient_values) or 'Not provided'}",
                         f"  - Instructions: {instructions or 'Not provided'}",
-                        f"  - Source: {source}",
+                        f"  - Source: {_public_source(source, language)}",
                     ]
                 )
+            # In a combined write+recipe request, the deterministic confirmation
+            # summary offers one option; the remaining candidates stay in cards.
+            return lines
     if not searched:
         return None
     if lines:
@@ -977,24 +928,29 @@ def _canonical_recipe_lines(
     ]
 
 
+def _public_source(source: str, language: str) -> str:
+    if source == "local_recipe_dataset":
+        return "本地菜谱库" if language == "zh" else "Local recipe collection"
+    return source
+
+
 def _canonical_snapshot(item: dict[str, object], language: str) -> str:
-    if language == "zh":
-        return (
-            f"{item.get('name', '')} [{item.get('instance_id', '')}]："
-            f"{item.get('quantity_text', '')}；"
-            f"入库 {_display_value(item.get('stocked_at'), language)}；"
-            f"过期 {_display_value(item.get('expires_at'), language)}；"
-            f"日期来源 {item.get('expiry_source', '')}；"
-            f"最后确认 {_display_value(item.get('last_confirmed_at'), language)}"
-        )
-    return (
-        f"{item.get('name', '')} [{item.get('instance_id', '')}]: "
-        f"{item.get('quantity_text', '')}; "
-        f"stocked {_display_value(item.get('stocked_at'), language)}; "
-        f"expires {_display_value(item.get('expires_at'), language)}; "
-        f"expiry source {item.get('expiry_source', '')}; "
-        f"last confirmed {_display_value(item.get('last_confirmed_at'), language)}"
-    )
+    expiry = _display_date(item.get("expires_at"), language)
+    label = "过期" if language == "zh" else "expires"
+    return f"{item.get('name', '')}：{item.get('quantity_text', '')}；{label} {expiry}"
+
+
+def _display_date(value: object, language: str) -> str:
+    if not value:
+        return "未知" if language == "zh" else "unknown"
+    from zoneinfo import ZoneInfo
+    from app.config import get_settings
+    try:
+        return datetime.fromisoformat(str(value)).astimezone(
+            ZoneInfo(get_settings().application_timezone)
+        ).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return "未知" if language == "zh" else "unknown"
 
 
 def _display_value(value: object, language: str) -> str:

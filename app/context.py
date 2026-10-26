@@ -46,6 +46,7 @@ class AgentContext(BaseModel):
     request_text: str
     intent: str = "unknown"
     ingredients: list[Ingredient] = Field(default_factory=list)
+    inventory_snapshot: list[dict[str, object]] | None = None
     allergens: list[str] = Field(default_factory=list)
     allergen_intolerances: list[str] = Field(default_factory=list)
     custom_allergens: list[str] = Field(default_factory=list)
@@ -77,3 +78,21 @@ class AgentResult(BaseModel):
     profile_proposals: list[ProfileProposal] = Field(default_factory=list)
     segment_id: str = ""
     recipe_options: list[dict[str, object]] = Field(default_factory=list)
+
+    def public_payload(self) -> dict[str, object]:
+        payload = self.model_dump(mode="json", exclude={"tool_history", "audit_reason"})
+        if self.awaiting_vision_confirmation:
+            state = "awaiting_vision_confirmation"
+        elif self.audit_reason in {"task_impossible", "retry_exhausted", "invalid_supervisor_output"}:
+            state = "failed"
+        elif self.blocked:
+            state = "blocked"
+        elif any(proposal.status == "pending" for proposal in self.profile_proposals) or any(
+            entry.get("status") != "error" and isinstance(entry.get("result"), dict)
+            and entry["result"].get("status") == "pending" for entry in self.tool_history
+        ):
+            state = "awaiting_confirmation"
+        else:
+            state = "completed"
+        payload["state"] = state
+        return payload

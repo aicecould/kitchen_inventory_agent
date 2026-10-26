@@ -51,7 +51,7 @@ def test_agent_tool_round_trip_produces_exactly_one_query_row(tmp_path):
     model = ToolModel(responses=[
         AIMessage(content="", tool_calls=[{"name": "lookup", "args": {"name": "鸡蛋"}, "id": "call-1"}],
                   usage_metadata={"input_tokens": 10, "output_tokens": 3, "total_tokens": 13}),
-        AIMessage(content="有鸡蛋", usage_metadata={"input_tokens": 15, "output_tokens": 4, "total_tokens": 19}),
+        AIMessage(content="有鸡蛋", response_metadata={"model_name": "deepseek-test"}, usage_metadata={"input_tokens": 15, "output_tokens": 4, "total_tokens": 19}),
     ])
     with request_context("alice", "segment-1"), logged_span(
         store, "request", "test", prompt={"text": "有鸡蛋吗"}
@@ -154,6 +154,7 @@ def test_cli_always_exports_whole_queries_and_preserves_missing_usage(tmp_path):
         for usage in (None, {"prompt_tokens": 12, "completion_tokens": 3, "prompt_cache_hit_tokens": 8}):
             with logged_span(store, "llm", "agent", model="m") as detail:
                 detail["usage"] = usage
+                detail["model"] = "m"
         query["content"] = "中文"
     command = [sys.executable, "-m", "app.log_analysis", "--db", str(store.path)]
     exported = [json.loads(line) for line in subprocess.check_output(

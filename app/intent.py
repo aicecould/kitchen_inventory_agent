@@ -64,6 +64,9 @@ _CONTEXTUAL_PATTERN = re.compile(
 def route_deterministically(text: str) -> RouteDecision:
     normalized = text.strip()
 
+    if re.search(r"推荐.*(?:菜|食谱)|(?:菜谱|食谱).*推荐|(?:库存|食材).*(?:做什么|做[一哪什].*菜)", normalized):
+        return RouteDecision("supported", "recipe.search", {})
+
     if _CANCEL_PATTERN.fullmatch(normalized):
         return RouteDecision("supported", "request.cancel", {})
     if _GREETING_PATTERN.fullmatch(normalized):
@@ -130,10 +133,10 @@ def match_simple_inventory_operation(text: str) -> SimpleInventoryOperation | No
 def match_intent(text: str) -> str:
     normalized = text.strip().lower()
 
+    if any(keyword in normalized for keyword in ("食谱", "菜谱", "做什么", "推荐一道菜")) or re.search(r"推荐.*菜", normalized):
+        return "recipe"
     if any(keyword in normalized for keyword in ("库存", "还有", "剩余", "添加食材")):
         return "inventory"
-    if any(keyword in normalized for keyword in ("食谱", "菜谱", "做什么", "推荐一道菜")):
-        return "recipe"
     if any(keyword in normalized for keyword in ("订单", "购物车", "下单")):
         return "order_unsupported"
     return "unknown"

@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from langchain_openai import ChatOpenAI
+from app.llm import ObservedChatOpenAI as ChatOpenAI
 from app.llm import chat_model_kwargs
 from pydantic import BaseModel
 

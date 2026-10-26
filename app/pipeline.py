@@ -169,7 +169,9 @@ class KitchenPipeline:
                                "audit_reason": result.audit_reason,
                                "execution_trace": result.execution_trace,
                                "tool_history": result.tool_history,
-                               "profile_proposals": result.profile_proposals}
+                               "profile_proposals": result.profile_proposals,
+                               "recipe_options": result.recipe_options,
+                               "public_response": result.public_payload()}
             return result
 
     def _process_request(
@@ -771,12 +773,23 @@ class KitchenPipeline:
             if reconciliation_task_id is not None
             else self.tasks.repository.get_active(user_id)
         )
+        inventory_snapshot = None
+        if match_intent(text) == "recipe" and "库存" in text:
+            inventory_snapshot = trace.run(
+                "database", "inventory_recipe_context", self.inventory.list_instances,
+                lambda values: f"{len(values)} item(s)",
+            )
+            prior_tool_history.append({
+                "tool": "list_inventory_instances", "arguments": {},
+                "result": inventory_snapshot, "origin": "business_rule",
+            })
         context = AgentContext(
             user_id=user_id,
             segment_id=segment_id or self.history.reserve_segment_id(),
             request_text=text,
             intent=match_intent(text),
             ingredients=ingredients,
+            inventory_snapshot=inventory_snapshot,
             allergens=self.profile.allergens,
             allergen_intolerances=self.profile.allergen_intolerances,
             custom_allergens=self.profile.custom_allergens,

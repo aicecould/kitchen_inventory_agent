@@ -95,13 +95,13 @@
             </div>
           </div>
 
-          <section class="task-panel" id="task-panel" aria-label="当前烹饪 task">
+          <section class="task-panel" id="task-panel" aria-label="当前烹饪任务">
             <div class="task-panel-heading">
               <span>COOKING TASK</span>
-              <button id="clear-context" type="button">清空上下文与 task</button>
+              <button id="clear-context" type="button">清空对话与烹饪任务</button>
             </div>
             <div id="task-list" class="task-list">
-              <p class="task-empty">正在读取 task…</p>
+              <p class="task-empty">正在读取烹饪任务…</p>
             </div>
           </section>
 
@@ -210,10 +210,10 @@
             <div id="recipe-options" class="recipe-options"></div>
             <div id="profile-proposal-list" class="profile-proposal-list" hidden></div>
           </article>
-          <article class="trace-card">
-            <div class="answer-label">EXECUTION TRACE</div>
+          <details class="trace-card">
+            <summary class="answer-label">诊断信息</summary>
             <div id="tool-trace" class="tool-trace"></div>
-          </article>
+          </details>
         </div>
       </section>
 

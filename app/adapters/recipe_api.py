@@ -149,6 +149,7 @@ class DeepSeekWebSearchClient:
             if not isinstance(result, dict):
                 raise ValueError("DeepSeek web search returned a non-object response")
             span["content"] = result
+            span["model"] = result.get("model")
             span["tool_calls"] = [block for block in result.get("content", [])
                                   if isinstance(block, dict) and block.get("type") in {"server_tool_use", "tool_use"}]
             span["usage"] = result.get("usage")

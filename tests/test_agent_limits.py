@@ -85,7 +85,7 @@ def test_agent_allows_exact_sixty_thousand_character_input(
     )
     monkeypatch.setattr(
         "app.agent.create_agent",
-        lambda model, tools, system_prompt: FakeAgentExecutor(),
+        lambda model, tools, system_prompt, middleware: FakeAgentExecutor(),
     )
 
     result = agent.run(context)

@@ -65,6 +65,7 @@ def test_infer_returns_future_aware_structured_expiry(
         "temperature": 0,
         "timeout": 7,
         "max_retries": 1,
+        "use_responses_api": False,
         "max_tokens": 123,
     }
     assert model.prompt is not None

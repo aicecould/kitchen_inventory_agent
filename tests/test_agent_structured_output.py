@@ -72,3 +72,23 @@ def test_tool_history_decodes_json_results_for_recipe_selection() -> None:
     assert history[0]['result'] == [{'id': 'local-1', 'title': 'Tomato Egg'}]
     assert history[1]['result'] == {'action_id': 'act_1', 'status': 'pending'}
     assert history[2]['result'] == 'plain text result'
+
+
+def test_empty_model_response_never_returns_private_user_context():
+    import pytest
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    with pytest.raises(RuntimeError, match="no final text"):
+        KitchenAgent._last_text([
+            HumanMessage(content='private structured inventory context'),
+            AIMessage(content=""),
+        ])
+
+
+def test_truncated_model_text_never_becomes_a_completed_answer():
+    import pytest
+    from langchain_core.messages import AIMessage
+
+    with pytest.raises(RuntimeError, match="truncated"):
+        KitchenAgent._last_text([AIMessage(content="incomplete recipe",
+                                           response_metadata={"finish_reason": "length"})])

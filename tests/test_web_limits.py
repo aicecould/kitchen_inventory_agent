@@ -18,6 +18,36 @@ from PIL import Image
 client = TestClient(app)
 
 
+def test_public_answer_keeps_card_references_but_omits_internal_records(monkeypatch):
+    from app.context import AgentResult
+    from app import web
+
+    result = AgentResult(content="推荐 Tomato Soup（番茄汤）。", segment_id="hist_" + "1" * 32,
+                         tool_history=[{"tool": "search_recipes", "result": ["internal"]}],
+                         audit_reason="internal reason",
+                         recipe_options=[{"id": "recipe-1", "title": "Tomato Soup"}])
+    monkeypatch.setattr(web, "get_pipeline", lambda: SimpleNamespace(process_request=lambda **kwargs: result))
+    response = client.post("/api/process", data={"text": "推荐一道菜", "language": "zh"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["recipe_options"] == result.recipe_options
+    assert payload["segment_id"] == result.segment_id
+    assert "tool_history" not in payload
+    assert "audit_reason" not in payload
+    assert "internal" not in response.text
+
+
+def test_fixed_failure_answer_is_not_exposed_as_completed():
+    from app.context import AgentResult
+
+    result = AgentResult(content="当前无法完成该请求，库存未发生变化。", audit_reason="task_impossible")
+    assert result.public_payload()["state"] == "failed"
+    result = AgentResult(content="请确认。", tool_history=[{
+        "tool": "propose_add_inventory_instance", "result": {"status": "pending"},
+    }])
+    assert result.public_payload()["state"] == "awaiting_confirmation"
+
+
 class _ElementCollector(HTMLParser):
     """Collect the attributes of specifically identified HTTP-served elements."""
 
@@ -325,7 +355,7 @@ def test_frontend_script_exposes_full_ids_and_all_confirmation_preview_labels() 
         "同名全部删除",
         "库存校准",
         "预计删除数量",
-        "日期来源",
+        "日期依据",
     ):
         assert label in script
 

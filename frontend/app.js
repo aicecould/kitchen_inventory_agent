@@ -283,7 +283,7 @@ async function loadInventory() {
       <article class="inventory-item">
         <header class="inventory-item-heading">
           <strong>${escapeHtml(item.name)}</strong>
-          <span class="inventory-instance-id" title="完整库存实例 ID">${escapeHtml(item.instance_id)}</span>
+          <details class="inventory-instance-id"><summary>操作标识</summary><code>${escapeHtml(item.instance_id)}</code></details>
         </header>
         <p class="inventory-quantity">${escapeHtml(item.quantity_text)}</p>
         <dl class="inventory-details">
@@ -329,9 +329,9 @@ async function loadPendingActions() {
         <div class="confirmation-seal">待<br>确认</div>
         <div class="confirmation-copy">
           <span>${escapeHtml(operationLabel(action.operation))}</span>
-          <h3>${escapeHtml(action.summary)}</h3>
+          <h3>${escapeHtml(actionPreviewTitle(action))}</h3>
           ${renderActionPreview(action)}
-          <small>${escapeHtml(action.action_id)} · 过期时间 ${formatTime(action.expires_at)}</small>
+          <small>请在 ${formatTime(action.expires_at)} 前确认</small>
         </div>
         <div class="confirmation-actions">
           <button type="button" class="cancel-action" data-action="cancel">取消</button>
@@ -465,11 +465,16 @@ function renderAgentResult(data) {
     data.segment_id || "",
     data.recipe_options || [],
     activeTask,
+    data.content || "",
   );
   profileProposalList.innerHTML = renderProfileProposalCards(data.profile_proposals || []);
   profileProposalList.hidden = !(data.profile_proposals || []).length;
-  resultState.textContent = data.blocked ? "已拦截" : "完成";
-  resultState.classList.toggle("blocked", data.blocked);
+  const state = data.state || (data.blocked ? "blocked" : "completed");
+  resultState.textContent = ({
+    completed: "完成", awaiting_confirmation: "待确认",
+    awaiting_vision_confirmation: "等待校对", failed: "未完成", blocked: "已拦截",
+  })[state] || "未完成";
+  resultState.classList.toggle("blocked", state === "blocked" || state === "failed");
   renderExecutionTrace(data.execution_trace || []);
 }
 
@@ -658,6 +663,16 @@ function previewField(label, value, className = "") {
   `;
 }
 
+function actionPreviewTitle(action) {
+  const preview = action.preview || {};
+  const item = preview.proposed || preview.current || {};
+  return [item.name || preview.name, item.quantity_text].filter(Boolean).join(" · ") || "请核对下方操作预览";
+}
+
+function expirySourceLabel(value) {
+  return ({ llm: "模型估算，请核对", user: "用户提供", unknown: "尚未确定" })[value] || "尚未确定";
+}
+
 function previewDate(value) {
   return value ? formatLocalDateTime(value, "未知") : "未知";
 }
@@ -665,11 +680,10 @@ function previewDate(value) {
 function currentInstanceFields(current, { includeConfirmed = false } = {}) {
   if (!current || typeof current !== "object") return [];
   const fields = [
-    previewField("完整实例 ID", current.instance_id, "confirmation-preview-id"),
     previewField("食材", current.name),
     previewField("当前数量", current.quantity_text),
     previewField("当前过期时间", previewDate(current.expires_at)),
-    previewField("日期来源", current.expiry_source),
+    previewField("日期依据", expirySourceLabel(current.expiry_source)),
   ];
   if (includeConfirmed) {
     fields.push(previewField("上次确认时间", previewDate(current.last_confirmed_at)));
@@ -690,7 +704,7 @@ function renderActionPreview(action) {
       previewField("食材", proposed.name),
       previewField("拟新增数量", proposed.quantity_text),
       previewField("拟定过期时间", previewDate(proposed.expires_at)),
-      previewField("日期来源", proposed.expiry_source),
+      previewField("日期依据", expirySourceLabel(proposed.expiry_source)),
     ];
   } else if (action.operation === "inventory.replace") {
     const proposed = preview.proposed || {};
@@ -698,7 +712,7 @@ function renderActionPreview(action) {
       ...currentInstanceFields(preview.current),
       previewField("拟替换数量", proposed.quantity_text),
       previewField("拟定过期时间", previewDate(proposed.expires_at)),
-      previewField("拟定日期来源", proposed.expiry_source),
+      previewField("拟定日期依据", expirySourceLabel(proposed.expiry_source)),
     ];
   } else if (action.operation === "inventory.remove") {
     fields = currentInstanceFields(preview.current);
@@ -714,8 +728,7 @@ function renderActionPreview(action) {
       <ul class="confirmation-preview-items">
         ${previewItems.map((item) => `
           <li>
-            <code>${escapeHtml(item.instance_id)}</code>
-            <span>${escapeHtml(item.name)} · ${escapeHtml(item.quantity_text)} · 过期 ${escapeHtml(previewDate(item.expires_at))} · 日期来源 ${escapeHtml(item.expiry_source)}</span>
+            <span>${escapeHtml(item.name)} · ${escapeHtml(item.quantity_text)} · 过期 ${escapeHtml(previewDate(item.expires_at))} · 日期依据 ${escapeHtml(expirySourceLabel(item.expiry_source))}</span>
           </li>
         `).join("")}
       </ul>

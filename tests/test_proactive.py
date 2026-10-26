@@ -168,6 +168,7 @@ def test_valid_model_reminder_uses_existing_settings_and_recent_history(
         "temperature": 0,
         "timeout": 7,
         "max_retries": 1,
+        "use_responses_api": False,
         "max_tokens": 123,
     }
     assert model.prompt is not None

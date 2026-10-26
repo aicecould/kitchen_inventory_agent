@@ -36,7 +36,7 @@
             <div><dt>写入后</dt><dd>${escapeHtml(proposed)}</dd></div>
           </dl>
           <p>${escapeHtml(proposal.reason || "")}</p>
-          <small>证据 ${evidence}</small>
+          <details><summary>依据记录</summary>${evidence}</details>
           <div class="profile-proposal-actions">
             <button type="button" data-decision="reject">拒绝</button>
             <button type="button" data-decision="confirm">确认写入</button>

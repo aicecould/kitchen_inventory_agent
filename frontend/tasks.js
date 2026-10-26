@@ -47,7 +47,7 @@
   function renderTaskPanel(tasks) {
     const values = Array.isArray(tasks) ? tasks : [];
     if (!values.length) {
-      return '<p class="task-empty">尚未确认菜谱；task 挂件不会影响对话上下文。</p>';
+      return '<p class="task-empty">选择菜谱后，可记录份数和烹饪进度。</p>';
     }
     return values.map((task) => {
       const recipe = task.recipe || {};
@@ -61,7 +61,7 @@
         <button type="button" data-task-action="servings">更新份数</button>
         <button type="button" class="task-primary" data-task-action="cooked">已烹饪</button>
       ` : paused ? `
-        <button type="button" data-task-action="activate">切换到此 task</button>
+        <button type="button" data-task-action="activate">继续这道菜</button>
       ` : open ? `
         <button type="button" data-task-action="close">跳过库存更新</button>
       ` : "";
@@ -70,7 +70,7 @@
           data-task-id="${escapeHtml(task.task_id)}"
           data-task-version="${escapeHtml(task.version)}">
           <div class="task-copy">
-            <span>${active ? "当前 task" : paused ? "暂停" : "等待库存核对"}</span>
+            <span>${active ? "正在烹饪" : paused ? "暂停" : "等待库存核对"}</span>
             <strong>${escapeHtml(recipe.title || task.query_text)}</strong>
             <small>${escapeHtml(task.query_text)} · ${escapeHtml(task.servings)} 人份</small>
           </div>
@@ -80,9 +80,9 @@
     }).join("");
   }
 
-  function renderRecipeOptions(segmentId, recipes, activeTask) {
+  function renderRecipeOptions(segmentId, recipes, activeTask, answer = "") {
     if (!Array.isArray(recipes) || !recipes.length) return "";
-    return recipes.map((recipe) => {
+    const renderCard = (recipe) => {
       const ingredients = Array.isArray(recipe.ingredients)
         ? recipe.ingredients.slice(0, 4).join(" · ")
         : "";
@@ -90,7 +90,7 @@
         <article class="recipe-option" data-segment-id="${escapeHtml(segmentId)}"
           data-recipe-id="${escapeHtml(recipe.id)}">
           <div>
-            <span>RECIPE RESULT</span>
+            <span>候选菜谱</span>
             <strong>${escapeHtml(recipe.title)}</strong>
             <small>${escapeHtml(ingredients)}</small>
           </div>
@@ -99,11 +99,17 @@
           </label>
           <div class="recipe-option-actions">
             <button type="button" data-recipe-action="confirm">确认此菜谱</button>
-            ${activeTask ? '<button type="button" data-recipe-action="new">作为新 task</button>' : ""}
+            ${activeTask ? '<button type="button" data-recipe-action="new">另开烹饪任务</button>' : ""}
           </div>
         </article>
       `;
-    }).join("");
+    };
+    const recommended = recipes.filter((recipe) => answer.includes(recipe.title));
+    const primary = recommended.length ? recommended : recipes.slice(0, 1);
+    const others = recipes.filter((recipe) => !primary.includes(recipe));
+    return primary.map(renderCard).join("") + (others.length
+      ? `<details class="recipe-alternatives"><summary>其他候选菜谱（${others.length}）</summary>${others.map(renderCard).join("")}</details>`
+      : "");
   }
 
   return {
