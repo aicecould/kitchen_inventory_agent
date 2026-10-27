@@ -96,3 +96,18 @@ ORDER BY started_at DESC;
 不修改模型消息、工具结果或历史回答。重复执行不重复修改已迁移记录。
 新请求的 `result.public_response` 保存实际提供给前端的字段，原始 `tool_history`
 和内部审计原因只保留在日志与内部处理链中。完整业务规则见 [business_flow.md](business_flow.md)。
+
+
+## 前端本轮日志
+
+结果区的“本轮日志”读取当前请求在 SQLite 中已经提交的记录，按 step 展示执行中、完成或失败，
+展开步骤可查看完整输入、输出、参数、用量及时间。图片校对后的继续处理也使用同样的流式日志。
+`POST /api/process/stream` 和 `POST /api/vision-confirmations/{id}/resolve/stream`
+通过 SSE 返回 `log_status`、`steps`、`result` 或 `error` 事件；原 JSON 接口继续可用。
+
+业务执行在线程池中进行，避免阻塞流式推送。每条连接使用一个只读数据库连接，每约 250 ms
+检查 SQLite `data_version`；版本变化时才按当前 Query ID 与用户读取记录，只发送变化的 step。
+请求结束前再读取一次最终状态，随后关闭连接。此间隔是检测目标，不是端到端延迟保证；
+很快完成的步骤可能直接显示完成状态。前端复用步骤节点，只有展开时才格式化完整 JSON。
+日志关闭、不可读和连接中断均显示提示；错误发生前已收到的步骤保留。每 15 秒发送一次心跳，
+浏览器断开不会取消已经开始的业务操作，避免中断库存写入。当前展示页沿用固定 showcase 用户。

@@ -10,6 +10,10 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+from starlette.concurrency import run_in_threadpool
+
+from app.log_stream import query_stream
+from app.llm_log import log_store, logged_span, request_context
 
 from app.allergens import OFFICIAL_INTOLERANCES, OFFICIAL_INTOLERANCE_SET
 from app.config import get_settings
@@ -575,7 +579,9 @@ async def process_request(
         duration_ms=validation_duration_ms,
     )
     try:
-        result = get_pipeline().process_request(
+        pipeline = await run_in_threadpool(get_pipeline)
+        result = await run_in_threadpool(
+            pipeline.process_request,
             user_id=SHOWCASE_USER_ID,
             text=text,
             image_bytes=image_bytes,
@@ -610,6 +616,36 @@ async def process_request(
             detail=detail,
         ) from exc
     return result.public_payload()
+
+
+@app.post("/api/process/stream")
+async def process_request_stream(
+    text: str = Form(..., min_length=1),
+    language: str = Form("zh", min_length=2, max_length=10),
+    image: UploadFile | None = File(default=None),
+    reconciliation_task_id: str | None = Form(default=None),
+):
+    return query_stream(
+        lambda: process_request(text, language, image, reconciliation_task_id),
+        get_settings(), SHOWCASE_USER_ID,
+    )
+
+
+@app.post("/api/vision-confirmations/{confirmation_id}/resolve/stream")
+async def resolve_vision_stream(confirmation_id: str, payload: VisionResolution):
+    def resolve():
+        with request_context(SHOWCASE_USER_ID, ""), logged_span(
+            log_store(get_settings()), "request", "resolve_vision_confirmation",
+            prompt={"confirmation_id": confirmation_id, "selections": payload.model_dump()},
+        ) as span:
+            result = resolve_vision_confirmation(confirmation_id, payload)
+            span["content"] = result
+            return result
+
+    return query_stream(
+        lambda: run_in_threadpool(resolve),
+        get_settings(), SHOWCASE_USER_ID,
+    )
 
 
 @app.get("/", include_in_schema=False)

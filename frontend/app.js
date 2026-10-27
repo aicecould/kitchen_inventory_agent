@@ -24,6 +24,7 @@ const recipeOptions = document.querySelector("#recipe-options");
 const taskList = document.querySelector("#task-list");
 const clearContextButton = document.querySelector("#clear-context");
 const toolTrace = document.querySelector("#tool-trace");
+const logView = QueryLogs.createLogView(toolTrace, document.querySelector("#log-status"));
 const inventoryList = document.querySelector("#inventory-list");
 const globalStatus = document.querySelector("#global-status");
 const proactiveReminder = document.querySelector("#proactive-reminder");
@@ -411,20 +412,20 @@ async function resolveVisionCheckpoint(selections) {
   const confirmationId = visionCheckpoint.dataset.confirmationId;
   const buttons = visionConfirmationForm.querySelectorAll("button");
   buttons.forEach((button) => { button.disabled = true; });
+  logView.reset();
   visionCheckpointStatus.textContent = "已记录校对，正在继续原请求…";
   resultState.textContent = "继续处理";
   answerContent.innerHTML = document.querySelector("#loading-template").innerHTML;
   try {
     const response = await fetch(
-      `/api/vision-confirmations/${encodeURIComponent(confirmationId)}/resolve`,
+      `/api/vision-confirmations/${encodeURIComponent(confirmationId)}/resolve/stream`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ selections }),
       },
     );
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || "图片校对结果提交失败");
+    const data = await QueryLogs.readQueryStream(response, logView.update);
     visionCheckpoint.hidden = true;
     renderAgentResult(data);
     await loadInventory();
@@ -475,7 +476,6 @@ function renderAgentResult(data) {
     awaiting_vision_confirmation: "等待校对", failed: "未完成", blocked: "已拦截",
   })[state] || "未完成";
   resultState.classList.toggle("blocked", state === "blocked" || state === "failed");
-  renderExecutionTrace(data.execution_trace || []);
 }
 
 recipeOptions.addEventListener("click", async (event) => {
@@ -548,7 +548,7 @@ clearContextButton.addEventListener("click", async () => {
     resultSection.hidden = true;
     answerContent.innerHTML = "";
     recipeOptions.innerHTML = "";
-    toolTrace.innerHTML = "";
+    logView.reset();
     await loadTasks();
   } catch (error) {
     taskList.innerHTML = `<p class="task-empty">${escapeHtml(error.message)}</p>`;
@@ -587,13 +587,12 @@ async function submitAgentPayload(payload) {
   resultState.textContent = "处理中";
   resultState.classList.remove("blocked");
   answerContent.innerHTML = document.querySelector("#loading-template").innerHTML;
-  toolTrace.innerHTML = '<p class="empty-note">等待后端执行轨迹…</p>';
+  logView.reset();
   resultSection.scrollIntoView({ behavior: "smooth", block: "start" });
 
   try {
-    const response = await fetch("/api/process", { method: "POST", body: payload });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || "请求失败");
+    const response = await fetch("/api/process/stream", { method: "POST", body: payload });
+    const data = await QueryLogs.readQueryStream(response, logView.update);
 
     renderAgentResult(data);
     if (data.awaiting_vision_confirmation && data.vision_confirmation) {
@@ -610,7 +609,7 @@ async function submitAgentPayload(payload) {
     answerContent.textContent = error.message;
     resultState.textContent = "出错";
     resultState.classList.add("blocked");
-    toolTrace.innerHTML = '<p class="empty-note">本次请求没有可展示的工具记录。</p>';
+    document.querySelector("#log-status").textContent += " · 请求未完成，已保留收到的日志。";
   } finally {
     submitButton.disabled = false;
   }
@@ -633,19 +632,6 @@ form.addEventListener("submit", async (event) => {
   if (!imageInput.files.length) payload.delete("image");
   await submitAgentPayload(payload);
 });
-
-function renderExecutionTrace(trace) {
-  if (!trace.length) {
-    toolTrace.innerHTML = '<p class="empty-note">本次请求没有可展示的执行轨迹。</p>';
-    return;
-  }
-  toolTrace.innerHTML = trace.map((entry, index) => `
-    <div class="trace-entry trace-${escapeHtml(entry.status)}">
-      <strong>${String(index + 1).padStart(2, "0")} · ${escapeHtml(entry.stage)} / ${escapeHtml(entry.name)}</strong>
-      <small>${escapeHtml(entry.status)} · ${Number(entry.duration_ms || 0)} ms · ${escapeHtml(shorten(entry.detail || "", 180))}</small>
-    </div>
-  `).join("");
-}
 
 function shorten(value, limit) {
   return value.length > limit ? `${value.slice(0, limit)}…` : value;

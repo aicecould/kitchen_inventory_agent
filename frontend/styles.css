@@ -387,3 +387,7 @@ footer { width: min(1240px, calc(100% - 48px)); margin: 0 auto; padding: 24px 0 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
 }
+
+.trace-entry summary { cursor: pointer; font: 700 12px/1.6 monospace; overflow-wrap: anywhere; }
+.trace-entry pre { max-height: 480px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 monospace; }
+.trace-running { border-left-color: var(--mustard); }

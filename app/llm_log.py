@@ -386,10 +386,21 @@ def logged_span(store: LLMLogStore | None, kind: str, name: str,
     finally:
         _context.reset(token)
 
+
+@contextmanager
+def query_scope(query_id: str) -> Iterator[None]:
+    """Associate a web stream with its durable query across worker threads."""
+    token = _context.set({**(_context.get() or {}), "trace_id": query_id})
+    try:
+        yield
+    finally:
+        _context.reset(token)
+
+
 @contextmanager
 def request_context(user_id: str, segment_id: str, *,
                     metadata: dict[str, Any] | None = None) -> Iterator[None]:
-    token = _context.set({"trace_id": str(uuid4()), "user_id": user_id,
+    token = _context.set({"trace_id": (_context.get() or {}).get("trace_id") or str(uuid4()), "user_id": user_id,
                           "segment_id": segment_id,
                           "metadata": {**(_context.get() or {}).get("metadata", {}), **(metadata or {})}})
     try:
